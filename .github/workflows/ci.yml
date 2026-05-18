@@ -82,10 +82,49 @@ jobs:
             --threshold 90 \
             --coverage-xml artifacts/coverage/coverage.xml
 
+  conformance:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Checkout nnrp-conformance action
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ github.repository_owner }}/nnrp-conformance
+          path: nnrp-conformance-action
+          fetch-depth: 1
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e .[dev] build
+
+      - name: Run suite-owned conformance action
+        uses: ./nnrp-conformance-action/.github/actions/run-conformance
+        with:
+          protocol-version: nnrp-1-preview2
+          capabilities-path: conformance/nnrp-1-preview2.capabilities.json
+          working-directory: .
+          artifact-name: nnrp-py-conformance-preview2
+          sdk-vector-command: >-
+            python -m nnrp.tools.conformance
+            --protocol-version nnrp-1-preview2
+            --output $env:NNRP_CONFORMANCE_SDK_VECTOR_OUTPUT
+
   required-checks:
     needs:
       - commit-policy
       - test
+      - conformance
     if: always()
     runs-on: ubuntu-latest
 
@@ -100,5 +139,10 @@ jobs:
 
           if [ "${{ needs.test.result }}" != "success" ]; then
             echo "Lint, test, total coverage, or incremental coverage validation failed."
+            exit 1
+          fi
+
+          if [ "${{ needs.conformance.result }}" != "success" ]; then
+            echo "Conformance validation failed."
             exit 1
           fi

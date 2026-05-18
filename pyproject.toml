@@ -34,6 +34,7 @@ Repository = "https://github.com/NagareWorks/nnrp-py"
 Issues = "https://github.com/NagareWorks/nnrp-py/issues"
 
 [project.scripts]
+nnrp-export-conformance-vectors = "nnrp.tools.conformance:main"
 nnrp-quic-smoke = "nnrp.tools.smoke:main"
 
 [project.optional-dependencies]

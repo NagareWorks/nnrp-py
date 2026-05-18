@@ -1,0 +1,22 @@
+{
+  "implementation_name": "nnrp-py",
+  "protocol_version": "nnrp-1-preview2",
+  "supports": [
+    "body_region.prelude",
+    "cache.lifecycle",
+    "control.client_hello",
+    "control.session_patch_ack",
+    "flow_update",
+    "frame_submit.mixed",
+    "object_reference.cache",
+    "payload.tensor",
+    "payload.typed",
+    "result_hint",
+    "result_push.degraded",
+    "result_push.partial",
+    "result_push.stale_reuse",
+    "transport.probe",
+    "transport.quic",
+    "transport.tcp"
+  ]
+}

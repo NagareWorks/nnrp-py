@@ -1,5 +1,6 @@
 """Protocol-side helper tools such as replay or golden-vector generators."""
 
+from nnrp.tools.conformance import build_conformance_vector_manifest
 from nnrp.tools.golden_vectors import (
     CrossLanguageGoldenVector,
     export_cross_language_golden_vectors,
@@ -57,6 +58,7 @@ from nnrp.tools.smoke import (
 
 __all__ = [
     "REPLAY_CAMERA_BLOCK_MAGIC",
+    "build_conformance_vector_manifest",
     "CrossLanguageGoldenVector",
     "FrameResultBuffer",
     "WireSummary",

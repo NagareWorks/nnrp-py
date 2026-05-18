@@ -163,9 +163,9 @@ async with connect_preview2_client_session(
 		print(result.payload_kinds)
 ```
 
-## Cross-SDK Golden Vectors
+## Conformance Vector Export
 
-`nnrp.tools` also exposes a stable cross-language golden-vector manifest so other SDKs can import the same packet and metadata fixtures instead of copying Python test constants by hand.
+`nnrp.tools` exposes the SDK-side conformance exporter used by the shared `nnrp-conformance` action. The Python SDK emits its own vector manifest, and the suite compares that output against the canonical versioned baseline.
 
 ```python
 from nnrp.tools import (
@@ -180,7 +180,7 @@ print(vectors[0].name)
 print(manifest_json)
 ```
 
-The exported manifest currently covers the current `FLOW_UPDATE`, `RESULT_HINT`, metadata, body-region, object-reference, and typed-payload fixtures used for cross-SDK wire alignment.
+The exported manifest currently covers the current `FLOW_UPDATE`, `RESULT_HINT`, metadata, body-region, object-reference, and typed-payload fixtures that the suite uses for wire-alignment comparison.
 
 ## Current Wire Additions
 

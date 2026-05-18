@@ -2,7 +2,7 @@
 
 ## Validation
 
-- [ ] Add conformance tests that compare Python preview3 bindings against Rust canonical golden vectors.
+- [ ] Add a preview3 conformance exporter and wire it into the suite-owned conformance action against the Rust canonical vectors.
 - [ ] Add Python integration tests that exercise multi-session preview3 flows on one live connection.
 - [ ] Add Python integration tests for cache lease expiry, schema mismatch, operation cancellation, priority-aware flow updates, and resume paths.
 - [ ] Keep the active Python preview regression suite green while preview3 Rust-backed helpers replace the prior preview surface.

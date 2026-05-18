@@ -1,0 +1,509 @@
+"""Server-facing current transport helpers."""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+
+from nnrp.adapters import (
+    NnrpQuicConnection,
+    NnrpQuicListener,
+    NnrpTcpConnection,
+    NnrpTcpListener,
+)
+from nnrp.client.transport import SubmitRequest, TypedPayload
+from nnrp.core import (
+    BudgetPolicy,
+    CacheObjectKind,
+    ClientHelloMetadata,
+    ControlExtensionEntry,
+    FlowUpdateMetadata,
+    FrameSubmitMetadata,
+    HeaderFlags,
+    MessageType,
+    NnrpPacket,
+    ObjectReferenceBlock,
+    PayloadKind,
+    ResultClass,
+    ResultFlags,
+    ServerHelloAckMetadata,
+    SubmitMode,
+    TensorBodyView,
+    TensorSectionData,
+    TileIndexMode,
+    TransportId,
+    WireFormat,
+    build_flow_update_packet,
+    build_result_drop_packet,
+    build_result_push_mixed_packet,
+    build_result_push_packet,
+    build_result_push_typed_payload_packet,
+    unpack_control_extension_block,
+    unpack_inline_object_blocks,
+    unpack_object_reference_blocks,
+    unpack_tensor_body,
+    unpack_tile_index_block,
+    unpack_typed_payload_frames,
+    validate_frame_submit_body,
+)
+from nnrp.server.profile import ServerProfile
+
+ServerListener = NnrpQuicListener | NnrpTcpListener
+ServerConnection = NnrpQuicConnection | NnrpTcpConnection
+_SUPPORTED_PAYLOAD_KINDS = (
+    PayloadKind.TENSOR
+    | PayloadKind.TOKEN_CHUNK
+    | PayloadKind.AUDIO_CHUNK
+    | PayloadKind.VIDEO_CHUNK
+    | PayloadKind.STRUCTURED_EVENT
+    | PayloadKind.TOOL_DELTA
+    | PayloadKind.OPAQUE_BYTES
+)
+
+
+@dataclass(frozen=True, slots=True)
+class ClientHelloContext:
+    packet: NnrpPacket
+    metadata: ClientHelloMetadata
+    auth_block: bytes
+    control_extensions: tuple[ControlExtensionEntry, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class ReceivedSubmit:
+    packet: NnrpPacket
+    metadata: FrameSubmitMetadata
+    request: SubmitRequest
+    tensor_body: TensorBodyView | None = None
+
+
+@dataclass(slots=True)
+class ServerSession:
+    connection: ServerConnection
+    transport_id: TransportId
+    hello: ClientHelloContext
+    session_id: int
+    active_model_name: str = ""
+    server_profile: ServerProfile = field(default_factory=ServerProfile)
+
+    async def receive_submit(self, timeout: float | None = None) -> ReceivedSubmit:
+        packet = await self.connection.receive_submit_packet(timeout=timeout)
+        if packet.header.msg_type is not MessageType.FRAME_SUBMIT:
+            raise ValueError(f"expected FRAME_SUBMIT, got {packet.header.msg_type.name}")
+        if packet.header.wire_format is not WireFormat.CURRENT:
+            raise ValueError(f"expected current FRAME_SUBMIT, got {packet.header.wire_format.name}")
+        if int(packet.header.session_id) != int(self.session_id):
+            raise ValueError(f"expected session_id {self.session_id}, got {int(packet.header.session_id)}")
+
+        metadata = FrameSubmitMetadata.unpack(packet.metadata)
+        request, tensor_body = _decode_submit_request(packet, metadata)
+        return ReceivedSubmit(
+            packet=packet,
+            metadata=metadata,
+            request=request,
+            tensor_body=tensor_body,
+        )
+
+    async def send_result(
+        self,
+        *,
+        frame_id: int,
+        tile_ids: tuple[int, ...] = (),
+        sections: tuple[TensorSectionData, ...] = (),
+        typed_payloads: tuple[TypedPayload, ...] = (),
+        result_flags: ResultFlags = ResultFlags.NONE,
+        active_profile_id: int = 0,
+        inference_ms: int = 0,
+        queue_ms: int = 0,
+        server_total_ms: int = 0,
+        status_code: int = 0,
+        tile_index_mode: TileIndexMode = TileIndexMode.RAW_U16,
+        tile_base_id: int = 0,
+        result_class: ResultClass = ResultClass.COMPLETE,
+        applied_budget_policy: BudgetPolicy = BudgetPolicy.NONE,
+        reused_frame_id: int = 0,
+        covered_tile_count: int | None = None,
+        dropped_tile_count: int = 0,
+        payload_kind_bitmap: PayloadKind = PayloadKind.TENSOR,
+        payload_frame_count: int = 0,
+        flags: HeaderFlags = HeaderFlags.NONE,
+        view_id: int = 0,
+        route_id: int = 0,
+        trace_id: int = 0,
+    ) -> int:
+        normalized_typed_payloads = tuple(payload for payload in typed_payloads)
+        if normalized_typed_payloads:
+            typed_frames = tuple(payload.to_core_frame() for payload in normalized_typed_payloads)
+            if tile_ids or sections:
+                packet = build_result_push_mixed_packet(
+                    session_id=self.session_id,
+                    frame_id=frame_id,
+                    tile_ids=tile_ids,
+                    sections=sections,
+                    frames=typed_frames,
+                    result_flags=result_flags,
+                    active_profile_id=active_profile_id,
+                    inference_ms=inference_ms,
+                    queue_ms=queue_ms,
+                    server_total_ms=server_total_ms,
+                    status_code=status_code,
+                    tile_index_mode=tile_index_mode,
+                    tile_base_id=tile_base_id,
+                    result_class=result_class,
+                    applied_budget_policy=applied_budget_policy,
+                    reused_frame_id=reused_frame_id,
+                    covered_tile_count=covered_tile_count,
+                    dropped_tile_count=dropped_tile_count,
+                    wire_format=WireFormat.CURRENT,
+                    flags=flags,
+                    view_id=view_id,
+                    route_id=route_id,
+                    trace_id=trace_id,
+                )
+            else:
+                packet = build_result_push_typed_payload_packet(
+                    session_id=self.session_id,
+                    frame_id=frame_id,
+                    frames=typed_frames,
+                    result_flags=result_flags,
+                    active_profile_id=active_profile_id,
+                    inference_ms=inference_ms,
+                    queue_ms=queue_ms,
+                    server_total_ms=server_total_ms,
+                    status_code=status_code,
+                    result_class=result_class,
+                    applied_budget_policy=applied_budget_policy,
+                    reused_frame_id=reused_frame_id,
+                    wire_format=WireFormat.CURRENT,
+                    flags=flags,
+                    view_id=view_id,
+                    route_id=route_id,
+                    trace_id=trace_id,
+                )
+        else:
+            packet = build_result_push_packet(
+                session_id=self.session_id,
+                frame_id=frame_id,
+                tile_ids=tile_ids,
+                sections=sections,
+                result_flags=result_flags,
+                active_profile_id=active_profile_id,
+                inference_ms=inference_ms,
+                queue_ms=queue_ms,
+                server_total_ms=server_total_ms,
+                status_code=status_code,
+                tile_index_mode=tile_index_mode,
+                tile_base_id=tile_base_id,
+                result_class=result_class,
+                applied_budget_policy=applied_budget_policy,
+                reused_frame_id=reused_frame_id,
+                covered_tile_count=covered_tile_count,
+                dropped_tile_count=dropped_tile_count,
+                payload_kind_bitmap=payload_kind_bitmap,
+                payload_frame_count=payload_frame_count,
+                wire_format=WireFormat.CURRENT,
+                flags=flags,
+                view_id=view_id,
+                route_id=route_id,
+                trace_id=trace_id,
+            )
+        return await self.connection.send_result_packet(packet)
+
+    async def send_result_drop(
+        self,
+        *,
+        frame_id: int,
+        flags: HeaderFlags = HeaderFlags.NONE,
+        view_id: int = 0,
+        route_id: int = 0,
+        trace_id: int = 0,
+    ) -> int:
+        packet = build_result_drop_packet(
+            session_id=self.session_id,
+            frame_id=frame_id,
+            wire_format=WireFormat.CURRENT,
+            flags=flags,
+            view_id=view_id,
+            route_id=route_id,
+            trace_id=trace_id,
+        )
+        return await self.connection.send_result_packet(packet)
+
+    async def send_flow_update(
+        self,
+        metadata: FlowUpdateMetadata,
+        *,
+        trace_id: int = 0,
+        flags: HeaderFlags = HeaderFlags.NONE,
+    ) -> None:
+        await self.connection.send_control_packet(
+            build_flow_update_packet(
+                metadata=metadata,
+                session_id=self.session_id,
+                trace_id=trace_id,
+                flags=flags,
+            )
+        )
+
+    async def close(self) -> None:
+        self.connection.close()
+        wait_closed = getattr(self.connection, "wait_closed", None)
+        if callable(wait_closed):
+            await wait_closed()
+
+
+async def accept_server_session(
+    listener: ServerListener,
+    *,
+    session_id: int | None = None,
+    active_model_name: str = "",
+    server_profile: ServerProfile | None = None,
+    timeout: float = 10.0,
+) -> ServerSession:
+    connection = await listener.accept(timeout=timeout)
+    try:
+        hello_packet = await connection.receive_control_packet(timeout=timeout)
+        if hello_packet.header.msg_type is not MessageType.CLIENT_HELLO:
+            raise ValueError(f"expected CLIENT_HELLO, got {hello_packet.header.msg_type.name}")
+        if hello_packet.header.wire_format is not WireFormat.CURRENT:
+            raise ValueError(f"expected current CLIENT_HELLO, got {hello_packet.header.wire_format.name}")
+
+        metadata = ClientHelloMetadata.unpack(hello_packet.metadata)
+        resolved_profile = server_profile or ServerProfile()
+        hello = ClientHelloContext(
+            packet=hello_packet,
+            metadata=metadata,
+            auth_block=_parse_hello_auth_block(hello_packet.body, metadata.auth_bytes),
+            control_extensions=_parse_hello_control_extensions(
+                hello_packet.body,
+                auth_bytes=metadata.auth_bytes,
+                control_extension_bytes=metadata.control_extension_bytes,
+            ),
+        )
+        resolved_session_id = int(metadata.requested_session_id) if session_id is None else int(session_id)
+        await connection.send_control_packet(
+            _build_server_hello_ack_packet(
+                session_id=resolved_session_id,
+                active_model_name=active_model_name,
+                server_profile=resolved_profile,
+            )
+        )
+        return ServerSession(
+            connection=connection,
+            transport_id=_transport_id_for_connection(connection),
+            hello=hello,
+            session_id=resolved_session_id,
+            active_model_name=active_model_name,
+            server_profile=resolved_profile,
+        )
+    except Exception:
+        connection.close()
+        wait_closed = getattr(connection, "wait_closed", None)
+        if callable(wait_closed):
+            await wait_closed()
+        raise
+
+
+def _transport_id_for_connection(connection: ServerConnection) -> TransportId:
+    if isinstance(connection, NnrpQuicConnection):
+        return TransportId.QUIC
+    return TransportId.TCP
+
+
+def _parse_hello_auth_block(body: bytes, auth_bytes: int) -> bytes:
+    if auth_bytes < 0 or auth_bytes > len(body):
+        raise ValueError(f"CLIENT_HELLO auth_bytes/body mismatch: auth_bytes={auth_bytes}, body={len(body)}")
+    return body[-auth_bytes:] if auth_bytes else b""
+
+
+def _parse_hello_control_extensions(
+    body: bytes,
+    *,
+    auth_bytes: int,
+    control_extension_bytes: int,
+) -> tuple[ControlExtensionEntry, ...]:
+    if auth_bytes < 0 or auth_bytes > len(body):
+        raise ValueError(f"CLIENT_HELLO auth_bytes/body mismatch: auth_bytes={auth_bytes}, body={len(body)}")
+    extension_payload = body[:-auth_bytes] if auth_bytes else body
+    if control_extension_bytes != len(extension_payload):
+        raise ValueError(
+            "CLIENT_HELLO control_extension_bytes/body mismatch: "
+            f"control_extension_bytes={control_extension_bytes}, body={len(extension_payload)}"
+        )
+    if not extension_payload:
+        return ()
+    return unpack_control_extension_block(extension_payload)
+
+
+def _build_server_hello_ack_packet(
+    *,
+    session_id: int,
+    active_model_name: str,
+    server_profile: ServerProfile,
+) -> NnrpPacket:
+    metadata = ServerHelloAckMetadata(
+        selected_version_major=1,
+        selected_wire_format=int(WireFormat.CURRENT),
+        auth_status=0,
+        session_id=session_id,
+        accepted_profile_bitmap=0x0001,
+        accepted_payload_kind_bitmap=int(_SUPPORTED_PAYLOAD_KINDS),
+        accepted_codec_bitmap=0x0003,
+        accepted_compression_bitmap=0x0003,
+        accepted_dtype_bitmap=0x001F,
+        accepted_layout_bitmap=0x0003,
+        cache_digest_bitmap=0,
+        cache_object_bitmap=0,
+        max_cache_entries=0,
+        max_cache_bytes=0,
+        max_lane_count=1,
+        target_cadence_x100=0,
+        latency_budget_ms=0,
+        quality_tier=0,
+        degrade_policy=0,
+        max_concurrent_frames=server_profile.max_concurrent_frames,
+        max_body_bytes=server_profile.max_body_bytes,
+        token_ttl_ms=0,
+        retry_after_ms=0,
+        control_extension_bytes=0,
+        server_flags=0,
+    )
+    return NnrpPacket.build(
+        version_major=1,
+        wire_format=WireFormat.CURRENT,
+        msg_type=MessageType.SERVER_HELLO_ACK,
+        flags=HeaderFlags.ACK_REQUIRED,
+        session_id=session_id,
+        metadata=metadata.pack(),
+        body=active_model_name.encode("utf-8"),
+    )
+
+
+def _decode_submit_request(
+    packet: NnrpPacket,
+    metadata: FrameSubmitMetadata,
+) -> tuple[SubmitRequest, TensorBodyView | None]:
+    tensor_enabled = bool(metadata.payload_kind_bitmap & PayloadKind.TENSOR)
+    uses_composed_body = (
+        metadata.payload_frame_count > 0
+        or metadata.object_ref_mask != 0
+        or metadata.submit_mode is not SubmitMode.INLINE
+        or metadata.payload_kind_bitmap != PayloadKind.TENSOR
+    )
+    camera_block = b""
+    tile_ids: tuple[int, ...] = ()
+    sections: tuple[TensorSectionData, ...] = ()
+    typed_payloads: tuple[TypedPayload, ...] = ()
+    camera_reference: ObjectReferenceBlock | None = None
+    tile_index_reference: ObjectReferenceBlock | None = None
+    tensor_section_table_reference: ObjectReferenceBlock | None = None
+    tensor_body: TensorBodyView | None = None
+
+    if tensor_enabled and metadata.submit_mode is SubmitMode.INLINE and not uses_composed_body:
+        camera_block = bytes(packet.body[: metadata.camera_bytes])
+        tensor_body = unpack_tensor_body(
+            packet.body[_align_up(metadata.camera_bytes) :],
+            tile_index_bytes=metadata.tile_index_bytes,
+            section_count=metadata.section_count,
+            tile_count=metadata.tile_count,
+        )
+        tile_ids = unpack_tile_index_block(
+            tensor_body.tile_index_block,
+            mode=metadata.tile_index_mode,
+            tile_count=metadata.tile_count,
+            tile_base_id=metadata.tile_base_id,
+        )
+        sections = tuple(_tensor_section_view_to_data(section) for section in tensor_body.sections)
+    else:
+        body_view = validate_frame_submit_body(metadata, packet.body)
+        inline_blocks = {
+            int(block.header.object_kind): block
+            for block in unpack_inline_object_blocks(body_view.inline_object_region)
+        }
+        reference_blocks = {
+            int(block.object_kind): block for block in unpack_object_reference_blocks(body_view.object_reference_region)
+        }
+        typed_payloads = tuple(
+            TypedPayload.from_core_frame(frame)
+            for frame in unpack_typed_payload_frames(
+                body_view.typed_payload_descriptor_region,
+                body_view.typed_payload_frame_region,
+            )
+        )
+        camera_inline = inline_blocks.get(int(CacheObjectKind.CAMERA_BLOCK))
+        if camera_inline is not None:
+            camera_block = bytes(camera_inline.payload)
+        camera_reference = reference_blocks.get(int(CacheObjectKind.CAMERA_BLOCK))
+
+        tile_index_inline = inline_blocks.get(int(CacheObjectKind.TILE_INDEX_BLOCK))
+        if tile_index_inline is not None:
+            tile_ids = unpack_tile_index_block(
+                tile_index_inline.payload,
+                mode=metadata.tile_index_mode,
+                tile_count=metadata.tile_count,
+                tile_base_id=metadata.tile_base_id,
+            )
+        tile_index_reference = reference_blocks.get(int(CacheObjectKind.TILE_INDEX_BLOCK))
+
+        section_inline = inline_blocks.get(int(CacheObjectKind.TENSOR_SECTION_TABLE))
+        if section_inline is not None:
+            tensor_body = unpack_tensor_body(
+                section_inline.payload,
+                tile_index_bytes=0,
+                section_count=metadata.section_count,
+                tile_count=metadata.tile_count,
+            )
+            sections = tuple(_tensor_section_view_to_data(section) for section in tensor_body.sections)
+        tensor_section_table_reference = reference_blocks.get(int(CacheObjectKind.TENSOR_SECTION_TABLE))
+
+    request = SubmitRequest(
+        frame_id=int(packet.header.frame_id),
+        src_width=metadata.src_width,
+        src_height=metadata.src_height,
+        tile_width=metadata.tile_width,
+        tile_height=metadata.tile_height,
+        tile_ids=tile_ids,
+        sections=sections,
+        camera_block=camera_block,
+        frame_class=metadata.frame_class,
+        input_profile=metadata.input_profile,
+        tile_index_mode=metadata.tile_index_mode,
+        latency_budget_ms=metadata.latency_budget_ms,
+        target_fps_x100=metadata.target_fps_x100,
+        retry_of_frame=metadata.retry_of_frame,
+        tile_base_id=metadata.tile_base_id,
+        submit_mode=metadata.submit_mode,
+        object_ref_mask=metadata.object_ref_mask,
+        camera_reference=camera_reference,
+        tile_index_reference=tile_index_reference,
+        tensor_section_table_reference=tensor_section_table_reference,
+        budget_policy=metadata.budget_policy,
+        dependency_frame_id=metadata.dependency_frame_id,
+        loss_tolerance_policy=metadata.loss_tolerance_policy,
+        payload_kind_bitmap=metadata.payload_kind_bitmap,
+        payload_frame_count=metadata.payload_frame_count,
+        typed_payloads=typed_payloads,
+        view_id=int(packet.header.view_id),
+        route_id=int(packet.header.route_id),
+        trace_id=int(packet.header.trace_id),
+        flags=packet.header.flags,
+    )
+    return request, tensor_body
+
+
+def _tensor_section_view_to_data(section) -> TensorSectionData:
+    codec_ids = bytes(section.codec_table) if section.codec_table else b""
+    return TensorSectionData(
+        role_id=section.desc.role_id,
+        default_codec_id=section.desc.codec_id,
+        dtype_id=section.desc.dtype_id,
+        tile_payloads=tuple(bytes(payload) for payload in section.payload_slices()),
+        codec_ids=tuple(codec_ids) if codec_ids else (),
+        layout_id=section.desc.layout_id,
+        scale_policy=section.desc.scale_policy,
+        payload_stride_bytes=section.desc.payload_stride_bytes,
+        element_count_per_tile=section.desc.element_count_per_tile,
+    )
+
+
+def _align_up(value: int, alignment: int = 8) -> int:
+    return ((value + alignment - 1) // alignment) * alignment

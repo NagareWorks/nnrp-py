@@ -26,6 +26,20 @@ def build_package_version(release_version: str, version_date: str | None, run_nu
     return f"{release_version}.dev{normalized_date}{normalized_run}"
 
 
+def build_tag_name(release_version: str) -> str:
+    preview_match = re.fullmatch(r"(?P<core>\d+\.\d+\.\d+)rc(?P<preview>\d+)", release_version)
+    if preview_match:
+        core = preview_match.group("core")
+        preview = int(preview_match.group("preview"))
+        return f"v{core}-preview.{preview}"
+
+    return f"v{release_version}"
+
+
+def build_release_name(package_version: str) -> str:
+    return f"nnrp-py v{package_version}"
+
+
 def write_outputs(values: dict[str, str], github_output: bool) -> None:
     lines = [f"{key}={value}" for key, value in values.items()]
     if github_output:
@@ -52,7 +66,8 @@ def cmd_show(args: argparse.Namespace) -> None:
         {
             "release_version": release_version,
             "package_version": package_version,
-            "tag_name": f"v{release_version}",
+            "tag_name": build_tag_name(release_version),
+            "release_name": build_release_name(package_version),
         },
         github_output=args.github_output,
     )

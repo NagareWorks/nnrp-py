@@ -8,6 +8,7 @@ import xml.etree.ElementTree as ET
 from pathlib import Path
 
 HUNK_PATTERN = re.compile(r"@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@")
+PRODUCTION_PATHS = ("src/nnrp", "scripts")
 
 
 def parse_args() -> argparse.Namespace:
@@ -68,7 +69,7 @@ def load_changed_lines(base_sha: str, head_sha: str) -> dict[str, set[int]]:
         base_sha,
         head_sha,
         "--",
-        "src/nnrp",
+        *PRODUCTION_PATHS,
     ]
     result = subprocess.run(command, check=True, capture_output=True, text=True)
     changed_lines: dict[str, set[int]] = {}
@@ -102,6 +103,15 @@ def load_changed_lines(base_sha: str, head_sha: str) -> dict[str, set[int]]:
     return changed_lines
 
 
+def is_uncomparable_git_range(error: subprocess.CalledProcessError) -> bool:
+    stderr = (error.stderr or "").lower()
+    return error.returncode == 128 and (
+        "bad object" in stderr
+        or "unknown revision" in stderr
+        or "invalid revision range" in stderr
+    )
+
+
 def main() -> int:
     args = parse_args()
     if not args.base_sha or not args.head_sha or args.base_sha == "0000000000000000000000000000000000000000":
@@ -109,7 +119,13 @@ def main() -> int:
         return 0
 
     coverage_by_file = load_coverage(Path(args.coverage_xml))
-    changed_lines = load_changed_lines(args.base_sha, args.head_sha)
+    try:
+        changed_lines = load_changed_lines(args.base_sha, args.head_sha)
+    except subprocess.CalledProcessError as error:
+        if is_uncomparable_git_range(error):
+            print("No comparable git range was available locally; skipping incremental coverage gate.")
+            return 0
+        raise
 
     executable_total = 0
     covered_total = 0
@@ -130,7 +146,11 @@ def main() -> int:
                 uncovered_entries.append(f"{relative_path}:{line}")
 
     if executable_total == 0:
-        print("No changed executable production lines were found under src/nnrp; skipping incremental coverage gate.")
+        included_paths = ", ".join(PRODUCTION_PATHS)
+        print(
+            f"No changed executable production lines were found under {included_paths}; "
+            "skipping incremental coverage gate."
+        )
         return 0
 
     ratio = covered_total / executable_total * 100.0

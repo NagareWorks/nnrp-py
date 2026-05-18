@@ -69,12 +69,12 @@ Before opening or merging a PR, prefer the narrowest validation that proves the 
 
 - `ruff check .`
 - `pytest -q`
-- `pytest --cov=src/nnrp --cov-report=xml:artifacts/coverage/coverage.xml --cov-fail-under=90 -q` when validating the repository-wide coverage gate
+- `pytest --cov=src/nnrp --cov=scripts --cov-report=xml:artifacts/coverage/coverage.xml --cov-fail-under=90 -q` when validating the repository-wide coverage gate
 - `python -m build` when wheel or sdist output changed
 
 PRs that affect CI, packaging, or release assets should include the exact command or workflow path used for validation.
 
-Changed production lines under `src/nnrp/` must also keep at least 90% line coverage in CI before merge.
+Changed production lines under `src/nnrp/` or `scripts/` must also keep at least 90% line coverage in CI before merge.
 
 ## Versioning and Release Notes
 

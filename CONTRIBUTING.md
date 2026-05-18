@@ -87,6 +87,14 @@ When preparing a release PR:
 - confirm release assets have the expected names
 - note any manual steps required on registries
 
+Public package publishing is gated through the `Release` workflow and should only happen from a short release tag or an explicit manual dispatch.
+
+- `Release` runs on pushed `v*` tags and on manual `workflow_dispatch`; normal branch pushes must not publish GitHub releases or PyPI packages.
+- Use the `release` GitHub environment for any publish-capable job.
+- Set `PYPI_PUBLISH_MODE` on the `release` environment to `disabled`, `trusted`, or `token` so tags do not publish to PyPI accidentally before registry binding is ready.
+- If you keep token-based publishing, store `PYPI_API_TOKEN` as an environment secret on `release`, not as an unrestricted repository secret.
+- If you switch to PyPI Trusted Publisher, keep `PYPI_PUBLISH_MODE=trusted`; no PyPI secret is required, but the `release` environment is still recommended for approvals, tag restrictions, and job scoping.
+
 ## Review Guidelines
 
 Review for:

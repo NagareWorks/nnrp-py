@@ -115,6 +115,29 @@ def test_cmd_show_writes_all_release_outputs(monkeypatch: pytest.MonkeyPatch) ->
     }
 
 
+def test_cmd_show_uses_release_version_for_manual_or_tag_publish(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: dict[str, object] = {}
+
+    def fake_write_outputs(values: dict[str, str], github_output: bool) -> None:
+        captured["values"] = values
+        captured["github_output"] = github_output
+
+    monkeypatch.setattr(resolve_version, "read_release_version", lambda: "1.0.0rc2")
+    monkeypatch.setattr(resolve_version, "write_outputs", fake_write_outputs)
+
+    resolve_version.cmd_show(argparse.Namespace(version_date="20260518", run_number="", github_output=True))
+
+    assert captured == {
+        "values": {
+            "release_version": "1.0.0rc2",
+            "package_version": "1.0.0rc2",
+            "tag_name": "v1.0.0-preview.2",
+            "release_name": "nnrp-py v1.0.0rc2",
+        },
+        "github_output": True,
+    }
+
+
 def test_cmd_apply_updates_pyproject_and_package_init(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     pyproject_path = tmp_path / "pyproject.toml"
     package_init_path = tmp_path / "__init__.py"

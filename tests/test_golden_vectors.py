@@ -329,26 +329,6 @@ def test_typed_payload_frame_regions_golden_vector() -> None:
     assert payload_region.hex() == TYPED_PAYLOAD_FRAME_REGION_GOLDEN_HEX
 
 
-def test_cross_language_golden_vector_export_matches_existing_hex() -> None:
-    vectors = {vector.name: vector for vector in export_cross_language_golden_vectors()}
-
-    assert vectors["current.header.frame_submit_ack_required_keyframe"].hex_payload == HEADER_GOLDEN_HEX
-    assert vectors["current.metadata.client_hello"].hex_payload == CLIENT_HELLO_METADATA_GOLDEN_HEX
-    assert vectors["current.metadata.session_patch_ack"].hex_payload == SESSION_PATCH_ACK_METADATA_GOLDEN_HEX
-    assert vectors["current.packet.flow_update"].hex_payload == FLOW_UPDATE_PACKET_GOLDEN_HEX
-    assert vectors["current.packet.result_hint"].hex_payload == RESULT_HINT_PACKET_GOLDEN_HEX
-    assert vectors["current.metadata.frame_submit"].hex_payload == FRAME_SUBMIT_METADATA_GOLDEN_HEX
-    assert vectors["current.metadata.result_push"].hex_payload == RESULT_PUSH_METADATA_GOLDEN_HEX
-    assert vectors["current.body_region.prelude"].hex_payload == BODY_REGION_PRELUDE_GOLDEN_HEX
-    assert vectors["current.object_reference.tile_index_block"].hex_payload == OBJECT_REFERENCE_BLOCK_GOLDEN_HEX
-    assert vectors["current.typed_payload.descriptor"].hex_payload == TYPED_PAYLOAD_DESCRIPTOR_GOLDEN_HEX
-    assert (
-        vectors["current.typed_payload.frame_descriptor_region"].hex_payload
-        == TYPED_PAYLOAD_FRAME_DESCRIPTOR_REGION_GOLDEN_HEX
-    )
-    assert vectors["current.typed_payload.frame_region"].hex_payload == TYPED_PAYLOAD_FRAME_REGION_GOLDEN_HEX
-
-
 def test_cross_language_golden_vector_manifest_round_trips() -> None:
     exported_vectors = export_cross_language_golden_vectors()
     manifest = render_cross_language_golden_vectors_json(exported_vectors)

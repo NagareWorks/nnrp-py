@@ -217,10 +217,10 @@
 - [x] Add regression tests for partial/stale result classification.
 - [x] Add regression tests for degraded result classification.
 - [x] Keep `python -m pytest -q` green after each preview2 slice.
-- [x] Keep neural-render-runtime transport smoke green after helper/control-adjacent preview2 slices.
+- [x] Keep the external host transport smoke green after helper/control-adjacent preview2 slices.
 	- Revalidated `tests/unit/test_preview_bridge.py`, `tests/unit/test_preview_server.py`, and `tests/unit/test_transport_smoke.py` against `PYTHONPATH=src;../nnrp-py/src`; all 36 tests passed after aligning partial-result bridge expectations.
-- [x] Add runtime-side TCP transport smoke coverage once the preview2 TCP data-plane path exists.
-	- `tests/unit/test_transport_smoke.py` already exercises the runtime `nnrp+tcp` binding path and remains green in the same targeted trio.
+- [x] Add external-host TCP transport smoke coverage once the preview2 TCP data-plane path exists.
+	- `tests/unit/test_transport_smoke.py` already exercises the external host `nnrp+tcp` binding path and remains green in the same targeted trio.
 
 ## 8. Documentation
 

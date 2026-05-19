@@ -3,7 +3,7 @@
 ## 0. Scope
 
 1. This file tracks the full Python-side implementation work for `NNRP/1-preview1`.
-2. Runtime/backend/frontend integration steps are intentionally tracked in `neural-render-runtime` only when they are needed to wire up end-to-end validation.
+2. Host/backend/frontend integration steps are intentionally tracked outside this repository and only referenced here when they are needed to wire up end-to-end validation.
 3. The goal here is to keep protocol/library evolution independent from the runtime repository cadence.
 
 ## 1. Current Baseline

@@ -2,7 +2,7 @@
 
 Python SDK scaffold for NNRP.
 
-This repository keeps a neutral protocol-level name because it is intended to host shared wire-format code plus server- and client-facing helpers. The current implementation priority is server-side integration for `neural-render-runtime`, but the package layout is explicitly split so future Python clients, script hosts, or tooling can reuse the same SDK.
+This repository keeps a neutral protocol-level name because it is intended to host shared wire-format code plus server- and client-facing helpers. Host-application integration stays outside this repository so the package layout can serve Python clients, servers, script hosts, or tooling without binding the SDK to any single backend checkout.
 
 NNRP should be read as a lightweight real-time AI application protocol, not as a neural-rendering-only transport. The current runtime integration happens to start from tensor/tile-oriented super-resolution flows, but the current NNRP/1 wire already covers token streaming, multimodal payload delivery, structured events, tool deltas, transport probing, and migration-oriented session control.
 
@@ -165,22 +165,21 @@ async with connect_preview2_client_session(
 
 ## Conformance Vector Export
 
-`nnrp.tools` exposes the SDK-side conformance exporter used by the shared `nnrp-conformance` action. The Python SDK emits its own vector manifest, and the suite compares that output against the canonical versioned baseline.
+`nnrp.tools` exposes the SDK-side conformance exporter used by the shared `nnrp-conformance` action. The Python SDK now reads the suite-owned semantic vector recipe manifest, regenerates the byte-exact vector manifest through its own codec, and lets the suite compare that output against the canonical versioned baseline.
 
 ```python
-from nnrp.tools import (
-	export_cross_language_golden_vectors,
-	render_cross_language_golden_vectors_json,
+from nnrp.tools.conformance import build_conformance_vector_manifest
+
+manifest = build_conformance_vector_manifest(
+	"nnrp-1-preview2",
+	recipe_manifest_path="path/to/semantic-vectors.json",
 )
 
-vectors = export_cross_language_golden_vectors()
-manifest_json = render_cross_language_golden_vectors_json(vectors)
-
-print(vectors[0].name)
-print(manifest_json)
+print(manifest["vectors"][0]["name"])
+print(manifest["vectors"][0]["hex"])
 ```
 
-The exported manifest currently covers the current `FLOW_UPDATE`, `RESULT_HINT`, metadata, body-region, object-reference, and typed-payload fixtures that the suite uses for wire-alignment comparison.
+The exported manifest currently covers the current `FLOW_UPDATE`, `RESULT_HINT`, metadata, body-region, object-reference, and typed-payload fixtures that the shared preview2 recipe baseline defines for wire-alignment comparison.
 
 ## Current Wire Additions
 
@@ -274,7 +273,7 @@ Host applications keep everything that depends on runtime policy, business objec
 3. Port sharing, service bootstrap, and multi-protocol listener orchestration.
 4. Production health checks, telemetry pipelines, and application-specific retry policy.
 
-In practice this means `nnrp-py` owns reusable protocol machinery, while repositories such as `neural-render-runtime` own the code that binds those primitives to a concrete runtime service.
+In practice this means `nnrp-py` owns reusable protocol machinery, while host/application repositories own the code that binds those primitives to concrete service policy and deployment wiring.
 
 ## Development
 

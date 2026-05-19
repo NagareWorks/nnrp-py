@@ -39,11 +39,24 @@ def load_coverage(coverage_xml: Path) -> dict[str, dict[int, bool]]:
         relative_path = None
         for source_root in source_roots:
             candidate = (source_root / filename).resolve()
+            if not candidate.exists():
+                continue
             try:
                 relative_path = candidate.relative_to(repo_root).as_posix()
                 break
             except ValueError:
                 continue
+
+        if relative_path is None:
+            for source_root in source_roots:
+                try:
+                    source_root_relative = source_root.resolve().relative_to(repo_root)
+                except ValueError:
+                    continue
+                if source_root_relative.parts:
+                    continue
+                relative_path = Path(filename).as_posix()
+                break
 
         if relative_path is None:
             continue

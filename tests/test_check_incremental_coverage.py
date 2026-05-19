@@ -78,6 +78,46 @@ def test_load_coverage_requires_source_roots(tmp_path: Path) -> None:
         check_incremental_coverage.load_coverage(coverage_xml)
 
 
+def test_load_coverage_prefers_existing_candidate_in_multi_source_xml(
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+) -> None:
+        repo_root = tmp_path / "repo"
+        scripts_root = repo_root / "scripts"
+        src_root = repo_root / "src" / "nnrp"
+        (src_root / "tools").mkdir(parents=True)
+        (src_root / "tools" / "conformance.py").write_text("pass\n", encoding="utf-8")
+
+        coverage_xml = tmp_path / "coverage.xml"
+        coverage_xml.write_text(
+                f"""<?xml version=\"1.0\" ?>
+<coverage>
+    <sources>
+        <source>{scripts_root.as_posix()}</source>
+        <source>{src_root.as_posix()}</source>
+    </sources>
+    <packages>
+        <package>
+            <classes>
+                <class filename=\"tools/conformance.py\">
+                    <lines>
+                        <line number=\"10\" hits=\"1\" />
+                    </lines>
+                </class>
+            </classes>
+        </package>
+    </packages>
+</coverage>
+""",
+                encoding="utf-8",
+        )
+        monkeypatch.chdir(repo_root)
+
+        coverage_by_file = check_incremental_coverage.load_coverage(coverage_xml)
+
+        assert coverage_by_file == {"src/nnrp/tools/conformance.py": {10: True}}
+
+
 def test_load_changed_lines_parses_added_lines_in_scripts_and_src(monkeypatch: pytest.MonkeyPatch) -> None:
     diff_output = "\n".join(
         [

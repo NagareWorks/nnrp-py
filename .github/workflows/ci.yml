@@ -44,6 +44,13 @@ jobs:
         with:
           python-version: '3.11'
 
+      - name: Checkout nnrp-conformance action
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ github.repository_owner }}/nnrp-conformance
+          path: nnrp-conformance-action
+          fetch-depth: 1
+
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
@@ -53,13 +60,17 @@ jobs:
         run: ruff check .
 
       - name: Test with coverage
-        run: >-
-          pytest
-          --cov=src/nnrp
-          --cov=scripts
-          --cov-report=xml:artifacts/coverage/coverage.xml
-          --cov-fail-under=90
-          -q
+        shell: pwsh
+        run: |
+          $env:NNRP_CONFORMANCE_RECIPE_MANIFEST = Join-Path $PWD 'nnrp-conformance-action/protocol/nnrp-1-preview2/vectors/semantic-vectors.json'
+          $pytestArgs = @(
+            '--cov=src/nnrp'
+            '--cov=scripts'
+            '--cov-report=xml:artifacts/coverage/coverage.xml'
+            '--cov-fail-under=90'
+            '-q'
+          )
+          pytest @pytestArgs
 
       - name: Incremental line coverage gate
         if: github.event_name == 'pull_request' || github.event_name == 'push'
@@ -119,14 +130,15 @@ jobs:
           "artifact-name=nnrp-py-conformance" >> $env:GITHUB_OUTPUT
 
       - name: Setup Python
+        id: setup-python
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
 
       - name: Install dependencies
         run: |
-          python -m pip install --upgrade pip
-          python -m pip install -e .[dev] build
+          ${{ steps.setup-python.outputs.python-path }} -m pip install --upgrade pip
+          ${{ steps.setup-python.outputs.python-path }} -m pip install -e .[dev] build
 
       - name: Run suite-owned conformance action
         uses: ./nnrp-conformance-action/.github/actions/run-conformance
@@ -136,8 +148,9 @@ jobs:
           working-directory: .
           artifact-name: ${{ steps.conformance-baseline.outputs.artifact-name }}
           sdk-vector-command: >-
-            python -m nnrp.tools.conformance
+            ${{ steps.setup-python.outputs.python-path }} -m nnrp.tools.conformance
             --protocol-version ${{ steps.conformance-baseline.outputs.protocol-version }}
+            --recipe-manifest nnrp-conformance-action/protocol/${{ steps.conformance-baseline.outputs.protocol-version }}/vectors/semantic-vectors.json
             --output $env:NNRP_CONFORMANCE_SDK_VECTOR_OUTPUT
 
   required-checks:

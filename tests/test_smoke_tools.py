@@ -555,6 +555,7 @@ async def _run_quic_smoke_round_trip() -> None:
         client_transcript = await run_quic_smoke_client(
             "127.0.0.1",
             port,
+            configuration=create_quic_client_configuration(cafile=certificate_path),
             requested_session_id=9,
             frame_id=303,
         )
@@ -651,7 +652,10 @@ async def _run_parallel_transport_probes_selection() -> None:
             "127.0.0.1",
             quic_port=quic_port,
             tcp_port=tcp_port,
-            quic_configuration=create_quic_client_configuration(wire_format=WireFormat.CURRENT),
+            quic_configuration=create_quic_client_configuration(
+                wire_format=WireFormat.CURRENT,
+                cafile=certificate_path,
+            ),
             probe_payload_bytes=2048,
             sample_count=3,
             timeout=5.0,
@@ -712,7 +716,10 @@ async def _run_probe_client_transport_selection() -> None:
             "127.0.0.1",
             quic_port=quic_port,
             tcp_port=tcp_port,
-            quic_configuration=create_quic_client_configuration(wire_format=WireFormat.CURRENT),
+            quic_configuration=create_quic_client_configuration(
+                wire_format=WireFormat.CURRENT,
+                cafile=certificate_path,
+            ),
             probe_payload_bytes=2048,
             probe_sample_count=3,
             timeout=5.0,
@@ -752,7 +759,10 @@ async def _run_parallel_transport_probes_single_binding_fallback() -> None:
             "127.0.0.1",
             quic_port=quic_port,
             tcp_port=tcp_port,
-            quic_configuration=create_quic_client_configuration(wire_format=WireFormat.CURRENT),
+            quic_configuration=create_quic_client_configuration(
+                wire_format=WireFormat.CURRENT,
+                cafile=certificate_path,
+            ),
             probe_payload_bytes=1024,
             sample_count=3,
             timeout=1.0,
@@ -795,7 +805,10 @@ async def _run_connect_client_control_quic() -> None:
         async with connect_client_control(
             "127.0.0.1",
             quic_port=quic_port,
-            quic_configuration=create_quic_client_configuration(wire_format=WireFormat.CURRENT),
+            quic_configuration=create_quic_client_configuration(
+                wire_format=WireFormat.CURRENT,
+                cafile=certificate_path,
+            ),
             requested_session_id=51,
             selected_transport_id=TransportId.QUIC,
             timeout=5.0,
@@ -874,7 +887,10 @@ async def _run_connect_client_control_with_probe_tcp() -> None:
             "127.0.0.1",
             quic_port=quic_port,
             tcp_port=tcp_port,
-            quic_configuration=create_quic_client_configuration(wire_format=WireFormat.CURRENT),
+            quic_configuration=create_quic_client_configuration(
+                wire_format=WireFormat.CURRENT,
+                cafile=certificate_path,
+            ),
             probe_payload_bytes=2048,
             probe_sample_count=3,
             requested_session_id=53,
@@ -961,7 +977,10 @@ async def _run_connect_client_session_quic() -> None:
         async with connect_client_session(
             "127.0.0.1",
             quic_port=quic_port,
-            quic_configuration=create_quic_client_configuration(wire_format=WireFormat.CURRENT),
+            quic_configuration=create_quic_client_configuration(
+                wire_format=WireFormat.CURRENT,
+                cafile=certificate_path,
+            ),
             requested_session_id=61,
             selected_transport_id=TransportId.QUIC,
             timeout=5.0,
@@ -1039,7 +1058,10 @@ async def _run_connect_client_session_with_probe_quic() -> None:
                 "127.0.0.1",
                 quic_port=quic_port,
                 tcp_port=9999,
-                quic_configuration=create_quic_client_configuration(wire_format=WireFormat.CURRENT),
+                quic_configuration=create_quic_client_configuration(
+                    wire_format=WireFormat.CURRENT,
+                    cafile=certificate_path,
+                ),
                 requested_session_id=62,
                 timeout=5.0,
             ) as session:
@@ -1085,7 +1107,10 @@ async def _run_connect_client_session_flow_update_quic() -> None:
         async with connect_client_session(
             "127.0.0.1",
             quic_port=quic_port,
-            quic_configuration=create_quic_client_configuration(wire_format=WireFormat.CURRENT),
+            quic_configuration=create_quic_client_configuration(
+                wire_format=WireFormat.CURRENT,
+                cafile=certificate_path,
+            ),
             requested_session_id=63,
             selected_transport_id=TransportId.QUIC,
             timeout=5.0,
@@ -1136,7 +1161,10 @@ async def _run_connect_client_session_partial_then_final() -> None:
         async with connect_client_session(
             "127.0.0.1",
             quic_port=quic_port,
-            quic_configuration=create_quic_client_configuration(wire_format=WireFormat.CURRENT),
+            quic_configuration=create_quic_client_configuration(
+                wire_format=WireFormat.CURRENT,
+                cafile=certificate_path,
+            ),
             requested_session_id=64,
             selected_transport_id=TransportId.QUIC,
             timeout=5.0,

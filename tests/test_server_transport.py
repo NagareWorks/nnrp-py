@@ -112,6 +112,19 @@ def test_build_client_hello_packet_rejects_requested_model_with_auth_block() -> 
         build_client_hello_packet(requested_model="engine-sr", auth_block=b"raw-auth")
 
 
+def test_typed_payload_rejects_descriptor_flags_on_current_wire() -> None:
+    with pytest.raises(ValueError, match="descriptor_flags must be 0"):
+        TypedPayload.token_chunk(b"hello", descriptor_flags=1)
+
+
+def test_typed_payload_to_core_frame_rejects_descriptor_flags_on_current_wire() -> None:
+    payload = TypedPayload.token_chunk(b"hello")
+    object.__setattr__(payload, "descriptor_flags", 1)
+
+    with pytest.raises(ValueError, match="descriptor_flags must be 0"):
+        payload.to_core_frame()
+
+
 @pytest.mark.asyncio
 async def test_current_session_round_trips_typed_and_mixed_payloads_without_core_frames() -> None:
     host = "127.0.0.1"

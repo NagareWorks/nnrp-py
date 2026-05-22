@@ -386,6 +386,8 @@ class TypedPayload:
         )
 
     def to_core_frame(self) -> TypedPayloadFrame:
+        if self.descriptor_flags != 0:
+            raise ValueError("descriptor_flags must be 0 in current typed payload descriptors")
         builders = {
             PayloadKind.TOKEN_CHUNK: build_token_chunk_frame,
             PayloadKind.AUDIO_CHUNK: build_audio_chunk_frame,

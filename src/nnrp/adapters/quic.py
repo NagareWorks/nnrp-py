@@ -55,20 +55,22 @@ def create_quic_client_configuration(
     *,
     wire_format: WireFormat = WireFormat.CURRENT,
     alpn_protocols: list[str] | None = None,
-    verify_mode: ssl.VerifyMode = ssl.CERT_NONE,
+    verify_mode: ssl.VerifyMode = ssl.CERT_REQUIRED,
+    insecure_skip_verify: bool = False,
     max_datagram_frame_size: int = 65536,
     idle_timeout: float = _DEFAULT_IDLE_TIMEOUT_SECONDS,
     cafile: str | Path | None = None,
     capath: str | Path | None = None,
     cadata: bytes | None = None,
 ) -> QuicConfiguration:
+    resolved_verify_mode = ssl.CERT_NONE if insecure_skip_verify else verify_mode
     configuration = QuicConfiguration(
         alpn_protocols=alpn_protocols or [alpn_for_wire_format(wire_format)],
         is_client=True,
         max_datagram_frame_size=max_datagram_frame_size,
         idle_timeout=idle_timeout,
     )
-    configuration.verify_mode = verify_mode
+    configuration.verify_mode = resolved_verify_mode
     if cafile is not None or capath is not None or cadata is not None:
         configuration.load_verify_locations(
             cafile=None if cafile is None else str(cafile),

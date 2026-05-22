@@ -1,6 +1,7 @@
 import asyncio
 import ipaddress
 import socket
+import ssl
 import tempfile
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -107,6 +108,18 @@ def test_quic_configuration_exposes_explicit_idle_timeout() -> None:
         assert server_configuration.idle_timeout == pytest.approx(135.0)
 
 
+def test_quic_client_configuration_verifies_peers_by_default() -> None:
+    client_configuration = create_quic_client_configuration()
+
+    assert client_configuration.verify_mode is ssl.CERT_REQUIRED
+
+
+def test_quic_client_configuration_requires_explicit_insecure_opt_in() -> None:
+    client_configuration = create_quic_client_configuration(insecure_skip_verify=True)
+
+    assert client_configuration.verify_mode is ssl.CERT_NONE
+
+
 def test_quic_configuration_uses_current_alpn() -> None:
     with tempfile.TemporaryDirectory() as temp_dir:
         certificate_path, private_key_path = _write_self_signed_certificate(Path(temp_dir))
@@ -152,9 +165,10 @@ async def _run_quic_loopback() -> None:
         certificate_path, private_key_path = _write_self_signed_certificate(Path(temp_dir))
         port = _find_free_udp_port()
         server_configuration = create_quic_server_configuration(certificate_path, private_key_path)
+        client_configuration = _create_test_client_configuration(certificate_path)
 
         async with serve_quic("127.0.0.1", port, configuration=server_configuration) as listener:
-            async with connect_quic("127.0.0.1", port) as client:
+            async with connect_quic("127.0.0.1", port, configuration=client_configuration) as client:
                 server = await listener.accept(timeout=5.0)
 
                 await client.send_control_packet(_build_client_hello_packet())
@@ -181,9 +195,10 @@ async def _run_quic_data_loopback() -> None:
         certificate_path, private_key_path = _write_self_signed_certificate(Path(temp_dir))
         port = _find_free_udp_port()
         server_configuration = create_quic_server_configuration(certificate_path, private_key_path)
+        client_configuration = _create_test_client_configuration(certificate_path)
 
         async with serve_quic("127.0.0.1", port, configuration=server_configuration) as listener:
-            async with connect_quic("127.0.0.1", port) as client:
+            async with connect_quic("127.0.0.1", port, configuration=client_configuration) as client:
                 server = await listener.accept(timeout=5.0)
 
                 submit_packet = _build_frame_submit_packet()
@@ -229,9 +244,10 @@ async def _run_quic_remote_close() -> None:
         certificate_path, private_key_path = _write_self_signed_certificate(Path(temp_dir))
         port = _find_free_udp_port()
         server_configuration = create_quic_server_configuration(certificate_path, private_key_path)
+        client_configuration = _create_test_client_configuration(certificate_path)
 
         async with serve_quic("127.0.0.1", port, configuration=server_configuration) as listener:
-            async with connect_quic("127.0.0.1", port) as client:
+            async with connect_quic("127.0.0.1", port, configuration=client_configuration) as client:
                 server = await listener.accept(timeout=5.0)
                 server.close(error_code=1, reason_phrase="test shutdown")
 
@@ -244,9 +260,10 @@ async def _run_quic_truncated_stream() -> None:
         certificate_path, private_key_path = _write_self_signed_certificate(Path(temp_dir))
         port = _find_free_udp_port()
         server_configuration = create_quic_server_configuration(certificate_path, private_key_path)
+        client_configuration = _create_test_client_configuration(certificate_path)
 
         async with serve_quic("127.0.0.1", port, configuration=server_configuration) as listener:
-            async with connect_quic("127.0.0.1", port) as client:
+            async with connect_quic("127.0.0.1", port, configuration=client_configuration) as client:
                 server = await listener.accept(timeout=5.0)
 
                 stream_id = await client.ensure_control_stream()
@@ -263,7 +280,7 @@ async def _run_quic_alpn_mismatch() -> None:
         certificate_path, private_key_path = _write_self_signed_certificate(Path(temp_dir))
         port = _find_free_udp_port()
         server_configuration = create_quic_server_configuration(certificate_path, private_key_path)
-        client_configuration = create_quic_client_configuration(alpn_protocols=["nnrp/0-test"])
+        client_configuration = _create_test_client_configuration(certificate_path, alpn_protocols=["nnrp/0-test"])
 
         async with serve_quic("127.0.0.1", port, configuration=server_configuration):
             with pytest.raises(NnrpQuicConnectionClosedError, match="connection terminated"):
@@ -276,9 +293,10 @@ async def _run_quic_multiple_control_packets() -> None:
         certificate_path, private_key_path = _write_self_signed_certificate(Path(temp_dir))
         port = _find_free_udp_port()
         server_configuration = create_quic_server_configuration(certificate_path, private_key_path)
+        client_configuration = _create_test_client_configuration(certificate_path)
 
         async with serve_quic("127.0.0.1", port, configuration=server_configuration) as listener:
-            async with connect_quic("127.0.0.1", port) as client:
+            async with connect_quic("127.0.0.1", port, configuration=client_configuration) as client:
                 server = await listener.accept(timeout=5.0)
 
                 await client.send_control_packet(_build_client_hello_packet(requested_session_id=11))
@@ -299,9 +317,10 @@ async def _run_quic_control_bodies() -> None:
         certificate_path, private_key_path = _write_self_signed_certificate(Path(temp_dir))
         port = _find_free_udp_port()
         server_configuration = create_quic_server_configuration(certificate_path, private_key_path)
+        client_configuration = _create_test_client_configuration(certificate_path)
 
         async with serve_quic("127.0.0.1", port, configuration=server_configuration) as listener:
-            async with connect_quic("127.0.0.1", port) as client:
+            async with connect_quic("127.0.0.1", port, configuration=client_configuration) as client:
                 server = await listener.accept(timeout=5.0)
 
                 hello_packet = _build_client_hello_packet(requested_session_id=31, auth_block=b"conv-lite")
@@ -325,9 +344,10 @@ async def _run_quic_typed_control_and_result_drop_mapping() -> None:
         certificate_path, private_key_path = _write_self_signed_certificate(Path(temp_dir))
         port = _find_free_udp_port()
         server_configuration = create_quic_server_configuration(certificate_path, private_key_path)
+        client_configuration = _create_test_client_configuration(certificate_path)
 
         async with serve_quic("127.0.0.1", port, configuration=server_configuration) as listener:
-            async with connect_quic("127.0.0.1", port) as client:
+            async with connect_quic("127.0.0.1", port, configuration=client_configuration) as client:
                 server = await listener.accept(timeout=5.0)
 
                 await client.send_control_packet(build_ping_packet(session_id=11, trace_id=101))
@@ -380,7 +400,7 @@ async def _run_quic_transport_probe_loopback() -> None:
         certificate_path, private_key_path = _write_self_signed_certificate(Path(temp_dir))
         port = _find_free_udp_port()
         server_configuration = create_quic_server_configuration(certificate_path, private_key_path)
-        client_configuration = create_quic_client_configuration(wire_format=WireFormat.CURRENT)
+        client_configuration = _create_test_client_configuration(certificate_path, wire_format=WireFormat.CURRENT)
         probe_body = b"q" * 96
         probe_metadata = TransportProbeMetadata(
             probe_id=101,
@@ -564,6 +584,10 @@ def _find_free_udp_port() -> int:
     with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
         sock.bind(("127.0.0.1", 0))
         return int(sock.getsockname()[1])
+
+
+def _create_test_client_configuration(certificate_path: Path, **kwargs) -> object:
+    return create_quic_client_configuration(cafile=certificate_path, **kwargs)
 
 
 def _write_self_signed_certificate(target_dir: Path) -> tuple[Path, Path]:

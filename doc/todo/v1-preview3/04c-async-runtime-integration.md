@@ -7,5 +7,5 @@
 - [ ] Define cancellation behavior when a Python task is cancelled while a native operation is active.
 - [ ] Expose structured event, tool delta, and workflow-state updates through Python-native async iterators or callbacks backed by Rust result pumps.
 - [ ] Keep any remaining pure-Python codec code limited to preview2 fixture inspection or other non-hot-path tooling.
-- [ ] Run the pre-migration benchmark suite and record the baseline in `doc/rs-native-artifacts-migration.md`.
-- [ ] Run the same benchmark suite after native migration and record the deltas in `doc/rs-native-artifacts-migration.md`.
+- [x] Run the pre-migration benchmark suite and record the baseline in `doc/benchmarks/rs-native-artifacts-migration.md`.
+- [ ] Run the same benchmark suite after native migration and record the deltas in `doc/benchmarks/rs-native-artifacts-migration.md`.

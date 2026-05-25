@@ -39,14 +39,110 @@ def _plan_document() -> dict[str, object]:
                 "workload": {
                     "operation": "submit_result_loop",
                     "payload": "inline_tensor_4k",
-                    "duration_seconds": 1,
+                    "duration_seconds": 0.01,
+                    "warmup_iterations": 1,
+                },
+            },
+            {
+                "id": "l4.metadata.session_open_ack.latency",
+                "category": "latency",
+                "feature": "benchmark.metadata",
+                "required_capabilities": ["session.open_close"],
+                "description": "Metadata latency.",
+                "workload": {
+                    "operation": "metadata_encode_decode",
+                    "payload": "session_open_ack",
+                    "iterations": 3,
+                    "warmup_iterations": 1,
+                },
+            },
+            {
+                "id": "l4.transport.quic.loopback.throughput",
+                "category": "throughput",
+                "feature": "benchmark.transport.quic",
+                "required_capabilities": ["transport.quic"],
+                "description": "Transport loopback throughput.",
+                "workload": {
+                    "operation": "transport_loopback",
+                    "payload": "request_result_stream",
+                    "transport": "quic",
+                    "probe_payload_bytes": 8,
+                    "duration_seconds": 0.01,
+                    "warmup_iterations": 1,
+                },
+            },
+            {
+                "id": "l4.metadata.submit_result.latency",
+                "category": "latency",
+                "feature": "benchmark.metadata.submit_result",
+                "required_capabilities": ["frame_submit.tensor.inline", "result_push.basic"],
+                "description": "Submit/result metadata latency.",
+                "workload": {
+                    "operation": "submit_result_metadata_encode_decode",
+                    "payload": "frame_submit_result_push",
+                    "iterations": 3,
+                    "warmup_iterations": 1,
+                },
+            },
+            {
+                "id": "l4.typed_payload.tensor_pack_unpack.latency",
+                "category": "latency",
+                "feature": "benchmark.typed_payload.tensor",
+                "required_capabilities": ["frame_submit.tensor.inline"],
+                "description": "Typed payload latency.",
+                "workload": {
+                    "operation": "typed_payload_pack_unpack",
+                    "payload": "tensor_descriptor_plus_payload",
+                    "iterations": 3,
+                    "warmup_iterations": 1,
+                },
+            },
+            {
+                "id": "l4.runtime.probe.latency",
+                "category": "latency",
+                "feature": "benchmark.runtime_probe",
+                "required_capabilities": [],
+                "description": "Runtime probe latency.",
+                "workload": {
+                    "operation": "runtime_probe",
+                    "payload": "version_capability_query",
+                    "iterations": 3,
+                    "warmup_iterations": 1,
+                },
+            },
+            {
+                "id": "l4.session.lifecycle.latency",
+                "category": "latency",
+                "feature": "benchmark.session_lifecycle",
+                "required_capabilities": ["session.open_close"],
+                "description": "Session lifecycle latency.",
+                "workload": {
+                    "operation": "session_lifecycle",
+                    "payload": "open_close_loop",
+                    "iterations": 3,
+                    "warmup_iterations": 1,
+                },
+            },
+            {
+                "id": "l4.transport.tcp.loopback.throughput",
+                "category": "throughput",
+                "feature": "benchmark.transport.tcp",
+                "required_capabilities": ["transport.tcp"],
+                "description": "TCP transport loopback throughput.",
+                "workload": {
+                    "operation": "transport_loopback",
+                    "payload": "request_result_stream",
+                    "transport": "tcp",
+                    "probe_payload_bytes": 8,
+                    "duration_seconds": 0.01,
+                    "warmup_iterations": 1,
                 },
             },
         ],
     }
 
 
-def test_build_benchmark_results_report_measures_header_and_skips_unimplemented_scenarios() -> None:
+def test_build_benchmark_results_report_measures_configured_scenarios() -> None:
     report = build_benchmark_results_report(_plan_document())
 
     assert report["implementation_name"] == "nnrp-py"
@@ -61,8 +157,42 @@ def test_build_benchmark_results_report_measures_header_and_skips_unimplemented_
     assert header_result["metrics"]["p99_us"] >= 0
 
     submit_result = results["l4.submit_result.inline_tensor.throughput"]
-    assert submit_result["outcome"] == "skip"
-    assert "not implemented" in submit_result["message"]
+    assert submit_result["outcome"] == "measured"
+    assert submit_result["metrics"]["throughput_ops_per_sec"] > 0
+
+    metadata_result = results["l4.metadata.session_open_ack.latency"]
+    assert metadata_result["outcome"] == "measured"
+    assert metadata_result["metrics"]["p50_us"] >= 0
+
+    transport_result = results["l4.transport.quic.loopback.throughput"]
+    assert transport_result["outcome"] == "measured"
+    assert transport_result["metrics"]["throughput_ops_per_sec"] > 0
+
+    assert results["l4.metadata.submit_result.latency"]["outcome"] == "measured"
+    assert results["l4.typed_payload.tensor_pack_unpack.latency"]["outcome"] == "measured"
+    assert results["l4.runtime.probe.latency"]["outcome"] == "measured"
+    assert results["l4.session.lifecycle.latency"]["outcome"] == "measured"
+    assert results["l4.transport.tcp.loopback.throughput"]["outcome"] == "measured"
+
+
+def test_build_benchmark_results_report_skips_unknown_operations() -> None:
+    plan = _plan_document()
+    scenarios = plan["scenarios"]
+    assert isinstance(scenarios, list)
+    scenarios.append(
+        {
+            "id": "l4.unknown",
+            "workload": {
+                "operation": "unknown_operation",
+            },
+        }
+    )
+
+    report = build_benchmark_results_report(plan)
+
+    unknown_result = report["results"][-1]
+    assert unknown_result["outcome"] == "skip"
+    assert "not implemented" in unknown_result["message"]
 
 
 def test_build_benchmark_results_report_can_override_implementation_name() -> None:
@@ -98,6 +228,8 @@ def test_build_benchmark_results_report_supports_single_sample_header_measuremen
             {"operation": "header_encode_decode", "payload": "l0_header", "warmup_iterations": -1},
             "non-negative integer",
         ),
+        ({"operation": "submit_result_loop", "duration_seconds": 0}, "positive number"),
+        ({"operation": "transport_loopback", "probe_payload_bytes": 0}, "positive integer"),
     ],
 )
 def test_build_benchmark_results_report_rejects_invalid_workload_shapes(workload: object, match: str) -> None:
@@ -123,7 +255,7 @@ def test_main_reads_paths_from_environment_and_writes_report(tmp_path: Path, mon
 
     report = json.loads(output_path.read_text(encoding="utf-8"))
     assert report["protocol_version"] == "nnrp-1-preview3"
-    assert len(report["results"]) == 2
+    assert len(report["results"]) == 9
 
 
 def test_main_accepts_explicit_cli_paths_and_creates_parent_directory(tmp_path: Path) -> None:

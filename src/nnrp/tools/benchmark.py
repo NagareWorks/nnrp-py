@@ -13,7 +13,21 @@ from pathlib import Path
 from typing import Any
 
 from nnrp.core.enums import HeaderFlags, MessageType, WireFormat
-from nnrp.core.header import NnrpHeader
+from nnrp.core.header import HEADER_LENGTH, NnrpHeader
+from nnrp.core.messages.control import ClientHelloMetadata, ServerHelloAckMetadata, TransportProbeAckMetadata
+from nnrp.core.messages.data import InputProfile, TensorDType, TensorLayout, TileIndexMode
+from nnrp.core.packet import (
+    NnrpPacket,
+    TensorSectionData,
+    build_frame_submit_packet,
+    build_result_push_packet,
+    build_transport_probe_ack_packet,
+    build_transport_probe_packet,
+    pack_tensor_section_data,
+    pack_tile_index_block,
+    unpack_tensor_body,
+    unpack_tile_index_block,
+)
 
 _RESULTS_SCHEMA_URL = "https://raw.githubusercontent.com/NagareWorks/nnrp-conformance/main/schemas/benchmark-results.schema.json"
 _DEFAULT_IMPLEMENTATION_NAME = "nnrp-py"
@@ -111,6 +125,335 @@ def _run_header_encode_decode(scenario_id: str, workload: dict[str, Any]) -> dic
     return _measured_latency_result(scenario_id, samples)
 
 
+def _run_metadata_encode_decode(scenario_id: str, workload: dict[str, Any]) -> dict[str, Any]:
+    iterations = _positive_int(workload.get("iterations"), default=100_000)
+    warmup_iterations = _non_negative_int(workload.get("warmup_iterations"), default=min(10_000, iterations))
+    client_hello = ClientHelloMetadata(
+        min_version_major=1,
+        max_version_major=1,
+        supported_wire_format_bitmap=1,
+        supported_profile_bitmap=1,
+        supported_payload_kind_bitmap=1,
+        supported_codec_bitmap=1,
+        supported_compression_bitmap=1,
+        supported_dtype_bitmap=1 << int(TensorDType.UINT8),
+        supported_layout_bitmap=1 << int(TensorLayout.NHWC),
+        cache_digest_bitmap=0,
+        cache_object_bitmap=0,
+        cache_namespace_count=0,
+        max_lane_count=2,
+        max_cache_entries=0,
+        max_cache_bytes=0,
+        target_cadence_x100=6000,
+        latency_budget_ms=16,
+        quality_tier=1,
+        degrade_policy=0,
+        requested_session_id=41,
+        auth_bytes=0,
+        control_extension_bytes=0,
+    )
+    server_ack = ServerHelloAckMetadata(
+        selected_version_major=1,
+        selected_wire_format=int(WireFormat.CURRENT),
+        auth_status=0,
+        session_id=41,
+        accepted_profile_bitmap=1,
+        accepted_payload_kind_bitmap=1,
+        accepted_codec_bitmap=1,
+        accepted_compression_bitmap=1,
+        accepted_dtype_bitmap=1 << int(TensorDType.UINT8),
+        accepted_layout_bitmap=1 << int(TensorLayout.NHWC),
+        cache_digest_bitmap=0,
+        cache_object_bitmap=0,
+        max_cache_entries=0,
+        max_cache_bytes=0,
+        max_lane_count=2,
+        max_concurrent_frames=4,
+        target_cadence_x100=6000,
+        latency_budget_ms=16,
+        quality_tier=1,
+        degrade_policy=0,
+        max_body_bytes=1 << 20,
+        token_ttl_ms=30_000,
+        retry_after_ms=0,
+        control_extension_bytes=0,
+        server_flags=0,
+    )
+
+    def operation() -> None:
+        decoded_hello = ClientHelloMetadata.unpack(client_hello.pack())
+        decoded_ack = ServerHelloAckMetadata.unpack(server_ack.pack())
+        if decoded_hello != client_hello or decoded_ack != server_ack:
+            raise RuntimeError("metadata benchmark roundtrip mismatch")
+
+    for _ in range(warmup_iterations):
+        operation()
+
+    samples = _measure_microseconds(operation, iterations)
+    return _measured_latency_result(scenario_id, samples)
+
+
+def _run_submit_result_loop(scenario_id: str, workload: dict[str, Any]) -> dict[str, Any]:
+    duration_seconds = _positive_float(workload.get("duration_seconds"), default=10.0)
+    warmup_iterations = _non_negative_int(workload.get("warmup_iterations"), default=1_000)
+    submit_packet, result_packet = _build_submit_result_packets()
+
+    def operation() -> None:
+        decoded_submit = NnrpPacket.unpack(submit_packet)
+        decoded_result = NnrpPacket.unpack(result_packet)
+        if decoded_submit.header.msg_type is not MessageType.FRAME_SUBMIT:
+            raise RuntimeError("submit/result benchmark decoded wrong submit type")
+        if decoded_result.header.msg_type is not MessageType.RESULT_PUSH:
+            raise RuntimeError("submit/result benchmark decoded wrong result type")
+
+    for _ in range(warmup_iterations):
+        operation()
+
+    throughput = _measure_throughput_ops_per_second(operation, duration_seconds)
+    return _measured_throughput_result(scenario_id, throughput)
+
+
+def _run_submit_result_metadata_encode_decode(scenario_id: str, workload: dict[str, Any]) -> dict[str, Any]:
+    iterations = _positive_int(workload.get("iterations"), default=100_000)
+    warmup_iterations = _non_negative_int(workload.get("warmup_iterations"), default=min(10_000, iterations))
+    submit_packet, result_packet = _build_submit_result_packet_views()
+    submit_metadata = submit_packet.header.pack() + submit_packet.metadata
+    result_metadata = result_packet.header.pack() + result_packet.metadata
+
+    def operation() -> None:
+        decoded_submit_header = NnrpHeader.unpack(submit_metadata[:HEADER_LENGTH])
+        decoded_result_header = NnrpHeader.unpack(result_metadata[:HEADER_LENGTH])
+        decoded_submit = NnrpPacket(header=decoded_submit_header, metadata=submit_packet.metadata, body=b"")
+        decoded_result = NnrpPacket(header=decoded_result_header, metadata=result_packet.metadata, body=b"")
+        if decoded_submit.header.msg_type is not MessageType.FRAME_SUBMIT:
+            raise RuntimeError("submit metadata benchmark decoded wrong submit type")
+        if decoded_result.header.msg_type is not MessageType.RESULT_PUSH:
+            raise RuntimeError("submit metadata benchmark decoded wrong result type")
+
+    for _ in range(warmup_iterations):
+        operation()
+
+    samples = _measure_microseconds(operation, iterations)
+    return _measured_latency_result(scenario_id, samples)
+
+
+def _run_typed_payload_pack_unpack(scenario_id: str, workload: dict[str, Any]) -> dict[str, Any]:
+    iterations = _positive_int(workload.get("iterations"), default=100_000)
+    warmup_iterations = _non_negative_int(workload.get("warmup_iterations"), default=min(10_000, iterations))
+    tile_ids = (0, 1, 2, 3)
+    section = _build_tensor_section()
+
+    def operation() -> None:
+        tile_index = pack_tile_index_block(tile_ids, mode=TileIndexMode.RAW_U16)
+        section_payload = pack_tensor_section_data(section)
+        unpack_tile_index_block(tile_index, mode=TileIndexMode.RAW_U16, tile_count=len(tile_ids))
+        unpack_tensor_body(
+            tile_index + section_payload,
+            tile_index_bytes=len(tile_index),
+            section_count=1,
+            tile_count=4,
+        )
+
+    for _ in range(warmup_iterations):
+        operation()
+
+    samples = _measure_microseconds(operation, iterations)
+    return _measured_latency_result(scenario_id, samples)
+
+
+def _run_runtime_probe(scenario_id: str, workload: dict[str, Any]) -> dict[str, Any]:
+    iterations = _positive_int(workload.get("iterations"), default=100_000)
+    warmup_iterations = _non_negative_int(workload.get("warmup_iterations"), default=min(10_000, iterations))
+
+    def operation() -> None:
+        environment = _build_environment()
+        capabilities = (
+            "benchmark.header",
+            "benchmark.metadata",
+            "benchmark.submit_result",
+            "benchmark.transport.tcp",
+            "benchmark.transport.quic",
+        )
+        if not environment["os"] or "benchmark.header" not in capabilities:
+            raise RuntimeError("runtime probe benchmark mismatch")
+
+    for _ in range(warmup_iterations):
+        operation()
+
+    samples = _measure_microseconds(operation, iterations)
+    return _measured_latency_result(scenario_id, samples)
+
+
+def _run_session_lifecycle(scenario_id: str, workload: dict[str, Any]) -> dict[str, Any]:
+    iterations = _positive_int(workload.get("iterations"), default=100_000)
+    warmup_iterations = _non_negative_int(workload.get("warmup_iterations"), default=min(10_000, iterations))
+    client_hello = _build_client_hello_metadata()
+    server_ack = _build_server_ack_metadata()
+    close_packet = NnrpPacket.build(
+        version_major=1,
+        wire_format=WireFormat.CURRENT,
+        msg_type=MessageType.CLOSE,
+        session_id=41,
+    )
+
+    def operation() -> None:
+        decoded_hello = ClientHelloMetadata.unpack(client_hello.pack())
+        decoded_ack = ServerHelloAckMetadata.unpack(server_ack.pack())
+        decoded_close = NnrpPacket.unpack(close_packet.pack())
+        if decoded_hello.requested_session_id != decoded_ack.session_id:
+            raise RuntimeError("session lifecycle benchmark session mismatch")
+        if decoded_close.header.msg_type is not MessageType.CLOSE:
+            raise RuntimeError("session lifecycle benchmark decoded wrong close type")
+
+    for _ in range(warmup_iterations):
+        operation()
+
+    samples = _measure_microseconds(operation, iterations)
+    return _measured_latency_result(scenario_id, samples)
+
+
+def _run_transport_loopback(scenario_id: str, workload: dict[str, Any]) -> dict[str, Any]:
+    duration_seconds = _positive_float(workload.get("duration_seconds"), default=10.0)
+    warmup_iterations = _non_negative_int(workload.get("warmup_iterations"), default=1_000)
+    payload_bytes = _positive_int(workload.get("probe_payload_bytes"), default=32 * 1024)
+    probe = build_transport_probe_packet(
+        metadata=_transport_probe_metadata(probe_id=7, probe_payload_bytes=payload_bytes),
+        body=b"x" * payload_bytes,
+        trace_id=19,
+    ).pack()
+    ack = build_transport_probe_ack_packet(
+        metadata=TransportProbeAckMetadata(probe_id=7, reserved=0, server_recv_ts_us=123456),
+        trace_id=19,
+    ).pack()
+
+    def operation() -> None:
+        decoded_probe = NnrpPacket.unpack(probe)
+        decoded_ack = NnrpPacket.unpack(ack)
+        if decoded_probe.header.msg_type is not MessageType.TRANSPORT_PROBE:
+            raise RuntimeError("transport benchmark decoded wrong probe type")
+        if decoded_ack.header.msg_type is not MessageType.TRANSPORT_PROBE_ACK:
+            raise RuntimeError("transport benchmark decoded wrong ack type")
+
+    for _ in range(warmup_iterations):
+        operation()
+
+    throughput = _measure_throughput_ops_per_second(operation, duration_seconds)
+    return _measured_throughput_result(scenario_id, throughput)
+
+
+def _build_submit_result_packets() -> tuple[bytes, bytes]:
+    submit, result = _build_submit_result_packet_views()
+    return submit.pack(), result.pack()
+
+
+def _build_submit_result_packet_views() -> tuple[NnrpPacket, NnrpPacket]:
+    section = _build_tensor_section()
+    tile_ids = (0, 1, 2, 3)
+    submit = build_frame_submit_packet(
+        session_id=41,
+        frame_id=303,
+        src_width=64,
+        src_height=64,
+        tile_width=32,
+        tile_height=32,
+        tile_ids=tile_ids,
+        sections=(section,),
+        camera_block=b"NNRP-BENCHMARK-CAMERA",
+        input_profile=InputProfile.CHANGED_TILES_LUMA,
+        tile_index_mode=TileIndexMode.RAW_U16,
+        latency_budget_ms=16,
+    )
+    result = build_result_push_packet(
+        session_id=41,
+        frame_id=303,
+        tile_ids=tile_ids,
+        sections=(section,),
+        tile_index_mode=TileIndexMode.RAW_U16,
+        inference_ms=4,
+        queue_ms=1,
+        server_total_ms=5,
+    )
+    return submit, result
+
+
+def _build_tensor_section() -> TensorSectionData:
+    tile_payload = b"\x07" * 1024
+    return TensorSectionData(
+        role_id=5,
+        default_codec_id=0,
+        dtype_id=TensorDType.UINT8,
+        layout_id=TensorLayout.NHWC,
+        tile_payloads=(tile_payload, tile_payload, tile_payload, tile_payload),
+    )
+
+
+def _build_client_hello_metadata() -> ClientHelloMetadata:
+    return ClientHelloMetadata(
+        min_version_major=1,
+        max_version_major=1,
+        supported_wire_format_bitmap=1,
+        supported_profile_bitmap=1,
+        supported_payload_kind_bitmap=1,
+        supported_codec_bitmap=1,
+        supported_compression_bitmap=1,
+        supported_dtype_bitmap=1 << int(TensorDType.UINT8),
+        supported_layout_bitmap=1 << int(TensorLayout.NHWC),
+        cache_digest_bitmap=0,
+        cache_object_bitmap=0,
+        cache_namespace_count=0,
+        max_lane_count=2,
+        max_cache_entries=0,
+        max_cache_bytes=0,
+        target_cadence_x100=6000,
+        latency_budget_ms=16,
+        quality_tier=1,
+        degrade_policy=0,
+        requested_session_id=41,
+        auth_bytes=0,
+        control_extension_bytes=0,
+    )
+
+
+def _build_server_ack_metadata() -> ServerHelloAckMetadata:
+    return ServerHelloAckMetadata(
+        selected_version_major=1,
+        selected_wire_format=int(WireFormat.CURRENT),
+        auth_status=0,
+        session_id=41,
+        accepted_profile_bitmap=1,
+        accepted_payload_kind_bitmap=1,
+        accepted_codec_bitmap=1,
+        accepted_compression_bitmap=1,
+        accepted_dtype_bitmap=1 << int(TensorDType.UINT8),
+        accepted_layout_bitmap=1 << int(TensorLayout.NHWC),
+        cache_digest_bitmap=0,
+        cache_object_bitmap=0,
+        max_cache_entries=0,
+        max_cache_bytes=0,
+        max_lane_count=2,
+        max_concurrent_frames=4,
+        target_cadence_x100=6000,
+        latency_budget_ms=16,
+        quality_tier=1,
+        degrade_policy=0,
+        max_body_bytes=1 << 20,
+        token_ttl_ms=30_000,
+        retry_after_ms=0,
+        control_extension_bytes=0,
+        server_flags=0,
+    )
+
+
+def _transport_probe_metadata(*, probe_id: int, probe_payload_bytes: int):
+    from nnrp.core.messages.control import TransportProbeMetadata
+
+    return TransportProbeMetadata(
+        probe_id=probe_id,
+        probe_payload_bytes=probe_payload_bytes,
+        client_send_ts_us=123000,
+    )
+
+
 def _measure_microseconds(operation: Callable[[], None], iterations: int) -> list[float]:
     samples: list[float] = []
     for _ in range(iterations):
@@ -118,6 +461,15 @@ def _measure_microseconds(operation: Callable[[], None], iterations: int) -> lis
         operation()
         samples.append((time.perf_counter_ns() - start) / 1_000)
     return samples
+
+
+def _measure_throughput_ops_per_second(operation: Callable[[], None], duration_seconds: float) -> float:
+    deadline = time.perf_counter() + duration_seconds
+    completed = 0
+    while time.perf_counter() < deadline:
+        operation()
+        completed += 1
+    return completed / duration_seconds
 
 
 def _measured_latency_result(scenario_id: str, samples: list[float]) -> dict[str, Any]:
@@ -128,6 +480,16 @@ def _measured_latency_result(scenario_id: str, samples: list[float]) -> dict[str
             "p50_us": _percentile(samples, 50),
             "p95_us": _percentile(samples, 95),
             "p99_us": _percentile(samples, 99),
+        },
+    }
+
+
+def _measured_throughput_result(scenario_id: str, throughput_ops_per_second: float) -> dict[str, Any]:
+    return {
+        "id": scenario_id,
+        "outcome": "measured",
+        "metrics": {
+            "throughput_ops_per_sec": throughput_ops_per_second,
         },
     }
 
@@ -169,6 +531,14 @@ def _positive_int(value: object, *, default: int) -> int:
     return value
 
 
+def _positive_float(value: object, *, default: float) -> float:
+    if value is None:
+        return default
+    if not isinstance(value, int | float) or value <= 0:
+        raise ValueError("benchmark workload duration_seconds must be a positive number")
+    return float(value)
+
+
 def _non_negative_int(value: object, *, default: int) -> int:
     if value is None:
         return default
@@ -199,6 +569,13 @@ def _require_scenario_list(document: dict[str, Any]) -> list[dict[str, Any]]:
 
 _SCENARIO_RUNNERS: dict[str, Callable[[str, dict[str, Any]], dict[str, Any]]] = {
     "header_encode_decode": _run_header_encode_decode,
+    "metadata_encode_decode": _run_metadata_encode_decode,
+    "submit_result_metadata_encode_decode": _run_submit_result_metadata_encode_decode,
+    "typed_payload_pack_unpack": _run_typed_payload_pack_unpack,
+    "runtime_probe": _run_runtime_probe,
+    "session_lifecycle": _run_session_lifecycle,
+    "submit_result_loop": _run_submit_result_loop,
+    "transport_loopback": _run_transport_loopback,
 }
 
 

@@ -36,6 +36,22 @@ REQUIRED_RUNTIME_FEATURES = (
     | RUNTIME_FEATURE_TRANSPORT_SLOTS
 )
 REQUIRED_TRANSPORT_SLOTS = TRANSPORT_SLOT_TCP
+FFI_STATUS_OK = 0
+FFI_STATUS_INVALID_ARGUMENT = 1
+FFI_STATUS_INVALID_HANDLE = 2
+FFI_STATUS_INVALID_STATE = 3
+FFI_STATUS_PROTOCOL_ERROR = 4
+FFI_STATUS_WOULD_BLOCK = 5
+FFI_STATUS_CALLBACK_REJECTED = 6
+FFI_STATUS_INTERNAL_ERROR = 0xFFFF
+ERROR_FAMILY_NONE = 0
+ERROR_FAMILY_SESSION = 1
+ERROR_FAMILY_CACHE = 2
+ERROR_FAMILY_SCHEMA = 3
+ERROR_FAMILY_TRANSPORT = 4
+ERROR_FAMILY_LIFECYCLE = 5
+ERROR_FAMILY_OPERATION = 6
+ERROR_FAMILY_INTERNAL = 0xFFFF
 HANDLE_KIND_INVALID = 0
 HANDLE_KIND_CONNECTION = 1
 HANDLE_KIND_SESSION = 2
@@ -78,6 +94,76 @@ class NativeProbeResult:
 
 class NativeHandleError(ValueError):
     """Raised when an FFI handle or buffer view violates the native ABI contract."""
+
+
+@dataclass(frozen=True)
+class NativeStatus:
+    status_code: int
+    error_family: int = ERROR_FAMILY_NONE
+    protocol_error_code: int = 0
+    detail_code: int = 0
+
+    def __post_init__(self) -> None:
+        _validate_u32("status_code", self.status_code)
+        _validate_u32("error_family", self.error_family)
+        _validate_u32("protocol_error_code", self.protocol_error_code)
+        _validate_u32("detail_code", self.detail_code)
+
+    @classmethod
+    def ok(cls) -> NativeStatus:
+        return cls(FFI_STATUS_OK)
+
+    @classmethod
+    def from_ffi(cls, status: _NnrpFfiStatus) -> NativeStatus:
+        return cls(
+            int(status.status_code),
+            int(status.error_family),
+            int(status.protocol_error_code),
+            int(status.detail_code),
+        )
+
+    @property
+    def succeeded(self) -> bool:
+        return self.status_code == FFI_STATUS_OK
+
+    def to_ffi(self) -> _NnrpFfiStatus:
+        return _NnrpFfiStatus(self.status_code, self.error_family, self.protocol_error_code, self.detail_code)
+
+
+class NativeRuntimeError(RuntimeError):
+    """Base exception for non-OK Rust FFI status results."""
+
+    def __init__(self, status: NativeStatus, message: str | None = None) -> None:
+        self.status = status
+        super().__init__(message or _format_status_message(status))
+
+
+class NativeInvalidArgumentError(NativeRuntimeError):
+    """Raised when Rust FFI rejects invalid caller-owned input."""
+
+
+class NativeInvalidHandleError(NativeRuntimeError):
+    """Raised when Rust FFI rejects a stale, wrong-kind, or unknown handle."""
+
+
+class NativeInvalidStateError(NativeRuntimeError):
+    """Raised when Rust FFI rejects an operation for the current runtime state."""
+
+
+class NativeProtocolError(NativeRuntimeError):
+    """Raised when Rust FFI reports a protocol-family error."""
+
+
+class NativeWouldBlockError(NativeRuntimeError):
+    """Raised when Rust FFI has no event/result available for a non-blocking call."""
+
+
+class NativeCallbackRejectedError(NativeRuntimeError):
+    """Raised when a callback sink rejects a Rust FFI event."""
+
+
+class NativeInternalError(NativeRuntimeError):
+    """Raised when Rust FFI reports an internal failure."""
 
 
 @dataclass(frozen=True)
@@ -241,6 +327,15 @@ class _NnrpProtocolVersion(ctypes.Structure):
     ]
 
 
+class _NnrpFfiStatus(ctypes.Structure):
+    _fields_ = [
+        ("status_code", ctypes.c_uint32),
+        ("error_family", ctypes.c_uint32),
+        ("protocol_error_code", ctypes.c_uint32),
+        ("detail_code", ctypes.c_uint32),
+    ]
+
+
 class _NnrpHandle(ctypes.Structure):
     _fields_ = [
         ("kind", ctypes.c_uint32),
@@ -395,6 +490,15 @@ def _call_runtime_capabilities(library: Any) -> _NnrpRuntimeCapabilities:
     return capabilities
 
 
+def raise_for_native_status(status: NativeStatus | _NnrpFfiStatus) -> None:
+    native_status = status if isinstance(status, NativeStatus) else NativeStatus.from_ffi(status)
+    if native_status.succeeded:
+        return
+
+    error_type = _STATUS_EXCEPTION_TYPES.get(native_status.status_code, NativeInternalError)
+    raise error_type(native_status)
+
+
 def _normalize_os(value: str) -> str:
     normalized = value.strip().lower()
     aliases = {
@@ -453,3 +557,24 @@ def _pointer_value(value: int | None) -> int:
 
 def _void_pointer(value: int) -> ctypes.c_void_p:
     return ctypes.c_void_p(value or None)
+
+
+def _format_status_message(status: NativeStatus) -> str:
+    return (
+        "native runtime status failed: "
+        f"status_code={status.status_code}, "
+        f"error_family={status.error_family}, "
+        f"protocol_error_code={status.protocol_error_code}, "
+        f"detail_code={status.detail_code}"
+    )
+
+
+_STATUS_EXCEPTION_TYPES = {
+    FFI_STATUS_INVALID_ARGUMENT: NativeInvalidArgumentError,
+    FFI_STATUS_INVALID_HANDLE: NativeInvalidHandleError,
+    FFI_STATUS_INVALID_STATE: NativeInvalidStateError,
+    FFI_STATUS_PROTOCOL_ERROR: NativeProtocolError,
+    FFI_STATUS_WOULD_BLOCK: NativeWouldBlockError,
+    FFI_STATUS_CALLBACK_REJECTED: NativeCallbackRejectedError,
+    FFI_STATUS_INTERNAL_ERROR: NativeInternalError,
+}

@@ -6,6 +6,15 @@ import pytest
 
 from nnrp.native import (
     DEFAULT_ARTIFACT_ROOT_ENV,
+    ERROR_FAMILY_CACHE,
+    FFI_STATUS_CALLBACK_REJECTED,
+    FFI_STATUS_INTERNAL_ERROR,
+    FFI_STATUS_INVALID_ARGUMENT,
+    FFI_STATUS_INVALID_HANDLE,
+    FFI_STATUS_INVALID_STATE,
+    FFI_STATUS_OK,
+    FFI_STATUS_PROTOCOL_ERROR,
+    FFI_STATUS_WOULD_BLOCK,
     HANDLE_KIND_BUFFER,
     HANDLE_KIND_CONNECTION,
     HANDLE_KIND_EVENT_PUMP,
@@ -16,16 +25,25 @@ from nnrp.native import (
     NativeArtifactError,
     NativeBufferHandle,
     NativeBufferView,
+    NativeCallbackRejectedError,
     NativeConnectionHandle,
     NativeEventPumpHandle,
     NativeHandle,
     NativeHandleError,
+    NativeInternalError,
+    NativeInvalidArgumentError,
+    NativeInvalidHandleError,
+    NativeInvalidStateError,
     NativeMutableBufferView,
     NativeOperationHandle,
     NativePlatform,
+    NativeProtocolError,
     NativeSessionHandle,
+    NativeStatus,
+    NativeWouldBlockError,
     _NnrpBufferView,
     _NnrpBufferViewMut,
+    _NnrpFfiStatus,
     _NnrpHandle,
     _NnrpProtocolVersion,
     _NnrpRuntimeCapabilities,
@@ -35,6 +53,7 @@ from nnrp.native import (
     load_native_library,
     native_library_name,
     probe_native_artifact,
+    raise_for_native_status,
     resolve_native_artifact,
 )
 
@@ -290,3 +309,55 @@ def test_native_buffer_views_reject_non_empty_null_pointer() -> None:
         NativeBufferView(0, 1)
     with pytest.raises(NativeHandleError, match="non-null pointer"):
         NativeMutableBufferView(0, 1)
+
+
+def test_native_status_roundtrips_ffi_shape() -> None:
+    status = NativeStatus(FFI_STATUS_PROTOCOL_ERROR, ERROR_FAMILY_CACHE, 0x22, 0x33)
+
+    ffi = status.to_ffi()
+    decoded = NativeStatus.from_ffi(ffi)
+
+    assert (ffi.status_code, ffi.error_family, ffi.protocol_error_code, ffi.detail_code) == (
+        FFI_STATUS_PROTOCOL_ERROR,
+        ERROR_FAMILY_CACHE,
+        0x22,
+        0x33,
+    )
+    assert decoded == status
+    assert decoded.succeeded is False
+    assert NativeStatus.ok().succeeded is True
+
+
+@pytest.mark.parametrize(
+    ("status_code", "error_type"),
+    [
+        (FFI_STATUS_INVALID_ARGUMENT, NativeInvalidArgumentError),
+        (FFI_STATUS_INVALID_HANDLE, NativeInvalidHandleError),
+        (FFI_STATUS_INVALID_STATE, NativeInvalidStateError),
+        (FFI_STATUS_PROTOCOL_ERROR, NativeProtocolError),
+        (FFI_STATUS_WOULD_BLOCK, NativeWouldBlockError),
+        (FFI_STATUS_CALLBACK_REJECTED, NativeCallbackRejectedError),
+        (FFI_STATUS_INTERNAL_ERROR, NativeInternalError),
+    ],
+)
+def test_raise_for_native_status_maps_stable_status_codes(status_code: int, error_type: type[Exception]) -> None:
+    status = NativeStatus(status_code, ERROR_FAMILY_CACHE, 7, 9)
+
+    with pytest.raises(error_type) as captured:
+        raise_for_native_status(status)
+
+    assert captured.value.status == status
+    assert "status_code=" in str(captured.value)
+
+
+def test_raise_for_native_status_accepts_ffi_status_and_ignores_ok() -> None:
+    raise_for_native_status(NativeStatus.ok())
+    raise_for_native_status(_NnrpFfiStatus(FFI_STATUS_OK, 0, 0, 0))
+
+    with pytest.raises(NativeInvalidHandleError):
+        raise_for_native_status(_NnrpFfiStatus(FFI_STATUS_INVALID_HANDLE, 5, 0, 2))
+
+
+def test_raise_for_native_status_maps_unknown_status_to_internal_error() -> None:
+    with pytest.raises(NativeInternalError):
+        raise_for_native_status(NativeStatus(0x1234))

@@ -15,6 +15,7 @@
 ## Documentation And Rollout
 
 - [ ] Document the preview3 Python package as a Rust-backed binding layer plus host-facing control/session helpers.
+- [ ] Keep `doc/rs-native-artifacts-migration.md` updated with the native artifact plan, supported platform matrix, and pre/post migration benchmark results.
 - [ ] Document the current connection/session model and how it replaces the earlier single-session host mental model.
 - [ ] Document cache lease, schema registry, profile neutrality, and operation/workflow lifecycle semantics for Python hosts.
 - [ ] Document how preview3 Rust-backed helpers replace the prior preview helper surface within `NNRP/1`.

@@ -1,7 +1,7 @@
 # Python Preview3 Rust Binding Adoption
 
 - [ ] Consume the frozen Rust FFI surface from `nnrp-rs`.
-- [ ] Pin the exact `nnrp-rs` commit, tag, or artifact version used by the Python package.
+- [x] Pin the exact `nnrp-rs` commit, tag, or artifact version used by the Python package.
 - [x] Define the packaged native artifact layout for Windows, macOS, Linux, Android, and iOS.
 - [x] Add a platform and architecture resolver for x86, x86_64, arm, and arm64 variants.
 - [x] Load the native artifact through one internal backend module before exposing any host-facing API.

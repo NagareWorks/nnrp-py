@@ -8,6 +8,7 @@
 - [x] Probe ABI version, protocol version, enabled transport slots, and feature flags before accepting the native artifact.
 - [x] Reject ABI/protocol mismatches with a deterministic Python exception and actionable diagnostic text.
 - [ ] Map connection, session, operation, schema, and buffer handles into Python-owned wrapper types.
+- [x] Map the currently frozen Rust FFI value handles for connection, session, operation, event pump, and buffer into Python-owned wrapper types.
 - [ ] Define ownership and lifetime rules for native buffers returned to Python.
 - [ ] Ensure callbacks or poll results never outlive the native connection/session handle that owns them.
 - [ ] Map stable Rust error codes into Python exception hierarchies.

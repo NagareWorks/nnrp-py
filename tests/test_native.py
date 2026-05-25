@@ -6,10 +6,27 @@ import pytest
 
 from nnrp.native import (
     DEFAULT_ARTIFACT_ROOT_ENV,
+    HANDLE_KIND_BUFFER,
+    HANDLE_KIND_CONNECTION,
+    HANDLE_KIND_EVENT_PUMP,
+    HANDLE_KIND_OPERATION,
+    HANDLE_KIND_SESSION,
     REQUIRED_RUNTIME_FEATURES,
     TRANSPORT_SLOT_TCP,
     NativeArtifactError,
+    NativeBufferHandle,
+    NativeBufferView,
+    NativeConnectionHandle,
+    NativeEventPumpHandle,
+    NativeHandle,
+    NativeHandleError,
+    NativeMutableBufferView,
+    NativeOperationHandle,
     NativePlatform,
+    NativeSessionHandle,
+    _NnrpBufferView,
+    _NnrpBufferViewMut,
+    _NnrpHandle,
     _NnrpProtocolVersion,
     _NnrpRuntimeCapabilities,
     _normalize_arch,
@@ -207,3 +224,69 @@ def test_probe_native_artifact_rejects_invalid_probe_shape(tmp_path: Path) -> No
 
     with pytest.raises(NativeArtifactError, match="invalid runtime capabilities shape"):
         probe_native_artifact(artifact, library=InvalidCapabilitiesLibrary())
+
+
+def test_native_handle_roundtrips_ffi_shape() -> None:
+    handle = NativeHandle(HANDLE_KIND_CONNECTION, 7, 2, 0)
+
+    ffi = handle.to_ffi()
+    decoded = NativeHandle.from_ffi(ffi)
+
+    assert (ffi.kind, ffi.id, ffi.generation, ffi.flags) == (HANDLE_KIND_CONNECTION, 7, 2, 0)
+    assert decoded == handle
+    assert decoded.is_valid is True
+
+
+def test_native_handle_invalid_shape_is_zero_only() -> None:
+    assert NativeHandle.invalid().to_ffi().kind == 0
+
+    with pytest.raises(NativeHandleError, match="invalid handles"):
+        NativeHandle(0, 1, 0)
+
+
+def test_native_handle_requires_valid_kind_id_and_generation() -> None:
+    with pytest.raises(NativeHandleError, match="uint32"):
+        NativeHandle(-1, 1, 1)
+    with pytest.raises(NativeHandleError, match="non-zero id"):
+        NativeHandle(HANDLE_KIND_SESSION, 0, 1)
+    with pytest.raises(NativeHandleError, match="non-zero id"):
+        NativeHandle(HANDLE_KIND_SESSION, 1, 0)
+
+
+@pytest.mark.parametrize(
+    ("wrapper_type", "kind"),
+    [
+        (NativeConnectionHandle, HANDLE_KIND_CONNECTION),
+        (NativeSessionHandle, HANDLE_KIND_SESSION),
+        (NativeOperationHandle, HANDLE_KIND_OPERATION),
+        (NativeEventPumpHandle, HANDLE_KIND_EVENT_PUMP),
+        (NativeBufferHandle, HANDLE_KIND_BUFFER),
+    ],
+)
+def test_typed_native_handles_accept_only_matching_kind(wrapper_type: type, kind: int) -> None:
+    wrapper = wrapper_type.from_ffi(_NnrpHandle(kind, 11, 3, 0))
+
+    assert wrapper.to_ffi().kind == kind
+
+    with pytest.raises(NativeHandleError, match="expected native handle kind"):
+        mismatched_kind = HANDLE_KIND_CONNECTION if kind != HANDLE_KIND_CONNECTION else HANDLE_KIND_SESSION
+        wrapper_type(NativeHandle(mismatched_kind, 11, 3))
+
+
+def test_native_buffer_views_roundtrip_ffi_shape() -> None:
+    view = NativeBufferView(0x1000, 64)
+    mutable_view = NativeMutableBufferView(0x2000, 128)
+
+    assert NativeBufferView.from_ffi(view.to_ffi()) == view
+    assert NativeMutableBufferView.from_ffi(mutable_view.to_ffi()) == mutable_view
+    assert NativeBufferView.empty().to_ffi().ptr is None
+    assert NativeMutableBufferView.empty().to_ffi().ptr is None
+    assert NativeBufferView.from_ffi(_NnrpBufferView(None, 0)) == NativeBufferView.empty()
+    assert NativeMutableBufferView.from_ffi(_NnrpBufferViewMut(None, 0)) == NativeMutableBufferView.empty()
+
+
+def test_native_buffer_views_reject_non_empty_null_pointer() -> None:
+    with pytest.raises(NativeHandleError, match="non-null pointer"):
+        NativeBufferView(0, 1)
+    with pytest.raises(NativeHandleError, match="non-null pointer"):
+        NativeMutableBufferView(0, 1)

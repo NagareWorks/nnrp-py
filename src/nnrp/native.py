@@ -36,6 +36,12 @@ REQUIRED_RUNTIME_FEATURES = (
     | RUNTIME_FEATURE_TRANSPORT_SLOTS
 )
 REQUIRED_TRANSPORT_SLOTS = TRANSPORT_SLOT_TCP
+HANDLE_KIND_INVALID = 0
+HANDLE_KIND_CONNECTION = 1
+HANDLE_KIND_SESSION = 2
+HANDLE_KIND_OPERATION = 3
+HANDLE_KIND_EVENT_PUMP = 4
+HANDLE_KIND_BUFFER = 5
 DEFAULT_ARTIFACT_ROOT_ENV = "NNRP_NATIVE_ARTIFACT_ROOT"
 
 
@@ -70,10 +76,191 @@ class NativeProbeResult:
     feature_flags: int
 
 
+class NativeHandleError(ValueError):
+    """Raised when an FFI handle or buffer view violates the native ABI contract."""
+
+
+@dataclass(frozen=True)
+class NativeHandle:
+    kind: int
+    id: int
+    generation: int
+    flags: int = 0
+
+    def __post_init__(self) -> None:
+        _validate_u32("kind", self.kind)
+        _validate_u64("id", self.id)
+        _validate_u32("generation", self.generation)
+        _validate_u32("flags", self.flags)
+        if self.kind == HANDLE_KIND_INVALID:
+            if self.id != 0 or self.generation != 0 or self.flags != 0:
+                raise NativeHandleError("invalid handles must use zero id, generation, and flags")
+            return
+        if self.id == 0 or self.generation == 0:
+            raise NativeHandleError("native handles require non-zero id and generation")
+
+    @classmethod
+    def invalid(cls) -> NativeHandle:
+        return cls(HANDLE_KIND_INVALID, 0, 0, 0)
+
+    @classmethod
+    def from_ffi(cls, handle: _NnrpHandle) -> NativeHandle:
+        return cls(int(handle.kind), int(handle.id), int(handle.generation), int(handle.flags))
+
+    @property
+    def is_valid(self) -> bool:
+        return self.kind != HANDLE_KIND_INVALID
+
+    def require_kind(self, expected_kind: int) -> None:
+        if self.kind != expected_kind:
+            raise NativeHandleError(f"expected native handle kind {expected_kind}, got {self.kind}")
+
+    def to_ffi(self) -> _NnrpHandle:
+        return _NnrpHandle(self.kind, self.id, self.generation, self.flags)
+
+
+@dataclass(frozen=True)
+class NativeConnectionHandle:
+    handle: NativeHandle
+
+    def __post_init__(self) -> None:
+        self.handle.require_kind(HANDLE_KIND_CONNECTION)
+
+    @classmethod
+    def from_ffi(cls, handle: _NnrpHandle) -> NativeConnectionHandle:
+        return cls(NativeHandle.from_ffi(handle))
+
+    def to_ffi(self) -> _NnrpHandle:
+        return self.handle.to_ffi()
+
+
+@dataclass(frozen=True)
+class NativeSessionHandle:
+    handle: NativeHandle
+
+    def __post_init__(self) -> None:
+        self.handle.require_kind(HANDLE_KIND_SESSION)
+
+    @classmethod
+    def from_ffi(cls, handle: _NnrpHandle) -> NativeSessionHandle:
+        return cls(NativeHandle.from_ffi(handle))
+
+    def to_ffi(self) -> _NnrpHandle:
+        return self.handle.to_ffi()
+
+
+@dataclass(frozen=True)
+class NativeOperationHandle:
+    handle: NativeHandle
+
+    def __post_init__(self) -> None:
+        self.handle.require_kind(HANDLE_KIND_OPERATION)
+
+    @classmethod
+    def from_ffi(cls, handle: _NnrpHandle) -> NativeOperationHandle:
+        return cls(NativeHandle.from_ffi(handle))
+
+    def to_ffi(self) -> _NnrpHandle:
+        return self.handle.to_ffi()
+
+
+@dataclass(frozen=True)
+class NativeEventPumpHandle:
+    handle: NativeHandle
+
+    def __post_init__(self) -> None:
+        self.handle.require_kind(HANDLE_KIND_EVENT_PUMP)
+
+    @classmethod
+    def from_ffi(cls, handle: _NnrpHandle) -> NativeEventPumpHandle:
+        return cls(NativeHandle.from_ffi(handle))
+
+    def to_ffi(self) -> _NnrpHandle:
+        return self.handle.to_ffi()
+
+
+@dataclass(frozen=True)
+class NativeBufferHandle:
+    handle: NativeHandle
+
+    def __post_init__(self) -> None:
+        self.handle.require_kind(HANDLE_KIND_BUFFER)
+
+    @classmethod
+    def from_ffi(cls, handle: _NnrpHandle) -> NativeBufferHandle:
+        return cls(NativeHandle.from_ffi(handle))
+
+    def to_ffi(self) -> _NnrpHandle:
+        return self.handle.to_ffi()
+
+
+@dataclass(frozen=True)
+class NativeBufferView:
+    ptr: int
+    length: int
+
+    def __post_init__(self) -> None:
+        _validate_pointer_and_length(self.ptr, self.length, detail="buffer views")
+
+    @classmethod
+    def empty(cls) -> NativeBufferView:
+        return cls(0, 0)
+
+    @classmethod
+    def from_ffi(cls, view: _NnrpBufferView) -> NativeBufferView:
+        return cls(_pointer_value(view.ptr), int(view.len))
+
+    def to_ffi(self) -> _NnrpBufferView:
+        return _NnrpBufferView(_void_pointer(self.ptr), self.length)
+
+
+@dataclass(frozen=True)
+class NativeMutableBufferView:
+    ptr: int
+    length: int
+
+    def __post_init__(self) -> None:
+        _validate_pointer_and_length(self.ptr, self.length, detail="mutable buffer views")
+
+    @classmethod
+    def empty(cls) -> NativeMutableBufferView:
+        return cls(0, 0)
+
+    @classmethod
+    def from_ffi(cls, view: _NnrpBufferViewMut) -> NativeMutableBufferView:
+        return cls(_pointer_value(view.ptr), int(view.len))
+
+    def to_ffi(self) -> _NnrpBufferViewMut:
+        return _NnrpBufferViewMut(_void_pointer(self.ptr), self.length)
+
+
 class _NnrpProtocolVersion(ctypes.Structure):
     _fields_ = [
         ("major", ctypes.c_uint8),
         ("wire_format", ctypes.c_uint8),
+    ]
+
+
+class _NnrpHandle(ctypes.Structure):
+    _fields_ = [
+        ("kind", ctypes.c_uint32),
+        ("id", ctypes.c_uint64),
+        ("generation", ctypes.c_uint32),
+        ("flags", ctypes.c_uint32),
+    ]
+
+
+class _NnrpBufferView(ctypes.Structure):
+    _fields_ = [
+        ("ptr", ctypes.c_void_p),
+        ("len", ctypes.c_size_t),
+    ]
+
+
+class _NnrpBufferViewMut(ctypes.Structure):
+    _fields_ = [
+        ("ptr", ctypes.c_void_p),
+        ("len", ctypes.c_size_t),
     ]
 
 
@@ -240,3 +427,29 @@ def _normalize_arch(value: str) -> str:
     if normalized not in {"x86", "x86_64", "arm", "arm64"}:
         raise NativeArtifactError(f"unsupported native artifact architecture: {value}")
     return normalized
+
+
+def _validate_u32(name: str, value: int) -> None:
+    if not isinstance(value, int) or value < 0 or value > 0xFFFFFFFF:
+        raise NativeHandleError(f"{name} must be a uint32 value")
+
+
+def _validate_u64(name: str, value: int) -> None:
+    if not isinstance(value, int) or value < 0 or value > 0xFFFFFFFFFFFFFFFF:
+        raise NativeHandleError(f"{name} must be a uint64 value")
+
+
+def _validate_pointer_and_length(ptr: int, length: int, *, detail: str) -> None:
+    _validate_u64("ptr", ptr)
+    if not isinstance(length, int) or length < 0:
+        raise NativeHandleError("length must be non-negative")
+    if length > 0 and ptr == 0:
+        raise NativeHandleError(f"non-empty {detail} require a non-null pointer")
+
+
+def _pointer_value(value: int | None) -> int:
+    return int(value or 0)
+
+
+def _void_pointer(value: int) -> ctypes.c_void_p:
+    return ctypes.c_void_p(value or None)

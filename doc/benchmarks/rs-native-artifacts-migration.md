@@ -50,36 +50,36 @@ Rules:
 
 | Run | Date | SDK commit | nnrp-rs artifact | Python | OS/arch | CPU | Notes |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| Pre-migration baseline | TBD | TBD | N/A | TBD | TBD | TBD | TBD |
+| Pre-migration baseline | 2026-05-25 | b83dadb | N/A | 3.13.5 | windows/amd64 | Intel(R) Core(TM)2 Duo CPU T7700 @ 2.40GHz | Conformance benchmark runner selected and measured 9 scenarios. |
 | Post-migration native | TBD | TBD | TBD | TBD | TBD | TBD | TBD |
 
 ### Latency Benchmarks
 
 | Benchmark | Payload | Iterations | Pre p50 | Pre p95 | Pre p99 | Post p50 | Post p95 | Post p99 | Delta | Notes |
 | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |
-| Header encode/decode | L0 header | TBD | TBD | TBD | TBD | TBD | TBD | TBD | TBD | TBD |
-| Metadata encode/decode | session open/open ack | TBD | TBD | TBD | TBD | TBD | TBD | TBD | TBD | TBD |
-| Metadata encode/decode | frame submit/result push | TBD | TBD | TBD | TBD | TBD | TBD | TBD | TBD | TBD |
-| Typed payload pack/unpack | tensor descriptor plus payload | TBD | TBD | TBD | TBD | TBD | TBD | TBD | TBD | TBD |
-| Runtime probe | version plus capability query | TBD | TBD | TBD | TBD | TBD | TBD | TBD | TBD | TBD |
-| Session lifecycle | open plus close loop | TBD | TBD | TBD | TBD | TBD | TBD | TBD | TBD | TBD |
+| Header encode/decode | L0 header | 100000 | 3.7 us | 7.3 us | 15.5 us | TBD | TBD | TBD | TBD | Measured by `l4.header.encode_decode.latency`. |
+| Metadata encode/decode | session open/open ack | 100000 | 7.6 us | 15.6 us | 71.1 us | TBD | TBD | TBD | TBD | Measured by `l4.metadata.session_open_ack.latency`. |
+| Metadata encode/decode | frame submit/result push | 100000 | 5.9 us | 12.4 us | 53.9 us | TBD | TBD | TBD | TBD | Measured by `l4.metadata.submit_result.latency`. |
+| Typed payload pack/unpack | tensor descriptor plus payload | 100000 | 36.4 us | 83.4 us | 328.9 us | TBD | TBD | TBD | TBD | Measured by `l4.typed_payload.tensor_pack_unpack.latency`. |
+| Runtime probe | version plus capability query | 100000 | 1.0 us | 2.0 us | 2.8 us | TBD | TBD | TBD | TBD | Measured by `l4.runtime.probe.latency`. |
+| Session lifecycle | open plus close loop | 100000 | 9.6 us | 18.9 us | 43.9 us | TBD | TBD | TBD | TBD | Measured by `l4.session.lifecycle.latency`. |
 
 ### Throughput Benchmarks
 
 | Benchmark | Payload | Duration | Pre throughput | Pre CPU | Pre peak memory | Post throughput | Post CPU | Post peak memory | Delta | Notes |
 | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |
-| Submit/result loop | inline tensor payload | TBD | TBD | TBD | TBD | TBD | TBD | TBD | TBD | TBD |
-| TCP loopback | request/result stream | TBD | TBD | TBD | TBD | TBD | TBD | TBD | TBD | TBD |
-| QUIC loopback | request/result stream | TBD | TBD | TBD | TBD | TBD | TBD | TBD | TBD | Optional slot |
+| Submit/result loop | inline tensor payload | 10 s | 95365.1 ops/s | TBD | TBD | TBD | TBD | TBD | TBD | Measured by `l4.submit_result.inline_tensor.throughput`. |
+| TCP loopback | request/result stream | 10 s | 83973.0 ops/s | TBD | TBD | TBD | TBD | TBD | TBD | Measured by `l4.transport.tcp.loopback.throughput` against the SDK local transport-probe loopback path. |
+| QUIC loopback | request/result stream | 10 s | 91296.2 ops/s | TBD | TBD | TBD | TBD | TBD | TBD | Optional slot; measured by `l4.transport.quic.loopback.throughput` against the SDK local transport-probe loopback path. |
 
 ## Migration Phases
 
-1. Capture pre-migration benchmarks and commit the results to this document.
+1. Capture pre-migration benchmarks and commit the results to `doc/benchmarks/rs-native-artifacts-migration.md`.
 2. Add native artifact discovery, loader validation, and ABI/protocol probes.
 3. Add Python handle wrappers for connection, session, operation, schema, and buffer views.
 4. Move preview3 hot-path encode/decode and submit/result flow behind the native backend.
 5. Keep Python APIs stable and isolate backend selection behind one internal module.
-6. Add post-migration benchmarks and record the deltas in this document.
+6. Add post-migration benchmarks and record the deltas in `doc/benchmarks/rs-native-artifacts-migration.md`.
 7. Enable conformance and packaging CI for the supported platform matrix.
 
 ## Open Decisions

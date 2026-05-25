@@ -6,9 +6,12 @@ import pytest
 
 from nnrp.native import (
     DEFAULT_ARTIFACT_ROOT_ENV,
+    REQUIRED_RUNTIME_FEATURES,
+    TRANSPORT_SLOT_TCP,
     NativeArtifactError,
     NativePlatform,
     _NnrpProtocolVersion,
+    _NnrpRuntimeCapabilities,
     _normalize_arch,
     current_native_platform,
     default_artifact_root,
@@ -20,15 +23,39 @@ from nnrp.native import (
 
 
 class FakeLibrary:
-    def __init__(self, major: int = 1, wire_format: int = 0) -> None:
-        self._version = _NnrpProtocolVersion(major, wire_format)
+    def __init__(
+        self,
+        *,
+        abi_major: int = 1,
+        abi_minor: int = 0,
+        abi_patch: int = 0,
+        protocol_major: int = 1,
+        wire_format: int = 0,
+        transport_slots: int = TRANSPORT_SLOT_TCP,
+        feature_flags: int = REQUIRED_RUNTIME_FEATURES,
+    ) -> None:
+        self._capabilities = _NnrpRuntimeCapabilities(
+            abi_major,
+            abi_minor,
+            abi_patch,
+            0,
+            _NnrpProtocolVersion(protocol_major, wire_format),
+            1,
+            0,
+            0,
+            3,
+            1,
+            0,
+            transport_slots,
+            feature_flags,
+        )
 
-    def nnrp_current_protocol_version(self) -> _NnrpProtocolVersion:
-        return self._version
+    def nnrp_runtime_capabilities(self) -> _NnrpRuntimeCapabilities:
+        return self._capabilities
 
 
-class InvalidVersionLibrary:
-    def nnrp_current_protocol_version(self) -> object:
+class InvalidCapabilitiesLibrary:
+    def nnrp_runtime_capabilities(self) -> object:
         return object()
 
 
@@ -108,8 +135,15 @@ def test_probe_native_artifact_accepts_matching_protocol(tmp_path: Path) -> None
     result = probe_native_artifact(artifact, library=FakeLibrary())
 
     assert result.artifact_path == artifact
+    assert result.abi_major == 1
+    assert result.abi_minor == 0
+    assert result.abi_patch == 0
     assert result.protocol_major == 1
     assert result.protocol_wire_format == 0
+    assert result.sdk_preview == 3
+    assert result.sdk_revision == 1
+    assert result.transport_slots == TRANSPORT_SLOT_TCP
+    assert result.feature_flags == REQUIRED_RUNTIME_FEATURES
 
 
 def test_probe_native_artifact_resolves_path_from_root(tmp_path: Path) -> None:
@@ -132,14 +166,38 @@ def test_probe_native_artifact_rejects_protocol_mismatch(tmp_path: Path) -> None
     artifact.write_bytes(b"fake")
 
     with pytest.raises(NativeArtifactError, match="protocol mismatch"):
-        probe_native_artifact(artifact, library=FakeLibrary(major=2, wire_format=0))
+        probe_native_artifact(artifact, library=FakeLibrary(protocol_major=2, wire_format=0))
+
+
+def test_probe_native_artifact_rejects_abi_mismatch(tmp_path: Path) -> None:
+    artifact = tmp_path / "nnrp_ffi.dll"
+    artifact.write_bytes(b"fake")
+
+    with pytest.raises(NativeArtifactError, match="ABI mismatch"):
+        probe_native_artifact(artifact, library=FakeLibrary(abi_major=2))
+
+
+def test_probe_native_artifact_rejects_missing_required_feature(tmp_path: Path) -> None:
+    artifact = tmp_path / "nnrp_ffi.dll"
+    artifact.write_bytes(b"fake")
+
+    with pytest.raises(NativeArtifactError, match="required runtime feature flags"):
+        probe_native_artifact(artifact, library=FakeLibrary(feature_flags=REQUIRED_RUNTIME_FEATURES & ~1))
+
+
+def test_probe_native_artifact_rejects_missing_tcp_transport_slot(tmp_path: Path) -> None:
+    artifact = tmp_path / "nnrp_ffi.dll"
+    artifact.write_bytes(b"fake")
+
+    with pytest.raises(NativeArtifactError, match="required transport slots"):
+        probe_native_artifact(artifact, library=FakeLibrary(transport_slots=0))
 
 
 def test_probe_native_artifact_rejects_missing_probe_symbol(tmp_path: Path) -> None:
     artifact = tmp_path / "nnrp_ffi.dll"
     artifact.write_bytes(b"fake")
 
-    with pytest.raises(NativeArtifactError, match="missing nnrp_current_protocol_version"):
+    with pytest.raises(NativeArtifactError, match="missing nnrp_runtime_capabilities"):
         probe_native_artifact(artifact, library=object())
 
 
@@ -147,5 +205,5 @@ def test_probe_native_artifact_rejects_invalid_probe_shape(tmp_path: Path) -> No
     artifact = tmp_path / "nnrp_ffi.dll"
     artifact.write_bytes(b"fake")
 
-    with pytest.raises(NativeArtifactError, match="invalid protocol version shape"):
-        probe_native_artifact(artifact, library=InvalidVersionLibrary())
+    with pytest.raises(NativeArtifactError, match="invalid runtime capabilities shape"):
+        probe_native_artifact(artifact, library=InvalidCapabilitiesLibrary())

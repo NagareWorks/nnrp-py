@@ -73,6 +73,15 @@ from nnrp.core import (
     unpack_tensor_body,
     unpack_tile_index_block,
 )
+from nnrp.native import (
+    NativeArtifactError,
+    NativePlatform,
+    NativeProbeResult,
+    current_native_platform,
+    native_library_name,
+    probe_native_artifact,
+    resolve_native_artifact,
+)
 
 __all__ = [
     "__version__",
@@ -115,6 +124,9 @@ __all__ = [
     "TransportProbeAckMetadata",
     "TransportProbeMetadata",
     "TransportPolicy",
+    "NativeArtifactError",
+    "NativePlatform",
+    "NativeProbeResult",
     "build_client_hello_loss_tolerance_extension",
     "build_client_hello_payload_capabilities_extension",
     "build_client_hello_transport_policy_extension",
@@ -134,6 +146,8 @@ __all__ = [
     "build_session_migrate_packet",
     "build_transport_probe_ack_packet",
     "build_transport_probe_packet",
+    "current_native_platform",
+    "native_library_name",
     "pack_control_extension_block",
     "pack_tensor_section",
     "pack_tensor_section_data",
@@ -144,6 +158,8 @@ __all__ = [
     "parse_server_hello_ack_loss_tolerance_extension",
     "parse_server_hello_ack_payload_capabilities_extension",
     "parse_server_hello_ack_transport_policy_extension",
+    "probe_native_artifact",
+    "resolve_native_artifact",
     "unpack_control_extension_block",
     "unpack_tensor_body",
     "unpack_tile_index_block",

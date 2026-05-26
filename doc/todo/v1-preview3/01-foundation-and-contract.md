@@ -46,7 +46,7 @@
 - [ ] Implement session priority classes, operation lifecycle states, cancellation scopes, and `FLOW_UPDATE` semantics from frozen protocol enums and metadata tables.
   - [x] Preserve operation lifecycle states on Python result wrappers.
   - [x] Add operation cancellation helpers on native sessions and operations.
-  - [ ] Add priority and scheduling hint wrappers.
+  - [x] Add priority and scheduling hint wrappers.
   - [x] Add `FLOW_UPDATE`/credit wrappers over Rust control/event delivery.
 - [ ] Implement cache lease, schema registry, and typed payload descriptor wrappers against the frozen 32B / 24B layouts and standard error behavior.
   - [ ] Add cache lease descriptor wrappers.

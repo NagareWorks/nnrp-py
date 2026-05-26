@@ -41,6 +41,6 @@
 - [ ] Keep pure-Python codec helpers limited to fixture inspection, diagnostics, and explicitly unsupported runtime combinations.
   - [ ] Inventory pure-Python helpers used by runtime-facing public APIs.
   - [ ] Move fixture-only helpers under test/tooling documentation.
-  - [ ] Add explicit runtime fallback selection instead of implicit pure-Python execution.
-  - [ ] Add tests that default host runtime uses native artifacts when available.
+  - [x] Add explicit runtime fallback selection instead of implicit pure-Python execution.
+  - [x] Add tests that default host runtime uses native artifacts when available.
 - [x] Add loader and probe tests for every supported platform tag using fake or fixture native artifacts where real artifacts are unavailable.

@@ -25,8 +25,8 @@ def _resolve_shared_recipe_manifest() -> Path | None:
 
     repo_root = Path(__file__).resolve().parents[1]
     candidates = (
-        repo_root / "nnrp-conformance-action" / "protocol" / "nnrp-1-preview2" / "vectors" / "semantic-vectors.json",
-        repo_root.parent / "nnrp-conformance" / "protocol" / "nnrp-1-preview2" / "vectors" / "semantic-vectors.json",
+        repo_root / "nnrp-conformance-action" / "protocol" / "nnrp-1-preview3" / "vectors" / "semantic-vectors.json",
+        repo_root.parent / "nnrp-conformance" / "protocol" / "nnrp-1-preview3" / "vectors" / "semantic-vectors.json",
     )
     for candidate in candidates:
         if candidate.is_file():
@@ -34,11 +34,11 @@ def _resolve_shared_recipe_manifest() -> Path | None:
     return None
 
 
-def test_build_conformance_vector_manifest_preview2(tmp_path) -> None:
+def test_build_conformance_vector_manifest_preview3(tmp_path) -> None:
     recipe_manifest = _write_recipe_manifest(
         tmp_path,
         {
-            "protocol_version": "nnrp-1-preview2",
+            "protocol_version": "nnrp-1-preview3",
             "vectors": [
                 {
                     "recipe_type": "header",
@@ -77,9 +77,9 @@ def test_build_conformance_vector_manifest_preview2(tmp_path) -> None:
         },
     )
 
-    manifest = build_conformance_vector_manifest("nnrp-1-preview2", recipe_manifest_path=recipe_manifest)
+    manifest = build_conformance_vector_manifest("nnrp-1-preview3", recipe_manifest_path=recipe_manifest)
 
-    assert manifest["protocol_version"] == "nnrp-1-preview2"
+    assert manifest["protocol_version"] == "nnrp-1-preview3"
     assert manifest["generator"] == "nnrp-py"
     assert len(manifest["vectors"]) == 2
     assert manifest["vectors"][0]["name"] == "current.header.frame_submit_ack_required_keyframe"
@@ -87,17 +87,17 @@ def test_build_conformance_vector_manifest_preview2(tmp_path) -> None:
 
 
 def test_build_conformance_vector_manifest_rejects_protocol_mismatch(tmp_path) -> None:
-    recipe_manifest = _write_recipe_manifest(tmp_path, {"protocol_version": "nnrp-1-preview1", "vectors": []})
+    recipe_manifest = _write_recipe_manifest(tmp_path, {"protocol_version": "nnrp-0-invalid", "vectors": []})
 
     with pytest.raises(ValueError, match="protocol version does not match requested export"):
-        build_conformance_vector_manifest("nnrp-1-preview2", recipe_manifest_path=recipe_manifest)
+        build_conformance_vector_manifest("nnrp-1-preview3", recipe_manifest_path=recipe_manifest)
 
 
-def test_build_conformance_vector_manifest_supports_all_preview2_recipe_types(tmp_path) -> None:
+def test_build_conformance_vector_manifest_supports_all_preview3_recipe_types(tmp_path) -> None:
     recipe_manifest = _write_recipe_manifest(
         tmp_path,
         {
-            "protocol_version": "nnrp-1-preview2",
+            "protocol_version": "nnrp-1-preview3",
             "vectors": [
                 {
                     "recipe_type": "header",
@@ -316,9 +316,9 @@ def test_build_conformance_vector_manifest_supports_all_preview2_recipe_types(tm
         },
     )
 
-    manifest = build_conformance_vector_manifest("nnrp-1-preview2", recipe_manifest_path=recipe_manifest)
+    manifest = build_conformance_vector_manifest("nnrp-1-preview3", recipe_manifest_path=recipe_manifest)
 
-    assert manifest["protocol_version"] == "nnrp-1-preview2"
+    assert manifest["protocol_version"] == "nnrp-1-preview3"
     assert manifest["generator"] == "nnrp-py"
     assert len(manifest["vectors"]) == 12
     assert manifest["vectors"][-1]["name"] == "current.typed_payload.frame_region"
@@ -331,14 +331,14 @@ def test_build_conformance_vector_manifest_supports_all_preview2_recipe_types(tm
     )
 
 
-def test_build_conformance_vector_manifest_uses_shared_preview2_recipe_when_available() -> None:
+def test_build_conformance_vector_manifest_uses_shared_preview3_recipe_when_available() -> None:
     recipe_manifest = _resolve_shared_recipe_manifest()
     if recipe_manifest is None:
-        pytest.skip("shared preview2 semantic vector recipe manifest is not available in this environment")
+        pytest.skip("shared preview3 semantic vector recipe manifest is not available in this environment")
 
-    manifest = build_conformance_vector_manifest("nnrp-1-preview2", recipe_manifest_path=recipe_manifest)
+    manifest = build_conformance_vector_manifest("nnrp-1-preview3", recipe_manifest_path=recipe_manifest)
 
-    assert manifest["protocol_version"] == "nnrp-1-preview2"
+    assert manifest["protocol_version"] == "nnrp-1-preview3"
     assert manifest["generator"] == "nnrp-py"
     assert len(manifest["vectors"]) == 12
     assert manifest["vectors"][0]["name"] == "current.header.frame_submit_ack_required_keyframe"
@@ -350,15 +350,15 @@ def test_build_conformance_vector_manifest_uses_shared_preview2_recipe_when_avai
     ("document", "match"),
     [
         ("[]", "must be a JSON object"),
-        ({"protocol_version": "nnrp-1-preview2", "vectors": {}}, "must contain a vectors list"),
-        ({"protocol_version": "nnrp-1-preview2", "vectors": [1]}, "entries must be JSON objects"),
+        ({"protocol_version": "nnrp-1-preview3", "vectors": {}}, "must contain a vectors list"),
+        ({"protocol_version": "nnrp-1-preview3", "vectors": [1]}, "entries must be JSON objects"),
         (
-            {"protocol_version": "nnrp-1-preview2", "vectors": [{"recipe_type": "unknown", "name": "bad"}]},
+            {"protocol_version": "nnrp-1-preview3", "vectors": [{"recipe_type": "unknown", "name": "bad"}]},
             "unsupported semantic vector recipe type",
         ),
         (
             {
-                "protocol_version": "nnrp-1-preview2",
+                "protocol_version": "nnrp-1-preview3",
                 "vectors": [
                     {
                         "recipe_type": "header",
@@ -386,15 +386,15 @@ def test_build_conformance_vector_manifest_rejects_invalid_manifest_shapes(tmp_p
     recipe_manifest = _write_recipe_manifest(tmp_path, document)
 
     with pytest.raises(ValueError, match=match):
-        build_conformance_vector_manifest("nnrp-1-preview2", recipe_manifest_path=recipe_manifest)
+        build_conformance_vector_manifest("nnrp-1-preview3", recipe_manifest_path=recipe_manifest)
 
 
 def test_build_conformance_vector_manifest_requires_existing_recipe_manifest_path(tmp_path) -> None:
     with pytest.raises(ValueError, match="recipe manifest path is required"):
-        build_conformance_vector_manifest("nnrp-1-preview2")
+        build_conformance_vector_manifest("nnrp-1-preview3")
 
     with pytest.raises(ValueError, match="recipe manifest path does not exist"):
-        build_conformance_vector_manifest("nnrp-1-preview2", recipe_manifest_path=tmp_path / "missing.json")
+        build_conformance_vector_manifest("nnrp-1-preview3", recipe_manifest_path=tmp_path / "missing.json")
 
 
 @pytest.mark.parametrize(
@@ -497,18 +497,18 @@ def test_build_conformance_vector_manifest_requires_existing_recipe_manifest_pat
 def test_build_conformance_vector_manifest_rejects_invalid_recipe_values(tmp_path, vector, match: str) -> None:
     recipe_manifest = _write_recipe_manifest(
         tmp_path,
-        {"protocol_version": "nnrp-1-preview2", "vectors": [vector]},
+        {"protocol_version": "nnrp-1-preview3", "vectors": [vector]},
     )
 
     with pytest.raises(ValueError, match=match):
-        build_conformance_vector_manifest("nnrp-1-preview2", recipe_manifest_path=recipe_manifest)
+        build_conformance_vector_manifest("nnrp-1-preview3", recipe_manifest_path=recipe_manifest)
 
 
 def test_build_conformance_vector_manifest_supports_hex_and_extended_typed_payload_families(tmp_path) -> None:
     recipe_manifest = _write_recipe_manifest(
         tmp_path,
         {
-            "protocol_version": "nnrp-1-preview2",
+            "protocol_version": "nnrp-1-preview3",
             "vectors": [
                 {
                     "recipe_type": "typed_payload_frame_region",
@@ -522,7 +522,7 @@ def test_build_conformance_vector_manifest_supports_hex_and_extended_typed_paylo
         },
     )
 
-    manifest = build_conformance_vector_manifest("nnrp-1-preview2", recipe_manifest_path=recipe_manifest)
+    manifest = build_conformance_vector_manifest("nnrp-1-preview3", recipe_manifest_path=recipe_manifest)
 
     assert manifest["vectors"][0]["hex"] == "746f6f6c00ff10"
     assert manifest["vectors"][0]["bytes"] == 7
@@ -530,4 +530,4 @@ def test_build_conformance_vector_manifest_supports_hex_and_extended_typed_paylo
 
 def test_build_conformance_vector_manifest_rejects_unknown_protocol() -> None:
     with pytest.raises(ValueError, match="unsupported protocol version"):
-        build_conformance_vector_manifest("nnrp-1-preview3")
+        build_conformance_vector_manifest("nnrp-1-preview4")

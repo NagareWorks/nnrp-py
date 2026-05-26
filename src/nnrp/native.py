@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import asyncio
 import ctypes
 import os
 import platform
-from dataclasses import dataclass
+from collections.abc import AsyncIterator
+from dataclasses import dataclass, field
+from enum import StrEnum
 from pathlib import Path
-from typing import Any
+from typing import Any, Protocol, runtime_checkable
 
 EXPECTED_PROTOCOL_MAJOR = 1
 EXPECTED_PROTOCOL_WIRE_FORMAT = 0
@@ -58,6 +61,9 @@ HANDLE_KIND_SESSION = 2
 HANDLE_KIND_OPERATION = 3
 HANDLE_KIND_EVENT_PUMP = 4
 HANDLE_KIND_BUFFER = 5
+EVENT_KIND_RESULT_PUSHED = 6
+EVENT_KIND_RESULT_DROPPED = 7
+EVENT_KIND_ERROR = 10
 DEFAULT_ARTIFACT_ROOT_ENV = "NNRP_NATIVE_ARTIFACT_ROOT"
 
 
@@ -86,7 +92,7 @@ class NativeProbeResult:
     sdk_major: int
     sdk_minor: int
     sdk_patch: int
-    sdk_preview: int
+    sdk_channel: int
     sdk_revision: int
     transport_slots: int
     feature_flags: int
@@ -369,12 +375,613 @@ class _NnrpRuntimeCapabilities(ctypes.Structure):
         ("sdk_major", ctypes.c_uint16),
         ("sdk_minor", ctypes.c_uint16),
         ("sdk_patch", ctypes.c_uint16),
-        ("sdk_preview", ctypes.c_uint16),
+        ("sdk_channel", ctypes.c_uint16),
         ("sdk_revision", ctypes.c_uint16),
         ("reserved1", ctypes.c_uint16),
         ("transport_slots", ctypes.c_uint32),
         ("feature_flags", ctypes.c_uint64),
     ]
+
+
+class _NnrpFfiDiagnostic(ctypes.Structure):
+    _fields_ = [
+        ("status", _NnrpFfiStatus),
+        ("related_connection_id", ctypes.c_uint64),
+        ("related_session_id", ctypes.c_uint32),
+        ("related_operation_id", ctypes.c_uint64),
+        ("related_frame_id", ctypes.c_uint32),
+    ]
+
+
+class _NnrpEvent(ctypes.Structure):
+    _fields_ = [
+        ("kind", ctypes.c_uint32),
+        ("connection", _NnrpHandle),
+        ("session", _NnrpHandle),
+        ("operation", _NnrpHandle),
+        ("frame_id", ctypes.c_uint32),
+        ("payload", _NnrpBufferView),
+        ("diagnostic", _NnrpFfiDiagnostic),
+    ]
+
+
+_NnrpEventCallback = ctypes.CFUNCTYPE(ctypes.c_uint32, ctypes.c_void_p, ctypes.POINTER(_NnrpEvent))
+
+
+class _NnrpCallbackSink(ctypes.Structure):
+    _fields_ = [
+        ("user_data", ctypes.c_void_p),
+        ("on_event", _NnrpEventCallback),
+    ]
+
+
+class _NnrpPollResult(ctypes.Structure):
+    _fields_ = [
+        ("status", _NnrpFfiStatus),
+        ("has_event", ctypes.c_uint8),
+        ("event", _NnrpEvent),
+    ]
+
+
+class _NnrpConnectionBootstrap(ctypes.Structure):
+    _fields_ = [
+        ("connection_id", ctypes.c_uint64),
+        ("generation", ctypes.c_uint32),
+        ("transport_id", ctypes.c_uint32),
+    ]
+
+
+class _NnrpClientConnectRequest(ctypes.Structure):
+    _fields_ = [
+        ("connection_id", ctypes.c_uint64),
+        ("generation", ctypes.c_uint32),
+        ("transport_id", ctypes.c_uint32),
+    ]
+
+
+class _NnrpServerBindRequest(ctypes.Structure):
+    _fields_ = [
+        ("server_id", ctypes.c_uint64),
+        ("generation", ctypes.c_uint32),
+        ("transport_id", ctypes.c_uint32),
+    ]
+
+
+class _NnrpSessionOpenRequest(ctypes.Structure):
+    _fields_ = [
+        ("connection", _NnrpHandle),
+        ("requested_session_id", ctypes.c_uint32),
+        ("generation", ctypes.c_uint32),
+        ("profile_id", ctypes.c_uint16),
+        ("schema_id", ctypes.c_uint32),
+        ("schema_version", ctypes.c_uint32),
+    ]
+
+
+class _NnrpSubmitRequest(ctypes.Structure):
+    _fields_ = [
+        ("session", _NnrpHandle),
+        ("operation_id", ctypes.c_uint64),
+        ("frame_id", ctypes.c_uint32),
+        ("payload", _NnrpBufferView),
+    ]
+
+
+class _NnrpClientCancelRequest(ctypes.Structure):
+    _fields_ = [
+        ("session", _NnrpHandle),
+        ("frame_id", ctypes.c_uint32),
+    ]
+
+
+class _NnrpServerAcceptRequest(ctypes.Structure):
+    _fields_ = [
+        ("server", _NnrpHandle),
+        ("session_id", ctypes.c_uint32),
+        ("generation", ctypes.c_uint32),
+        ("profile_id", ctypes.c_uint16),
+        ("schema_id", ctypes.c_uint32),
+        ("schema_version", ctypes.c_uint32),
+    ]
+
+
+class _NnrpServerReceiveSubmitRequest(ctypes.Structure):
+    _fields_ = [
+        ("session", _NnrpHandle),
+        ("operation_id", ctypes.c_uint64),
+        ("frame_id", ctypes.c_uint32),
+        ("payload", _NnrpBufferView),
+    ]
+
+
+class _NnrpServerSendResultRequest(ctypes.Structure):
+    _fields_ = [
+        ("operation", _NnrpHandle),
+        ("payload", _NnrpBufferView),
+    ]
+
+
+class _NnrpServerFlowUpdateRequest(ctypes.Structure):
+    _fields_ = [
+        ("session", _NnrpHandle),
+        ("frame_id", ctypes.c_uint32),
+    ]
+
+
+class _NnrpControlRequest(ctypes.Structure):
+    _fields_ = [
+        ("handle", _NnrpHandle),
+        ("control_code", ctypes.c_uint32),
+        ("payload", _NnrpBufferView),
+    ]
+
+
+class NativeRuntimeEntrypoints:
+    """ctypes entrypoint table for the frozen Rust runtime ABI."""
+
+    def __init__(self, library: Any) -> None:
+        self.current_protocol_version = _bind_native_function(
+            library, "nnrp_current_protocol_version", _NnrpProtocolVersion, []
+        )
+        self.runtime_capabilities = _bind_native_function(
+            library, "nnrp_runtime_capabilities", _NnrpRuntimeCapabilities, []
+        )
+        self.connection_bootstrap = _bind_native_function(
+            library,
+            "nnrp_connection_bootstrap",
+            _NnrpFfiStatus,
+            [_NnrpConnectionBootstrap, ctypes.POINTER(_NnrpHandle)],
+        )
+        self.client_connect = _bind_native_function(
+            library,
+            "nnrp_client_connect",
+            _NnrpFfiStatus,
+            [_NnrpClientConnectRequest, ctypes.POINTER(_NnrpHandle)],
+        )
+        self.session_open = _bind_native_function(
+            library,
+            "nnrp_session_open",
+            _NnrpFfiStatus,
+            [_NnrpSessionOpenRequest, ctypes.POINTER(_NnrpHandle)],
+        )
+        self.client_open_session = _bind_native_function(
+            library,
+            "nnrp_client_open_session",
+            _NnrpFfiStatus,
+            [_NnrpSessionOpenRequest, ctypes.POINTER(_NnrpHandle)],
+        )
+        self.submit = _bind_native_function(
+            library,
+            "nnrp_submit",
+            _NnrpFfiStatus,
+            [_NnrpSubmitRequest, ctypes.POINTER(_NnrpHandle)],
+        )
+        self.client_submit = _bind_native_function(
+            library,
+            "nnrp_client_submit",
+            _NnrpFfiStatus,
+            [_NnrpSubmitRequest, ctypes.POINTER(_NnrpHandle)],
+        )
+        self.session_close = _bind_native_function(library, "nnrp_session_close", _NnrpFfiStatus, [_NnrpHandle])
+        self.client_close = _bind_native_function(library, "nnrp_client_close", _NnrpFfiStatus, [_NnrpHandle])
+        self.client_cancel = _bind_native_function(
+            library, "nnrp_client_cancel", _NnrpFfiStatus, [_NnrpClientCancelRequest]
+        )
+        self.client_await_event = _bind_native_function(
+            library,
+            "nnrp_client_await_event",
+            _NnrpFfiStatus,
+            [_NnrpHandle, ctypes.POINTER(_NnrpPollResult)],
+        )
+        self.server_bind = _bind_native_function(
+            library,
+            "nnrp_server_bind",
+            _NnrpFfiStatus,
+            [_NnrpServerBindRequest, ctypes.POINTER(_NnrpHandle)],
+        )
+        self.server_accept = _bind_native_function(
+            library,
+            "nnrp_server_accept",
+            _NnrpFfiStatus,
+            [_NnrpServerAcceptRequest, ctypes.POINTER(_NnrpHandle)],
+        )
+        self.server_receive_submit = _bind_native_function(
+            library,
+            "nnrp_server_receive_submit",
+            _NnrpFfiStatus,
+            [_NnrpServerReceiveSubmitRequest, ctypes.POINTER(_NnrpHandle)],
+        )
+        self.server_send_result = _bind_native_function(
+            library, "nnrp_server_send_result", _NnrpFfiStatus, [_NnrpServerSendResultRequest]
+        )
+        self.server_send_flow_update = _bind_native_function(
+            library, "nnrp_server_send_flow_update", _NnrpFfiStatus, [_NnrpServerFlowUpdateRequest]
+        )
+        self.server_close = _bind_native_function(library, "nnrp_server_close", _NnrpFfiStatus, [_NnrpHandle])
+        self.control = _bind_native_function(library, "nnrp_control", _NnrpFfiStatus, [_NnrpControlRequest])
+        self.poll_empty = _bind_native_function(
+            library, "nnrp_poll_empty", _NnrpFfiStatus, [ctypes.POINTER(_NnrpPollResult)]
+        )
+        self.dispatch_event = _bind_native_function(
+            library,
+            "nnrp_dispatch_event",
+            _NnrpFfiStatus,
+            [_NnrpCallbackSink, ctypes.POINTER(_NnrpEvent)],
+        )
+
+
+@dataclass(frozen=True)
+class NativeRuntimeDiagnostic:
+    status: NativeStatus
+    related_connection_id: int
+    related_session_id: int
+    related_operation_id: int
+    related_frame_id: int
+
+    @classmethod
+    def from_ffi(cls, diagnostic: _NnrpFfiDiagnostic) -> NativeRuntimeDiagnostic:
+        return cls(
+            status=NativeStatus.from_ffi(diagnostic.status),
+            related_connection_id=int(diagnostic.related_connection_id),
+            related_session_id=int(diagnostic.related_session_id),
+            related_operation_id=int(diagnostic.related_operation_id),
+            related_frame_id=int(diagnostic.related_frame_id),
+        )
+
+
+@dataclass(frozen=True)
+class NativeRuntimeEvent:
+    kind: int
+    connection: NativeHandle
+    session: NativeHandle
+    operation: NativeHandle
+    frame_id: int
+    payload: bytes
+    diagnostic: NativeRuntimeDiagnostic
+
+    @classmethod
+    def from_ffi(cls, event: _NnrpEvent) -> NativeRuntimeEvent:
+        return cls(
+            kind=int(event.kind),
+            connection=NativeHandle.from_ffi(event.connection),
+            session=NativeHandle.from_ffi(event.session),
+            operation=NativeHandle.from_ffi(event.operation),
+            frame_id=int(event.frame_id),
+            payload=_copy_buffer_view(event.payload),
+            diagnostic=NativeRuntimeDiagnostic.from_ffi(event.diagnostic),
+        )
+
+
+@dataclass(frozen=True)
+class NativeRuntimePollResult:
+    status: NativeStatus
+    event: NativeRuntimeEvent | None = None
+
+    @classmethod
+    def from_ffi(cls, result: _NnrpPollResult) -> NativeRuntimePollResult:
+        status = NativeStatus.from_ffi(result.status)
+        event = NativeRuntimeEvent.from_ffi(result.event) if result.has_event else None
+        return cls(status, event)
+
+
+class NativeOperationLifecycle(StrEnum):
+    COMPLETED = "completed"
+    PARTIAL = "partial"
+    DEGRADED = "degraded"
+    STALE_REUSE = "stale_reuse"
+    CANCELLED = "cancelled"
+    FAILED = "failed"
+
+
+@dataclass(frozen=True)
+class NativeRuntimeResult:
+    state: NativeOperationLifecycle
+    operation_id: int
+    frame_id: int
+    payload: bytes
+    event: NativeRuntimeEvent
+
+    @classmethod
+    def from_event(
+        cls,
+        event: NativeRuntimeEvent,
+        *,
+        state: NativeOperationLifecycle | str | None = None,
+    ) -> NativeRuntimeResult:
+        selected_state = NativeOperationLifecycle(state) if state is not None else _infer_lifecycle_from_event(event)
+        return cls(
+            state=selected_state,
+            operation_id=event.operation.id,
+            frame_id=event.frame_id,
+            payload=event.payload,
+            event=event,
+        )
+
+
+@dataclass(frozen=True)
+class NativeRuntimeOperation:
+    entrypoints: NativeRuntimeEntrypoints
+    session: NativeSessionHandle
+    handle: NativeOperationHandle
+    operation_id: int
+    frame_id: int
+    parent_operation_id: int | None = None
+    operation_group_id: int | None = None
+
+    def cancel(self) -> None:
+        request = _NnrpClientCancelRequest(self.session.to_ffi(), self.frame_id)
+        status = self.entrypoints.client_cancel(request)
+        raise_for_native_status(status)
+
+
+@runtime_checkable
+class NativeRuntimeBackend(Protocol):
+    def connect(self, *, connection_id: int, generation: int, transport_id: int) -> NativeRuntimeConnection:
+        ...
+
+    def bootstrap_connection(
+        self,
+        *,
+        connection_id: int,
+        generation: int,
+        transport_id: int,
+    ) -> NativeRuntimeConnection:
+        ...
+
+
+@dataclass(frozen=True)
+class NativeRuntimeClient:
+    entrypoints: NativeRuntimeEntrypoints
+
+    def connect(self, *, connection_id: int, generation: int, transport_id: int) -> NativeRuntimeConnection:
+        request = _NnrpClientConnectRequest(connection_id, generation, transport_id)
+        out_connection = _NnrpHandle()
+        status = self.entrypoints.client_connect(request, ctypes.byref(out_connection))
+        raise_for_native_status(status)
+        return NativeRuntimeConnection(self.entrypoints, NativeConnectionHandle.from_ffi(out_connection))
+
+    def bootstrap_connection(
+        self,
+        *,
+        connection_id: int,
+        generation: int,
+        transport_id: int,
+    ) -> NativeRuntimeConnection:
+        request = _NnrpConnectionBootstrap(connection_id, generation, transport_id)
+        out_connection = _NnrpHandle()
+        status = self.entrypoints.connection_bootstrap(request, ctypes.byref(out_connection))
+        raise_for_native_status(status)
+        return NativeRuntimeConnection(self.entrypoints, NativeConnectionHandle.from_ffi(out_connection))
+
+
+@dataclass(frozen=True)
+class NativeRuntimeConnection:
+    entrypoints: NativeRuntimeEntrypoints
+    handle: NativeConnectionHandle
+
+    def open_session(
+        self,
+        *,
+        requested_session_id: int,
+        generation: int,
+        profile_id: int,
+        schema_id: int,
+        schema_version: int,
+    ) -> NativeRuntimeSession:
+        request = _NnrpSessionOpenRequest(
+            self.handle.to_ffi(),
+            requested_session_id,
+            generation,
+            profile_id,
+            schema_id,
+            schema_version,
+        )
+        out_session = _NnrpHandle()
+        status = self.entrypoints.client_open_session(request, ctypes.byref(out_session))
+        raise_for_native_status(status)
+        return NativeRuntimeSession(self.entrypoints, self.handle, NativeSessionHandle.from_ffi(out_session))
+
+    def await_event(self) -> NativeRuntimePollResult:
+        result = _NnrpPollResult()
+        status = self.entrypoints.client_await_event(self.handle.to_ffi(), ctypes.byref(result))
+        raise_for_native_status(status)
+        raise_for_native_status(result.status)
+        return NativeRuntimePollResult.from_ffi(result)
+
+    def poll_event(self) -> NativeRuntimeEvent | None:
+        return self.await_event().event
+
+    def poll_events(self, *, max_events: int | None = None) -> tuple[NativeRuntimeEvent, ...]:
+        if max_events is not None and max_events < 0:
+            raise ValueError("max_events must be non-negative")
+
+        events: list[NativeRuntimeEvent] = []
+        while max_events is None or len(events) < max_events:
+            event = self.poll_event()
+            if event is None:
+                break
+            events.append(event)
+        return tuple(events)
+
+    async def async_poll_event(self) -> NativeRuntimeEvent | None:
+        return await asyncio.to_thread(self.poll_event)
+
+    async def iter_events(self, *, max_events: int | None = None) -> AsyncIterator[NativeRuntimeEvent]:
+        for event in await asyncio.to_thread(self.poll_events, max_events=max_events):
+            yield event
+
+    def control(self, *, control_code: int, payload: bytes | bytearray | memoryview = b"") -> None:
+        payload_view, _payload_owner = _buffer_view_from_payload(payload)
+        request = _NnrpControlRequest(self.handle.to_ffi(), control_code, payload_view)
+        status = self.entrypoints.control(request)
+        raise_for_native_status(status)
+
+
+@dataclass(frozen=True)
+class NativeRuntimeSession:
+    entrypoints: NativeRuntimeEntrypoints
+    connection: NativeConnectionHandle
+    handle: NativeSessionHandle
+    _closed: bool = field(default=False, init=False, repr=False, compare=False)
+
+    def submit(
+        self,
+        *,
+        operation_id: int,
+        frame_id: int,
+        payload: bytes | bytearray | memoryview = b"",
+    ) -> NativeOperationHandle:
+        self._ensure_open()
+        return self.submit_operation(operation_id=operation_id, frame_id=frame_id, payload=payload).handle
+
+    def submit_operation(
+        self,
+        *,
+        operation_id: int,
+        frame_id: int,
+        payload: bytes | bytearray | memoryview = b"",
+        parent_operation_id: int | None = None,
+        operation_group_id: int | None = None,
+    ) -> NativeRuntimeOperation:
+        self._ensure_open()
+        payload_view, _payload_owner = _buffer_view_from_payload(payload)
+        request = _NnrpSubmitRequest(self.handle.to_ffi(), operation_id, frame_id, payload_view)
+        out_operation = _NnrpHandle()
+        status = self.entrypoints.client_submit(request, ctypes.byref(out_operation))
+        raise_for_native_status(status)
+        return NativeRuntimeOperation(
+            entrypoints=self.entrypoints,
+            session=self.handle,
+            handle=NativeOperationHandle.from_ffi(out_operation),
+            operation_id=operation_id,
+            frame_id=frame_id,
+            parent_operation_id=parent_operation_id,
+            operation_group_id=operation_group_id,
+        )
+
+    async def async_submit_operation(
+        self,
+        *,
+        operation_id: int,
+        frame_id: int,
+        payload: bytes | bytearray | memoryview = b"",
+        parent_operation_id: int | None = None,
+        operation_group_id: int | None = None,
+    ) -> NativeRuntimeOperation:
+        try:
+            return await asyncio.to_thread(
+                self.submit_operation,
+                operation_id=operation_id,
+                frame_id=frame_id,
+                payload=payload,
+                parent_operation_id=parent_operation_id,
+                operation_group_id=operation_group_id,
+            )
+        except asyncio.CancelledError:
+            self.cancel(frame_id=frame_id)
+            raise
+
+    def poll_result(
+        self,
+        operation: NativeRuntimeOperation,
+        *,
+        state: NativeOperationLifecycle | str | None = None,
+        max_events: int | None = None,
+    ) -> NativeRuntimeResult:
+        self._ensure_open()
+        if max_events is not None and max_events < 0:
+            raise ValueError("max_events must be non-negative")
+
+        seen_events = 0
+        while max_events is None or seen_events < max_events:
+            result = _NnrpPollResult()
+            status = self.entrypoints.client_await_event(self.connection.to_ffi(), ctypes.byref(result))
+            raise_for_native_status(status)
+            raise_for_native_status(result.status)
+            poll_result = NativeRuntimePollResult.from_ffi(result)
+            event = poll_result.event
+            if event is None:
+                break
+            seen_events += 1
+            if _event_matches_operation(event, operation):
+                return NativeRuntimeResult.from_event(event, state=state)
+
+        raise NativeWouldBlockError(NativeStatus(FFI_STATUS_WOULD_BLOCK))
+
+    def submit_and_poll_result(
+        self,
+        *,
+        operation_id: int,
+        frame_id: int,
+        payload: bytes | bytearray | memoryview = b"",
+        parent_operation_id: int | None = None,
+        operation_group_id: int | None = None,
+        state: NativeOperationLifecycle | str | None = None,
+        max_events: int | None = None,
+    ) -> NativeRuntimeResult:
+        operation = self.submit_operation(
+            operation_id=operation_id,
+            frame_id=frame_id,
+            payload=payload,
+            parent_operation_id=parent_operation_id,
+            operation_group_id=operation_group_id,
+        )
+        return self.poll_result(operation, state=state, max_events=max_events)
+
+    async def async_submit_and_poll_result(
+        self,
+        *,
+        operation_id: int,
+        frame_id: int,
+        payload: bytes | bytearray | memoryview = b"",
+        parent_operation_id: int | None = None,
+        operation_group_id: int | None = None,
+        state: NativeOperationLifecycle | str | None = None,
+        max_events: int | None = None,
+    ) -> NativeRuntimeResult:
+        return await asyncio.to_thread(
+            self.submit_and_poll_result,
+            operation_id=operation_id,
+            frame_id=frame_id,
+            payload=payload,
+            parent_operation_id=parent_operation_id,
+            operation_group_id=operation_group_id,
+            state=state,
+            max_events=max_events,
+        )
+
+    def close(self) -> None:
+        self._ensure_open()
+        status = self.entrypoints.client_close(self.handle.to_ffi())
+        raise_for_native_status(status)
+        object.__setattr__(self, "_closed", True)
+
+    def cancel(self, *, frame_id: int) -> None:
+        self._ensure_open()
+        request = _NnrpClientCancelRequest(self.handle.to_ffi(), frame_id)
+        status = self.entrypoints.client_cancel(request)
+        raise_for_native_status(status)
+
+    def control(self, *, control_code: int, payload: bytes | bytearray | memoryview = b"") -> None:
+        self._ensure_open()
+        payload_view, _payload_owner = _buffer_view_from_payload(payload)
+        request = _NnrpControlRequest(self.handle.to_ffi(), control_code, payload_view)
+        status = self.entrypoints.control(request)
+        raise_for_native_status(status)
+
+    def _ensure_open(self) -> None:
+        if self._closed:
+            raise NativeInvalidStateError(NativeStatus(FFI_STATUS_INVALID_STATE), "native runtime session is closed")
+
+
+def _event_matches_operation(event: NativeRuntimeEvent, operation: NativeRuntimeOperation) -> bool:
+    if event.session != operation.session.handle:
+        return False
+    return (
+        event.operation.id == operation.handle.handle.id
+        or event.operation.id == operation.operation_id
+        or event.frame_id == operation.frame_id
+    )
 
 
 def current_native_platform() -> NativePlatform:
@@ -418,6 +1025,49 @@ def load_native_library(artifact_path: Path | str) -> ctypes.CDLL:
         raise NativeArtifactError(f"failed to load native artifact {artifact_path}: {error}") from error
 
 
+def load_native_runtime(
+    artifact_path: Path | str | None = None,
+    *,
+    root: Path | str | None = None,
+    native_platform: NativePlatform | None = None,
+    library: Any | None = None,
+) -> NativeRuntimeEntrypoints:
+    resolved_path = Path(artifact_path) if artifact_path is not None else resolve_native_artifact(root, native_platform)
+    loaded_library = library if library is not None else load_native_library(resolved_path)
+    capabilities = _call_runtime_capabilities(loaded_library)
+    _validate_runtime_capabilities(capabilities)
+    return NativeRuntimeEntrypoints(loaded_library)
+
+
+def load_native_client(
+    artifact_path: Path | str | None = None,
+    *,
+    root: Path | str | None = None,
+    native_platform: NativePlatform | None = None,
+    library: Any | None = None,
+) -> NativeRuntimeClient:
+    return NativeRuntimeClient(
+        load_native_runtime(artifact_path, root=root, native_platform=native_platform, library=library)
+    )
+
+
+def select_native_runtime_backend(
+    artifact_path: Path | str | None = None,
+    *,
+    root: Path | str | None = None,
+    native_platform: NativePlatform | None = None,
+    library: Any | None = None,
+    fallback: NativeRuntimeBackend | None = None,
+    require_native: bool = False,
+) -> NativeRuntimeBackend:
+    try:
+        return load_native_client(artifact_path, root=root, native_platform=native_platform, library=library)
+    except NativeArtifactError:
+        if fallback is None or require_native:
+            raise
+        return fallback
+
+
 def probe_native_artifact(
     artifact_path: Path | str | None = None,
     *,
@@ -439,7 +1089,7 @@ def probe_native_artifact(
         sdk_major=int(capabilities.sdk_major),
         sdk_minor=int(capabilities.sdk_minor),
         sdk_patch=int(capabilities.sdk_patch),
-        sdk_preview=int(capabilities.sdk_preview),
+        sdk_channel=int(capabilities.sdk_channel),
         sdk_revision=int(capabilities.sdk_revision),
         transport_slots=int(capabilities.transport_slots),
         feature_flags=int(capabilities.feature_flags),
@@ -488,6 +1138,20 @@ def _call_runtime_capabilities(library: Any) -> _NnrpRuntimeCapabilities:
     if not hasattr(capabilities, "protocol_version") or not hasattr(capabilities, "feature_flags"):
         raise NativeArtifactError("native artifact returned an invalid runtime capabilities shape")
     return capabilities
+
+
+def _bind_native_function(library: Any, name: str, restype: Any, argtypes: list[Any]) -> Any:
+    try:
+        function = getattr(library, name)
+    except AttributeError as error:
+        raise NativeArtifactError(f"native artifact is missing {name}") from error
+
+    try:
+        function.restype = restype
+        function.argtypes = argtypes
+    except AttributeError:
+        pass
+    return function
 
 
 def raise_for_native_status(status: NativeStatus | _NnrpFfiStatus) -> None:
@@ -557,6 +1221,33 @@ def _pointer_value(value: int | None) -> int:
 
 def _void_pointer(value: int) -> ctypes.c_void_p:
     return ctypes.c_void_p(value or None)
+
+
+def _buffer_view_from_payload(payload: bytes | bytearray | memoryview) -> tuple[_NnrpBufferView, object | None]:
+    view = memoryview(payload)
+    if view.nbytes == 0:
+        return _NnrpBufferView(None, 0), None
+    if not view.contiguous:
+        raise NativeHandleError("native submit payload must be contiguous")
+    buffer = ctypes.create_string_buffer(view.tobytes(), view.nbytes)
+    return _NnrpBufferView(ctypes.cast(buffer, ctypes.c_void_p), view.nbytes), buffer
+
+
+def _copy_buffer_view(view: _NnrpBufferView) -> bytes:
+    length = int(view.len)
+    if length == 0:
+        return b""
+    if not view.ptr:
+        raise NativeHandleError("native event payload has non-empty null pointer")
+    return ctypes.string_at(view.ptr, length)
+
+
+def _infer_lifecycle_from_event(event: NativeRuntimeEvent) -> NativeOperationLifecycle:
+    if not event.diagnostic.status.succeeded or event.kind == EVENT_KIND_ERROR:
+        return NativeOperationLifecycle.FAILED
+    if event.kind == EVENT_KIND_RESULT_DROPPED:
+        return NativeOperationLifecycle.CANCELLED
+    return NativeOperationLifecycle.COMPLETED
 
 
 def _format_status_message(status: NativeStatus) -> str:

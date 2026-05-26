@@ -4,10 +4,12 @@
 
 - [x] Freeze the preview3 adapter command contract as a Python-owned wrapper over the suite-owned plan/result JSON: `python -m nnrp.tools.adapter_conformance --plan <path> --output <path>`.
 - [x] Freeze that `nnrp-conformance` owns only the execution-plan/result JSON and selected-case semantics; `nnrp-py` owns the module path, interpreter selection, extra flags, and runtime bootstrap around the adapter wrapper.
-- [x] Add the initial `nnrp.tools.adapter_conformance` wrapper so it can read the suite-owned execution plan and emit a schema-valid explicit `not_implemented` case-result report.
-- [ ] Implement real preview3 adapter case execution inside `nnrp.tools.adapter_conformance` so selected cases stop returning placeholder `not_implemented` results.
+- [x] Add the initial `nnrp.tools.adapter_conformance` wrapper so it can read the suite-owned execution plan and emit a schema-valid case-result report.
+- [x] Implement SDK-local adapter smoke execution inside `nnrp.tools.adapter_conformance` so selected core cases stop returning placeholder results.
+- [ ] Extend adapter execution from SDK-local smoke coverage to full suite-selected case behavior.
 - [ ] Add a preview3 conformance exporter and wire it into the suite-owned conformance action against the Rust canonical vectors.
-- [ ] Add Python integration tests that exercise multi-session preview3 flows on one live connection.
+- [x] Add Python integration tests that exercise multiple native preview3 sessions on one live connection facade.
+- [ ] Add Python integration tests that exercise routed multi-session preview3 result delivery on one live connection.
 - [ ] Add Python integration tests for cache lease expiry, schema mismatch, operation cancellation, priority-aware flow updates, and resume paths.
 - [ ] Keep the active Python preview regression suite green while preview3 Rust-backed helpers replace the prior preview surface.
 - [ ] Add performance smoke checks that verify Python preview3 hot paths do not regress into full payload copies by default.

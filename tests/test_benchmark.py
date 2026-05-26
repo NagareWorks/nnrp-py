@@ -9,8 +9,8 @@ from nnrp.tools.benchmark import build_benchmark_results_report, main, write_ben
 def _plan_document() -> dict[str, object]:
     return {
         "$schema": "../../schemas/benchmark-execution-plan.schema.json",
-        "protocol_version": "nnrp-1-preview3",
-        "suite_version": "preview3-bootstrap",
+        "protocol_version": "nnrp-1",
+        "suite_version": "nnrp-1-bootstrap",
         "implementation_name": "nnrp-py",
         "artifacts": {
             "results_path": "artifacts/benchmark-results.json",
@@ -146,7 +146,7 @@ def test_build_benchmark_results_report_measures_configured_scenarios() -> None:
     report = build_benchmark_results_report(_plan_document())
 
     assert report["implementation_name"] == "nnrp-py"
-    assert report["protocol_version"] == "nnrp-1-preview3"
+    assert report["protocol_version"] == "nnrp-1"
     assert report["environment"]["os"]
 
     results = {result["id"]: result for result in report["results"]}
@@ -254,7 +254,7 @@ def test_main_reads_paths_from_environment_and_writes_report(tmp_path: Path, mon
     assert main([]) == 0
 
     report = json.loads(output_path.read_text(encoding="utf-8"))
-    assert report["protocol_version"] == "nnrp-1-preview3"
+    assert report["protocol_version"] == "nnrp-1"
     assert len(report["results"]) == 9
 
 
@@ -288,10 +288,10 @@ def test_write_benchmark_results_rejects_missing_plan_path(tmp_path: Path) -> No
     ("document", "match"),
     [
         ([], "must be a JSON object"),
-        ({"protocol_version": "nnrp-1-preview3"}, "scenarios list"),
+        ({"protocol_version": "nnrp-1"}, "scenarios list"),
         (
             {
-                "protocol_version": "nnrp-1-preview3",
+                "protocol_version": "nnrp-1",
                 "scenarios": ["l4.header.encode_decode.latency"],
             },
             "JSON objects",

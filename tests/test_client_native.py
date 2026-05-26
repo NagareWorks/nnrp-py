@@ -30,6 +30,13 @@ class FakeBackend:
         return self.connect(connection_id=connection_id, generation=generation, transport_id=transport_id)
 
 
+class LegacyFakeBackend(FakeBackend):
+    def connect(self, *, connection_id: int, generation: int, transport_id: int) -> LegacyFakeConnection:
+        connection = LegacyFakeConnection(connection_id, generation, transport_id)
+        self.connections.append(connection)
+        return connection
+
+
 class FakeConnection:
     def __init__(self, connection_id: int, generation: int, transport_id: int) -> None:
         self.connection_id = connection_id
@@ -37,6 +44,7 @@ class FakeConnection:
         self.transport_id = transport_id
         self.sessions: list[FakeSession] = []
         self.control_calls: list[tuple[int, bytes | bytearray | memoryview]] = []
+        self.closed = False
 
     def open_session(
         self,
@@ -59,6 +67,38 @@ class FakeConnection:
 
     def control(self, *, control_code: int, payload: bytes | bytearray | memoryview = b"") -> None:
         self.control_calls.append((control_code, payload))
+
+    def close(self) -> None:
+        self.closed = True
+        for session in self.sessions:
+            session.closed = True
+
+
+class LegacyFakeConnection:
+    def __init__(self, connection_id: int, generation: int, transport_id: int) -> None:
+        self.connection_id = connection_id
+        self.generation = generation
+        self.transport_id = transport_id
+        self.sessions: list[FakeSession] = []
+
+    def open_session(
+        self,
+        *,
+        requested_session_id: int,
+        generation: int,
+        profile_id: int,
+        schema_id: int,
+        schema_version: int,
+    ) -> FakeSession:
+        session = FakeSession(
+            requested_session_id=requested_session_id,
+            generation=generation,
+            profile_id=profile_id,
+            schema_id=schema_id,
+            schema_version=schema_version,
+        )
+        self.sessions.append(session)
+        return session
 
 
 class FakeSession:
@@ -195,6 +235,7 @@ def test_connect_native_client_connection_routes_results_for_multiple_sessions()
         assert second_result.payload == b"second"
 
     assert backend.connections[0].connection_id == 7
+    assert backend.connections[0].closed is True
     assert first.closed is True
     assert second.closed is True
 
@@ -206,6 +247,16 @@ def test_native_client_connection_rejects_use_after_close() -> None:
 
     with pytest.raises(RuntimeError, match="closed"):
         connection.open_session()
+
+
+def test_native_client_connection_falls_back_to_session_close_without_connection_close() -> None:
+    backend = LegacyFakeBackend()
+    with connect_native_client_connection(backend=backend) as connection:
+        first = connection.open_session(NativeClientSessionOpenOptions(requested_session_id=10))
+        second = connection.open_session(NativeClientSessionOpenOptions(requested_session_id=11))
+
+    assert first.closed is True
+    assert second.closed is True
 
 
 def test_native_client_connection_supports_operation_cancellation() -> None:

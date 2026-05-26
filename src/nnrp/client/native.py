@@ -154,9 +154,12 @@ class NativeClientConnection:
     def close(self) -> None:
         if self._closed:
             return
-        for session in reversed(self._sessions):
-            if not getattr(session, "_closed", False):
-                session.close()
+        if hasattr(self.connection, "close"):
+            self.connection.close()
+        else:
+            for session in reversed(self._sessions):
+                if not getattr(session, "_closed", False):
+                    session.close()
         self._closed = True
 
     def _ensure_open(self) -> None:

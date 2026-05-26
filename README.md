@@ -41,6 +41,7 @@ It does not contain neural rendering runtime business logic.
 ## Layout
 
 - `src/nnrp/core/`: shared protocol primitives and wire helpers.
+- `src/nnrp/cache.py`: Preview3 cache identity, lease, version, and invalidation result wrappers.
 - `src/nnrp/native.py`: FFI loader, ABI/protocol probes, native handle wrappers, and runtime facade.
 - `src/nnrp/native_artifacts/`: packaged `nnrp-rs` native libraries, arranged by platform tag.
 - `src/nnrp/schema.py`: Preview3 schema/profile descriptor views and first-round standard registry constants.
@@ -115,6 +116,8 @@ assert descriptor.stream_semantics is StreamSemantics.APPEND
 ```
 
 `StandardProfile.UNSPECIFIED` stays distinct from `StandardProfile.TENSOR`; structured-event and tool-delta remain payload families interpreted through schema/profile bindings rather than standalone standard profiles.
+
+`CacheObjectIdentity`, `CacheLeaseDescriptor`, and `SchemaRegistryCatalog` are host-side value wrappers for native/runtime results and diagnostics. They do not accept local lease policy callbacks or profile body decoders; those decisions remain owned by Rust and the conformance baseline.
 
 The wire surface is centered on two modules:
 

@@ -74,12 +74,13 @@ with connect_native_client_connection(
 			schema_version=1,
 		)
 	)
-	operation = session.submit_operation(
+	result = connection.submit_and_poll_result(
+		session,
 		operation_id=1001,
 		frame_id=1,
 		payload=b"tensor-or-typed-payload-bytes",
+		max_events=8,
 	)
-	result = connection.poll_result(session, operation, max_events=8)
 	print(result.state, result.payload)
 ```
 
@@ -87,9 +88,10 @@ The native helpers provide:
 
 1. `connect_native_client_connection()` for one Rust-backed connection that can own multiple sessions.
 2. `NativeClientConnection.open_session()` for explicit session creation.
-3. `NativeRuntimeSession.submit_operation()` for operation handles, parent/group metadata, and cancellation scope.
-4. `NativeClientConnection.poll_result()` and native async polling helpers for result/event delivery.
-5. `NativeRuntimeSession.cancel()` / `NativeRuntimeOperation.cancel()` / `NativeRuntimeSession.control()` for host control paths.
+3. `NativeClientConnection.submit_and_poll_result()` for a host-friendly submit/result roundtrip over native session operations.
+4. `NativeRuntimeSession.submit_operation()` and `NativeClientConnection.operation_scope()` for operation handles, parent/group metadata, and cancellation on exceptional exits.
+5. `NativeClientConnection.poll_result()` and native async polling helpers for result/event delivery.
+6. `NativeClientConnection.cancel_frame()` / `NativeClientConnection.cancel_operation()` / `NativeClientConnection.send_control()` for host control paths.
 
 By default the native loader searches `nnrp/native_artifacts/<os>-<arch>/` inside the installed package. Set `NNRP_NATIVE_ARTIFACT_ROOT` when testing an external artifact tree. Pass `require_native=True` in host code that must fail fast instead of falling back to SDK-local fixtures.
 

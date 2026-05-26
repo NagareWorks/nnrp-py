@@ -6,6 +6,7 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
+from types import TracebackType
 from typing import Any
 
 from nnrp.native import (
@@ -48,6 +49,32 @@ class NativeClientSessionOpenOptions:
 
 
 @dataclass(slots=True)
+class NativeClientOperationScope:
+    operation: NativeRuntimeOperation
+    cancel_on_error: bool = True
+    _closed: bool = field(default=False, init=False, repr=False)
+
+    def __enter__(self) -> NativeRuntimeOperation:
+        return self.operation
+
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc_value: BaseException | None,
+        traceback: TracebackType | None,
+    ) -> bool:
+        self.close(cancel=exc_type is not None and self.cancel_on_error)
+        return False
+
+    def close(self, *, cancel: bool = False) -> None:
+        if self._closed:
+            return
+        if cancel:
+            self.operation.cancel()
+        self._closed = True
+
+
+@dataclass(slots=True)
 class NativeClientConnection:
     connection: NativeRuntimeConnection
     _sessions: list[NativeRuntimeSession] = field(default_factory=list, init=False, repr=False)
@@ -75,6 +102,54 @@ class NativeClientConnection:
     ) -> NativeRuntimeResult:
         self._ensure_open()
         return session.poll_result(operation, max_events=max_events)
+
+    def submit_and_poll_result(
+        self,
+        session: NativeRuntimeSession,
+        *,
+        operation_id: int,
+        frame_id: int,
+        payload: bytes | bytearray | memoryview = b"",
+        parent_operation_id: int | None = None,
+        operation_group_id: int | None = None,
+        max_events: int | None = None,
+    ) -> NativeRuntimeResult:
+        self._ensure_open()
+        operation = session.submit_operation(
+            operation_id=operation_id,
+            frame_id=frame_id,
+            payload=payload,
+            parent_operation_id=parent_operation_id,
+            operation_group_id=operation_group_id,
+        )
+        return self.poll_result(session, operation, max_events=max_events)
+
+    def cancel_operation(self, operation: NativeRuntimeOperation) -> None:
+        self._ensure_open()
+        operation.cancel()
+
+    def operation_scope(
+        self,
+        operation: NativeRuntimeOperation,
+        *,
+        cancel_on_error: bool = True,
+    ) -> NativeClientOperationScope:
+        self._ensure_open()
+        return NativeClientOperationScope(operation, cancel_on_error=cancel_on_error)
+
+    def cancel_frame(self, session: NativeRuntimeSession, *, frame_id: int) -> None:
+        self._ensure_open()
+        session.cancel(frame_id=frame_id)
+
+    def send_control(
+        self,
+        target: NativeRuntimeConnection | NativeRuntimeSession,
+        *,
+        control_code: int,
+        payload: bytes | bytearray | memoryview = b"",
+    ) -> None:
+        self._ensure_open()
+        target.control(control_code=control_code, payload=payload)
 
     def close(self) -> None:
         if self._closed:

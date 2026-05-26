@@ -7,6 +7,7 @@ import pytest
 import nnrp.client.native as client_native_module
 from nnrp.client import (
     NativeClientConnectionOptions,
+    NativeClientOperationScope,
     NativeClientSessionOpenOptions,
     NativeClientSessionOptions,
     connect_native_client_connection,
@@ -35,6 +36,7 @@ class FakeConnection:
         self.generation = generation
         self.transport_id = transport_id
         self.sessions: list[FakeSession] = []
+        self.control_calls: list[tuple[int, bytes | bytearray | memoryview]] = []
 
     def open_session(
         self,
@@ -55,6 +57,9 @@ class FakeConnection:
         self.sessions.append(session)
         return session
 
+    def control(self, *, control_code: int, payload: bytes | bytearray | memoryview = b"") -> None:
+        self.control_calls.append((control_code, payload))
+
 
 class FakeSession:
     def __init__(
@@ -74,17 +79,28 @@ class FakeSession:
         self.closed = False
         self.operations: list[FakeOperation] = []
         self.cancelled_frames: list[int] = []
+        self.control_calls: list[tuple[int, bytes | bytearray | memoryview]] = []
 
     def close(self) -> None:
         self.closed = True
 
-    def submit_operation(self, *, operation_id: int, frame_id: int, payload: bytes = b"") -> FakeOperation:
+    def submit_operation(
+        self,
+        *,
+        operation_id: int,
+        frame_id: int,
+        payload: bytes = b"",
+        parent_operation_id: int | None = None,
+        operation_group_id: int | None = None,
+    ) -> FakeOperation:
         operation = FakeOperation(
             session_id=self.requested_session_id,
             operation_id=operation_id,
             frame_id=frame_id,
             payload=payload,
         )
+        operation.parent_operation_id = parent_operation_id
+        operation.operation_group_id = operation_group_id
         self.operations.append(operation)
         return operation
 
@@ -100,6 +116,9 @@ class FakeSession:
     def cancel(self, *, frame_id: int) -> None:
         self.cancelled_frames.append(frame_id)
 
+    def control(self, *, control_code: int, payload: bytes | bytearray | memoryview = b"") -> None:
+        self.control_calls.append((control_code, payload))
+
 
 class FakeOperation:
     def __init__(self, *, session_id: int, operation_id: int, frame_id: int, payload: bytes) -> None:
@@ -108,6 +127,8 @@ class FakeOperation:
         self.frame_id = frame_id
         self.payload = payload
         self.cancelled = False
+        self.parent_operation_id: int | None = None
+        self.operation_group_id: int | None = None
 
     def cancel(self) -> None:
         self.cancelled = True
@@ -193,11 +214,64 @@ def test_native_client_connection_supports_operation_cancellation() -> None:
         session = connection.open_session()
         operation = session.submit_operation(operation_id=100, frame_id=7, payload=b"payload")
 
-        operation.cancel()
-        session.cancel(frame_id=7)
+        connection.cancel_operation(operation)
+        connection.cancel_frame(session, frame_id=7)
 
         assert operation.cancelled is True
         assert session.cancelled_frames == [7]
+
+
+def test_native_client_connection_operation_scope_cancels_on_error() -> None:
+    backend = FakeBackend()
+    with connect_native_client_connection(backend=backend) as connection:
+        session = connection.open_session()
+        operation = session.submit_operation(operation_id=100, frame_id=7, payload=b"payload")
+        scope = connection.operation_scope(operation)
+
+        assert isinstance(scope, NativeClientOperationScope)
+
+        with pytest.raises(RuntimeError, match="boom"):
+            with scope as scoped_operation:
+                assert scoped_operation is operation
+                raise RuntimeError("boom")
+
+        assert operation.cancelled is True
+
+
+def test_native_client_connection_submits_and_polls_result() -> None:
+    backend = FakeBackend()
+    with connect_native_client_connection(backend=backend) as connection:
+        session = connection.open_session()
+
+        result = connection.submit_and_poll_result(
+            session,
+            operation_id=100,
+            frame_id=7,
+            payload=b"payload",
+            parent_operation_id=99,
+            operation_group_id=1234,
+            max_events=4,
+        )
+
+        assert result.session_id == 1
+        assert result.operation_id == 100
+        assert result.frame_id == 7
+        assert result.payload == b"payload"
+        assert result.max_events == 4
+        assert session.operations[0].parent_operation_id == 99
+        assert session.operations[0].operation_group_id == 1234
+
+
+def test_native_client_connection_sends_control_to_connection_and_session() -> None:
+    backend = FakeBackend()
+    with connect_native_client_connection(backend=backend) as client_connection:
+        session = client_connection.open_session()
+
+        client_connection.send_control(client_connection.connection, control_code=10, payload=b"connection")
+        client_connection.send_control(session, control_code=11, payload=b"session")
+
+        assert backend.connections[0].control_calls == [(10, b"connection")]
+        assert session.control_calls == [(11, b"session")]
 
 
 def test_select_client_native_backend_can_require_native(tmp_path: Path) -> None:

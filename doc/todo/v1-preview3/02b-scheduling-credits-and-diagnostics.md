@@ -11,8 +11,8 @@
   - [ ] Route credit update events through native connection polling.
   - [ ] Add async iterator coverage for credit updates.
   - [ ] Add tests proving Python does not recompute scheduler policy locally.
-- [ ] Surface downgrade and retry reasons as structured Python diagnostics.
-  - [ ] Add downgrade diagnostic wrapper preserving Rust status/family/detail fields.
-  - [ ] Add retry diagnostic wrapper preserving Rust status/family/detail fields.
-  - [ ] Map diagnostic wrappers onto failed/degraded/stale result paths.
-  - [ ] Add tests for unknown diagnostic family pass-through.
+- [x] Surface downgrade and retry reasons as structured Python diagnostics.
+  - [x] Add downgrade diagnostic wrapper preserving Rust status/family/detail fields.
+  - [x] Add retry diagnostic wrapper preserving Rust status/family/detail fields.
+  - [x] Map diagnostic wrappers onto failed/degraded/stale result paths.
+  - [x] Add tests for unknown diagnostic family pass-through.

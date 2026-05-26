@@ -54,6 +54,7 @@ from nnrp.native import (
     NativeRuntimeSession,
     NativeSessionHandle,
     NativeStatus,
+    NativeStructuredDiagnostic,
     NativeWouldBlockError,
     _NnrpBufferView,
     _NnrpBufferViewMut,
@@ -649,6 +650,8 @@ def test_native_runtime_result_preserves_lifecycle_surface(tmp_path: Path) -> No
     assert result.operation_id == 99
     assert result.frame_id == 7
     assert result.payload == b"result"
+    assert result.diagnostic.status.succeeded is True
+    assert result.diagnostic.related_connection_id == 0
     assert partial.state is NativeOperationLifecycle.PARTIAL
     assert degraded.state is NativeOperationLifecycle.DEGRADED
     assert stale.state is NativeOperationLifecycle.STALE_REUSE
@@ -675,6 +678,8 @@ def test_native_runtime_result_maps_error_and_drop_events() -> None:
     )
 
     assert NativeRuntimeResult.from_event(base_event).state is NativeOperationLifecycle.FAILED
+    assert NativeRuntimeResult.from_event(base_event).diagnostic.status_name == "internal_error"
+    assert NativeRuntimeResult.from_event(base_event).diagnostic.error_family_name == "none"
     assert NativeRuntimeResult.from_event(drop_event).state is NativeOperationLifecycle.CANCELLED
 
 
@@ -971,7 +976,19 @@ def test_native_status_roundtrips_ffi_shape() -> None:
     )
     assert decoded == status
     assert decoded.succeeded is False
+    assert decoded.status_name == "protocol_error"
+    assert decoded.error_family_name == "cache"
+    assert decoded.is_protocol_error is True
     assert NativeStatus.ok().succeeded is True
+
+
+def test_native_status_preserves_unknown_status_and_family_names() -> None:
+    status = NativeStatus(0x1234, 0x4321, 7, 9)
+
+    assert status.status_name == "unknown"
+    assert status.error_family_name == "unknown"
+    assert status.protocol_error_code == 7
+    assert status.detail_code == 9
 
 
 @pytest.mark.parametrize(
@@ -1007,6 +1024,31 @@ def test_raise_for_native_status_accepts_ffi_status_and_ignores_ok() -> None:
 def test_raise_for_native_status_maps_unknown_status_to_internal_error() -> None:
     with pytest.raises(NativeInternalError):
         raise_for_native_status(NativeStatus(0x1234))
+
+
+def test_native_structured_diagnostic_preserves_status_family_detail_and_related_ids() -> None:
+    status = NativeStatus(FFI_STATUS_PROTOCOL_ERROR, ERROR_FAMILY_CACHE, 0x22, 0x33)
+    runtime_diagnostic = NativeRuntimeDiagnostic(status, 12, 41, 99, 7)
+
+    diagnostic = NativeStructuredDiagnostic.from_runtime_diagnostic(runtime_diagnostic)
+
+    assert diagnostic.status is status
+    assert diagnostic.status_name == "protocol_error"
+    assert diagnostic.error_family_name == "cache"
+    assert diagnostic.failed is True
+    assert diagnostic.to_report() == {
+        "status_code": FFI_STATUS_PROTOCOL_ERROR,
+        "status_name": "protocol_error",
+        "error_family": ERROR_FAMILY_CACHE,
+        "error_family_name": "cache",
+        "protocol_error_code": 0x22,
+        "detail_code": 0x33,
+        "failed": True,
+        "related_connection_id": 12,
+        "related_session_id": 41,
+        "related_operation_id": 99,
+        "related_frame_id": 7,
+    }
 
 
 def test_native_runtime_entrypoints_bind_frozen_symbol_table() -> None:

@@ -31,29 +31,76 @@ GitHub README rendering does not support per-avatar dynamic tooltips for an auto
 
 This repository contains protocol-focused code only:
 
-1. Common wire constants, enums, and header codecs.
-2. Shared client/server protocol-side models.
-3. Future transport adapters, replay helpers, and golden-vector tooling.
+1. Rust-backed client connection/session helpers for host integrations.
+2. Common wire constants, enums, and packet codecs for protocol fixtures and diagnostics.
+3. Shared client/server protocol-side models.
+4. Transport adapters, replay helpers, and smoke tooling for SDK bring-up.
 
 It does not contain neural rendering runtime business logic.
 
 ## Layout
 
 - `src/nnrp/core/`: shared protocol primitives and wire helpers.
-- `src/nnrp/client/`: client-facing helpers and types.
+- `src/nnrp/native.py`: FFI loader, ABI/protocol probes, native handle wrappers, and runtime facade.
+- `src/nnrp/native_artifacts/`: packaged `nnrp-rs` native libraries, arranged by platform tag.
+- `src/nnrp/client/`: client-facing native connection/session helpers plus transport smoke helpers.
 - `src/nnrp/server/`: server-facing helpers and types.
 - `src/nnrp/adapters/`: transport or host integration adapters.
-- `src/nnrp/tools/`: replay, diagnostics, and golden-vector helpers.
-- `tests/`: protocol-level tests and golden-vector checks.
+- `src/nnrp/tools/`: adapter conformance, benchmark, replay, diagnostics, and smoke helpers.
+- `tests/`: protocol-level, native facade, conformance, and smoke tests.
 
 The top-level `nnrp` package keeps top-level re-exports for common imports, while new code should prefer the explicit submodules.
 
+## Native Host API
+
+Host integrations should start with the Rust-backed client helpers in `nnrp.client`. The Python layer owns a small, Pythonic surface, while protocol-critical session, operation, polling, and status behavior is delegated to the packaged `nnrp-rs` native runtime.
+
+```python
+from nnrp.client import (
+	NativeClientConnectionOptions,
+	NativeClientSessionOpenOptions,
+	connect_native_client_connection,
+)
+
+with connect_native_client_connection(
+	options=NativeClientConnectionOptions(connection_id=7),
+	require_native=True,
+) as connection:
+	session = connection.open_session(
+		NativeClientSessionOpenOptions(
+			requested_session_id=42,
+			profile_id=1,
+			schema_id=1,
+			schema_version=1,
+		)
+	)
+	operation = session.submit_operation(
+		operation_id=1001,
+		frame_id=1,
+		payload=b"tensor-or-typed-payload-bytes",
+	)
+	result = connection.poll_result(session, operation, max_events=8)
+	print(result.state, result.payload)
+```
+
+The native helpers provide:
+
+1. `connect_native_client_connection()` for one Rust-backed connection that can own multiple sessions.
+2. `NativeClientConnection.open_session()` for explicit session creation.
+3. `NativeRuntimeSession.submit_operation()` for operation handles, parent/group metadata, and cancellation scope.
+4. `NativeClientConnection.poll_result()` and native async polling helpers for result/event delivery.
+5. `NativeRuntimeSession.cancel()` / `NativeRuntimeOperation.cancel()` / `NativeRuntimeSession.control()` for host control paths.
+
+By default the native loader searches `nnrp/native_artifacts/<os>-<arch>/` inside the installed package. Set `NNRP_NATIVE_ARTIFACT_ROOT` when testing an external artifact tree. Pass `require_native=True` in host code that must fail fast instead of falling back to SDK-local fixtures.
+
 ## Public Wire API
 
-The current public wire surface is centered on two modules:
+The public wire surface remains available for protocol fixtures, diagnostics, and tooling. It should not be treated as the primary host runtime path when native artifacts are available.
+
+The wire surface is centered on two modules:
 
 1. `nnrp.core`: fixed-width header/message codecs, packet builders, tensor section helpers, and packet/body parsing.
-2. `nnrp.tools`: replay/export helpers, smoke helpers, and wire-size summary/comparison utilities.
+2. `nnrp.tools`: replay helpers, smoke helpers, adapter conformance, benchmark, and wire-size summary/comparison utilities.
 
 Use `nnrp.core` when you already have protocol-shaped inputs and want explicit control over header fields, tile ids, section payloads, and packet assembly.
 
@@ -107,20 +154,20 @@ The builder/parser layer currently guarantees:
 4. Fixed-stride, codec-table, and tile-length-table self-consistency checks.
 5. `RESULT_PUSH` tensor coverage and result-flag consistency validation.
 
-## Replay And Export Workflow
+## Replay And Diagnostics Workflow
 
-Use `nnrp.tools.replay` when the source object still looks like host-side runtime data instead of protocol-native inputs.
+Use `nnrp.tools.replay` when the source object still looks like host-side runtime data and you need protocol-shaped fixture bytes, diagnostics, or wire-size comparisons.
 
 ```python
 from nnrp.tools import (
 	compare_frame_features_wire_size,
 	frame_features_to_wire_bytes,
 	frame_features_to_wire_summary,
-	render_preview_wire_summary,
+	render_wire_summary,
 	render_wire_size_comparison,
 )
 
-preview_bytes = frame_features_to_wire_bytes(frame_features)
+wire_bytes = frame_features_to_wire_bytes(frame_features)
 summary = frame_features_to_wire_summary(frame_features)
 comparison = compare_frame_features_wire_size(
 	frame_features,
@@ -128,51 +175,59 @@ comparison = compare_frame_features_wire_size(
 	reference_label="protobuf",
 )
 
-print(len(preview_bytes))
-print(render_preview_wire_summary(summary))
+print(len(wire_bytes))
+print(render_wire_summary(summary))
 print(render_wire_size_comparison(comparison))
 ```
 
 The replay helpers currently provide:
 
-1. `frame_features_to_packet` / `frame_features_to_wire_bytes` for preview submit export.
-2. `enhance_result_to_packet` / `enhance_result_to_wire_bytes` for preview result export.
+1. `frame_features_to_packet` / `frame_features_to_wire_bytes` for submit fixture generation.
+2. `enhance_result_to_packet` / `enhance_result_to_wire_bytes` for result fixture generation.
 3. `frame_features_to_wire_summary` / `enhance_result_to_wire_summary` for stable packet summaries.
-4. `compare_frame_features_wire_size` / `compare_enhance_result_wire_size` for preview-vs-reference payload size comparison without taking a protobuf dependency.
+4. `compare_frame_features_wire_size` / `compare_enhance_result_wire_size` for wire-vs-reference payload size comparison without taking a protobuf dependency.
 
-`reference_payload` is intentionally just raw bytes. The protocol library does not depend on protobuf schemas; host applications remain responsible for producing the reference payload they want to compare against preview wire bytes.
+`reference_payload` is intentionally just raw bytes. The protocol library does not depend on protobuf schemas; host applications remain responsible for producing the reference payload they want to compare against NNRP wire bytes.
 
 ## Workflow Notes
 
-1. Prefer `nnrp.core` when writing protocol-native tests or SDK integration code.
-2. Prefer `nnrp.tools` when exporting host objects, building replay fixtures, or generating stable regression summaries.
-3. For transport bring-up, use `nnrp.tools.smoke` and `nnrp-quic-smoke` rather than reimplementing ad hoc control packets.
+1. Prefer `nnrp.client.connect_native_client_connection()` for host runtime integration.
+2. Prefer `nnrp.core` when writing protocol-native tests or SDK integration code.
+3. Prefer `nnrp.tools` when building replay fixtures or generating stable regression summaries.
+4. For transport bring-up, use `nnrp.tools.smoke` and `nnrp-quic-smoke` rather than reimplementing ad hoc control packets.
 
 ## Current Session Model
 
-The canonical helper shape is a long-lived control path plus independent submit and result pumps.
-
-1. Use `connect_preview2_client_session` or `connect_preview2_client_session_with_probe` to bootstrap the control path and selected transport binding.
-2. Use `send_preview2_submit` or `Preview2ResultRouter.send_submit` as the submit pump.
-3. Use `receive_preview2_result` or `manage_preview2_results()` as the result pump.
-4. Use the same live session for control-path operations such as `send_flow_update` and `migrate_preview2_session`.
-5. Treat `submit_and_receive_result` as a smoke/test convenience wrapper for raw packets, not as the normative host integration pattern.
-
-Hosts should keep submission and result consumption decoupled so multiple frames can remain in flight while `RESULT_PUSH`, `RESULT_DROP`, `FLOW_UPDATE`, and migration control messages continue to arrive on the same session.
+The canonical host shape is a long-lived native connection with one or more explicit sessions. Hosts submit operations through a session and consume results through the native result/event pump.
 
 ```python
-from nnrp.client import Preview2SubmitRequest, connect_preview2_client_session
+from nnrp.client import NativeClientSessionOpenOptions, connect_native_client_connection
 
-async with connect_preview2_client_session(
-	host,
-	tcp_port=9444,
-	requested_session_id=7,
-) as session:
-	async with session.manage_preview2_results() as router:
-		await router.send_submit(Preview2SubmitRequest(frame_id=101))
-		result = await router.receive(101, timeout=1.0)
-		print(result.payload_kinds)
+with connect_native_client_connection(require_native=True) as connection:
+	interactive = connection.open_session(
+		NativeClientSessionOpenOptions(requested_session_id=10, profile_id=1)
+	)
+	batch = connection.open_session(
+		NativeClientSessionOpenOptions(requested_session_id=11, profile_id=2)
+	)
+
+	interactive_op = interactive.submit_operation(
+		operation_id=2001,
+		frame_id=1,
+		payload=b"interactive-frame",
+	)
+	batch_op = batch.submit_operation(
+		operation_id=3001,
+		frame_id=1,
+		payload=b"batch-frame",
+	)
+
+	interactive_result = connection.poll_result(interactive, interactive_op, max_events=16)
+	batch_result = connection.poll_result(batch, batch_op, max_events=16)
+	print(interactive_result.state, batch_result.state)
 ```
+
+Hosts should keep submission and result consumption decoupled so multiple operations can remain in flight while result, cancellation, control, and diagnostic events continue to arrive on the same connection. The connection context closes owned sessions on exit.
 
 ## Conformance
 
@@ -233,16 +288,16 @@ Current payload helpers in `nnrp.core` cover:
 2. `build_audio_chunk_frame` and `build_video_chunk_frame` for multimodal streaming payloads.
 3. `build_structured_event_frame` for structured dialogue or agent-side event records.
 4. `build_tool_delta_frame` for tool-call progress and coding-agent style delta streams.
-5. `build_preview2_frame_submit_typed_payload_packet`, `build_preview2_result_push_typed_payload_packet`, and mixed builders when tensor plus non-tensor payloads must travel together.
+5. `build_frame_submit_typed_payload_packet`, `build_result_push_typed_payload_packet`, and mixed builders when tensor plus non-tensor payloads must travel together.
 
 ```python
 from nnrp.core import (
-	build_preview2_frame_submit_typed_payload_packet,
+	build_frame_submit_typed_payload_packet,
 	build_structured_event_frame,
 	build_token_chunk_frame,
 )
 
-packet = build_preview2_frame_submit_typed_payload_packet(
+packet = build_frame_submit_typed_payload_packet(
 	session_id=7,
 	frame_id=101,
 	frames=(
@@ -263,7 +318,7 @@ The current transport-facing boundary is intentionally narrow.
 1. QUIC connection/listener primitives in `nnrp.adapters`.
 2. TLS / ALPN configuration helpers such as `create_quic_client_configuration` and `create_quic_server_configuration`.
 3. Cross-SDK bring-up helpers in `nnrp.tools.smoke`.
-4. Protocol-native packet builders, parsers, replay/export helpers, and wire-size diagnostics.
+4. Protocol-native packet builders, parsers, replay helpers, and wire-size diagnostics.
 
 Host applications keep everything that depends on runtime policy, business objects, or deployment wiring:
 

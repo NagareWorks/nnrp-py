@@ -12,7 +12,7 @@
   - [ ] Add case parameter decoding for payload shapes and expected result states.
   - [ ] Add evidence artifact writing for each executed adapter case.
   - [ ] Add failure diagnostics that preserve native status/family/detail fields.
-- [x] Keep conformance integration adapter-first: Python declares capabilities and executes suite-owned plans rather than maintaining an SDK vector exporter.
+- [x] Keep conformance integration adapter-first: Python declares capabilities and executes suite-owned plans rather than maintaining SDK-owned vector generation.
 - [x] Add Python integration tests that exercise multiple native preview3 sessions on one live connection facade.
 - [x] Add Python integration tests that exercise routed multi-session preview3 result delivery on one live connection.
 - [ ] Add Python integration tests for cache lease expiry, schema mismatch, operation cancellation, priority-aware flow updates, and resume paths.
@@ -31,32 +31,32 @@
 
 ## Documentation And Rollout
 
-- [ ] Document the preview3 Python package as a Rust-backed binding layer plus host-facing control/session helpers.
-  - [ ] Add native artifact installation/loading section.
-  - [ ] Add native connection/session quick-start.
-  - [ ] Add native submit/result/cancel/control examples.
-  - [ ] Add fallback/require-native behavior section.
+- [x] Document the preview3 Python package as a Rust-backed binding layer plus host-facing control/session helpers.
+  - [x] Add native artifact installation/loading section.
+  - [x] Add native connection/session quick-start.
+  - [x] Add native submit/result/cancel/control examples.
+  - [x] Add fallback/require-native behavior section.
 - [ ] Keep `doc/benchmarks/rs-native-artifacts-migration.md` updated with the native artifact plan, supported platform matrix, and pre/post migration benchmark results.
   - [ ] Update pinned `nnrp-rs` tag/commit before release.
   - [ ] Fill post-migration benchmark environment row.
   - [ ] Fill post-migration latency table.
   - [ ] Fill post-migration throughput table.
   - [ ] Add interpretation notes for regressions or wins.
-- [ ] Document the current connection/session model and how it replaces the earlier single-session host mental model.
-  - [ ] Document connection-owned session lifecycle.
-  - [ ] Document multiple sessions on one connection.
-  - [ ] Document routed result polling.
-  - [ ] Document session close and connection context cleanup behavior.
+- [x] Document the current connection/session model and how it replaces the earlier single-session host mental model.
+  - [x] Document connection-owned session lifecycle.
+  - [x] Document multiple sessions on one connection.
+  - [x] Document routed result polling.
+  - [x] Document session close and connection context cleanup behavior.
 - [ ] Document cache lease, schema registry, profile neutrality, and operation/workflow lifecycle semantics for Python hosts.
   - [ ] Document cache lease host wrapper behavior.
   - [ ] Document schema/profile registry host wrapper behavior.
   - [ ] Document `profile_id = 0` as unspecified.
   - [ ] Document tensor/token parity and structured-event/tool-delta payload families.
   - [ ] Document operation lifecycle states and diagnostics.
-- [ ] Document how preview3 Rust-backed helpers replace the prior preview helper surface within `NNRP/1`.
-  - [ ] Map old packet/session examples to native host API examples.
-  - [ ] Move packet builder examples into protocol fixture/diagnostic sections.
-  - [ ] Remove obsolete exporter/vector wording.
+- [x] Document how preview3 Rust-backed helpers replace the prior preview helper surface within `NNRP/1`.
+  - [x] Map old packet/session examples to native host API examples.
+  - [x] Move packet builder examples into protocol fixture/diagnostic sections.
+  - [x] Remove obsolete SDK-owned vector-generation wording.
 - [ ] Document PR merge gates for freeze-dependent work so GitHub reviewers can reject Python-side protocol invention.
   - [ ] List required upstream Rust/doc freeze references for cache/schema/recovery work.
   - [ ] List required conformance adapter coverage for public API changes.

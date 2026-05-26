@@ -7,7 +7,7 @@
 - [x] Add the initial `nnrp.tools.adapter_conformance` wrapper so it can read the suite-owned execution plan and emit a schema-valid case-result report.
 - [x] Implement SDK-local adapter smoke execution inside `nnrp.tools.adapter_conformance` so selected core cases stop returning placeholder results.
 - [ ] Extend adapter execution from SDK-local smoke coverage to full suite-selected case behavior.
-- [ ] Add a preview3 conformance exporter and wire it into the suite-owned conformance action against the Rust canonical vectors.
+- [x] Keep conformance integration adapter-first: Python declares capabilities and executes suite-owned plans rather than maintaining an SDK vector exporter.
 - [x] Add Python integration tests that exercise multiple native preview3 sessions on one live connection facade.
 - [ ] Add Python integration tests that exercise routed multi-session preview3 result delivery on one live connection.
 - [ ] Add Python integration tests for cache lease expiry, schema mismatch, operation cancellation, priority-aware flow updates, and resume paths.

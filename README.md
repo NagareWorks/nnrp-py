@@ -174,23 +174,11 @@ async with connect_preview2_client_session(
 		print(result.payload_kinds)
 ```
 
-## Conformance Vector Export
+## Conformance
 
-`nnrp.tools` exposes the SDK-side conformance exporter used by the shared `nnrp-conformance` action. The Python SDK now reads the suite-owned semantic vector recipe manifest, regenerates the byte-exact vector manifest through its own codec, and lets the suite compare that output against the canonical versioned baseline.
+The shared `nnrp-conformance` suite owns protocol baselines, parameterized wire cases, adapter execution plans, and result validation. The Python SDK participates by declaring capabilities and running `python -m nnrp.tools.adapter_conformance --plan <path> --output <path>` against suite-selected cases.
 
-```python
-from nnrp.tools.conformance import build_conformance_vector_manifest
-
-manifest = build_conformance_vector_manifest(
-	"nnrp-1-preview2",
-	recipe_manifest_path="path/to/semantic-vectors.json",
-)
-
-print(manifest["vectors"][0]["name"])
-print(manifest["vectors"][0]["hex"])
-```
-
-The exported manifest currently covers the current `FLOW_UPDATE`, `RESULT_HINT`, metadata, body-region, object-reference, and typed-payload fixtures that the shared preview2 recipe baseline defines for wire-alignment comparison.
+SDK tests should exercise real Python APIs and native bridge behavior through adapter plans, benchmark plans, smoke tests, and focused unit tests rather than generating separate protocol vector manifests.
 
 ## Current Wire Additions
 

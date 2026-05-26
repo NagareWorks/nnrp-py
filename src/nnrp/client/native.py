@@ -10,9 +10,12 @@ from types import TracebackType
 from typing import Any
 
 from nnrp.native import (
+    NativeCreditUpdateCallback,
+    NativePayloadFamilyCallback,
     NativePlatform,
     NativeRuntimeBackend,
     NativeRuntimeConnection,
+    NativeRuntimeEventCallback,
     NativeRuntimeOperation,
     NativeRuntimeResult,
     NativeRuntimeSession,
@@ -102,6 +105,74 @@ class NativeClientConnection:
     ) -> NativeRuntimeResult:
         self._ensure_open()
         return session.poll_result(operation, max_events=max_events)
+
+    def dispatch_events(
+        self,
+        callback: NativeRuntimeEventCallback,
+        *,
+        max_events: int | None = None,
+        event_kind: int | None = None,
+    ) -> int:
+        self._ensure_open()
+        return self.connection.dispatch_events(callback, max_events=max_events, event_kind=event_kind)
+
+    def dispatch_credit_updates(
+        self,
+        callback: NativeCreditUpdateCallback,
+        *,
+        max_events: int | None = None,
+    ) -> int:
+        self._ensure_open()
+        return self.connection.dispatch_credit_updates(callback, max_events=max_events)
+
+    def dispatch_payload_family_events(
+        self,
+        payload_family: str,
+        callback: NativePayloadFamilyCallback,
+        *,
+        max_events: int | None = None,
+        event_kind: int | None = None,
+    ) -> int:
+        self._ensure_open()
+        if event_kind is None:
+            return self.connection.dispatch_payload_family_events(
+                payload_family,
+                callback,
+                max_events=max_events,
+            )
+        return self.connection.dispatch_payload_family_events(
+            payload_family,
+            callback,
+            max_events=max_events,
+            event_kind=event_kind,
+        )
+
+    def dispatch_structured_events(
+        self,
+        callback: NativePayloadFamilyCallback,
+        *,
+        max_events: int | None = None,
+    ) -> int:
+        self._ensure_open()
+        return self.connection.dispatch_structured_events(callback, max_events=max_events)
+
+    def dispatch_tool_deltas(
+        self,
+        callback: NativePayloadFamilyCallback,
+        *,
+        max_events: int | None = None,
+    ) -> int:
+        self._ensure_open()
+        return self.connection.dispatch_tool_deltas(callback, max_events=max_events)
+
+    def dispatch_workflow_states(
+        self,
+        callback: NativePayloadFamilyCallback,
+        *,
+        max_events: int | None = None,
+    ) -> int:
+        self._ensure_open()
+        return self.connection.dispatch_workflow_states(callback, max_events=max_events)
 
     def submit_and_poll_result(
         self,

@@ -872,6 +872,63 @@ def test_native_runtime_connection_wraps_payload_family_events(tmp_path: Path) -
     assert [event.payload_family for event in async_workflow_states] == ["workflow_state"]
 
 
+def test_native_runtime_connection_dispatches_callbacks(tmp_path: Path) -> None:
+    artifact = tmp_path / "nnrp_ffi.dll"
+    artifact.write_bytes(b"fake")
+    result_library = FakeRuntimeLibrary(event_payload=b'{"delta":"ok"}', event_kind=EVENT_KIND_RESULT_PUSHED)
+    result_connection = load_native_client(artifact, library=result_library).connect(
+        connection_id=12,
+        generation=2,
+        transport_id=TRANSPORT_SLOT_TCP,
+    )
+    credit_library = FakeRuntimeLibrary(event_payload=b"credits", event_kind=EVENT_KIND_FLOW_UPDATED)
+    credit_connection = load_native_client(artifact, library=credit_library).connect(
+        connection_id=12,
+        generation=2,
+        transport_id=TRANSPORT_SLOT_TCP,
+    )
+    raw_payloads: list[bytes] = []
+    structured_payloads: list[bytes] = []
+    credit_frames: list[int] = []
+
+    raw_count = result_connection.dispatch_events(lambda event: raw_payloads.append(event.payload), max_events=1)
+    structured_count = result_connection.dispatch_structured_events(
+        lambda event: structured_payloads.append(event.payload),
+        max_events=1,
+    )
+    credit_count = credit_connection.dispatch_credit_updates(
+        lambda update: credit_frames.append(update.frame_id),
+        max_events=1,
+    )
+
+    assert raw_count == 1
+    assert structured_count == 1
+    assert credit_count == 1
+    assert raw_payloads == [b'{"delta":"ok"}']
+    assert structured_payloads == [b'{"delta":"ok"}']
+    assert credit_frames == [7]
+
+
+def test_native_runtime_connection_maps_callback_rejection(tmp_path: Path) -> None:
+    artifact = tmp_path / "nnrp_ffi.dll"
+    artifact.write_bytes(b"fake")
+    library = FakeRuntimeLibrary(event_payload=b"payload", event_kind=EVENT_KIND_RESULT_PUSHED)
+    connection = load_native_client(artifact, library=library).connect(
+        connection_id=12,
+        generation=2,
+        transport_id=TRANSPORT_SLOT_TCP,
+    )
+
+    def reject(_event: NativePayloadFamilyEvent) -> None:
+        raise ValueError("host rejected payload")
+
+    with pytest.raises(NativeCallbackRejectedError) as captured:
+        connection.dispatch_tool_deltas(reject, max_events=1)
+
+    assert captured.value.status.status_code == FFI_STATUS_CALLBACK_REJECTED
+    assert isinstance(captured.value.__cause__, ValueError)
+
+
 def test_native_payload_family_event_rejects_unknown_family_and_non_payload_event(tmp_path: Path) -> None:
     artifact = tmp_path / "nnrp_ffi.dll"
     artifact.write_bytes(b"fake")

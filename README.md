@@ -92,7 +92,7 @@ The native helpers provide:
 2. `NativeClientConnection.open_session()` for explicit session creation.
 3. `NativeClientConnection.submit_and_poll_result()` for a host-friendly submit/result roundtrip over native session operations.
 4. `NativeRuntimeSession.submit_operation()` and `NativeClientConnection.operation_scope()` for operation handles, parent/group metadata, and cancellation on exceptional exits.
-5. `NativeClientConnection.poll_result()` and native async polling helpers for result/event delivery.
+5. `NativeClientConnection.poll_result()`, native async polling helpers, and callback dispatch helpers for result/event delivery.
 6. `NativeClientConnection.cancel_frame()` / `NativeClientConnection.cancel_operation()` / `NativeClientConnection.send_control()` for host control paths.
 
 By default the native loader searches `nnrp/native_artifacts/<os>-<arch>/` inside the installed package. Set `NNRP_NATIVE_ARTIFACT_ROOT` when testing an external artifact tree. Pass `require_native=True` in host code that must fail fast instead of falling back to SDK-local fixtures.
@@ -119,7 +119,7 @@ assert descriptor.stream_semantics is StreamSemantics.APPEND
 
 `CacheObjectIdentity`, `CacheLeaseDescriptor`, and `SchemaRegistryCatalog` are host-side value wrappers for native/runtime results and diagnostics. Cache query/touch/prefetch/release helpers delegate to a backend object and do not accept local lease policy callbacks or profile body decoders; those decisions remain owned by Rust and the conformance baseline.
 
-Native connections also expose async iterators for `structured_event`, `tool_delta`, and workflow-state payload families. These iterators wrap result/control events from the native pump and preserve Python-owned payload snapshots; profile-private body decoding still belongs to schema/profile handlers rather than the iterator itself.
+Native connections also expose async iterators and callback dispatch helpers for `structured_event`, `tool_delta`, and workflow-state payload families. These helpers wrap result/control events from the native pump and preserve Python-owned payload snapshots; profile-private body decoding still belongs to schema/profile handlers rather than the iterator or callback itself.
 
 The wire surface is centered on two modules:
 

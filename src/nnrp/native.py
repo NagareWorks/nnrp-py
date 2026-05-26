@@ -6,11 +6,11 @@ import asyncio
 import ctypes
 import os
 import platform
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass, field
 from enum import StrEnum
 from pathlib import Path
-from typing import Any, Protocol, runtime_checkable
+from typing import Any, Protocol, TypeVar, runtime_checkable
 
 EXPECTED_PROTOCOL_MAJOR = 1
 EXPECTED_PROTOCOL_WIRE_FORMAT = 0
@@ -73,6 +73,7 @@ EVENT_KIND_FLOW_UPDATED = 8
 EVENT_KIND_CONTROL = 9
 EVENT_KIND_ERROR = 10
 DEFAULT_ARTIFACT_ROOT_ENV = "NNRP_NATIVE_ARTIFACT_ROOT"
+_CallbackEventT = TypeVar("_CallbackEventT")
 
 
 class NativeArtifactError(RuntimeError):
@@ -807,6 +808,11 @@ class NativePayloadFamilyEvent:
         return self.payload_family == "workflow_state"
 
 
+NativeRuntimeEventCallback = Callable[[NativeRuntimeEvent], None]
+NativeCreditUpdateCallback = Callable[[NativeCreditUpdateEvent], None]
+NativePayloadFamilyCallback = Callable[[NativePayloadFamilyEvent], None]
+
+
 @dataclass(frozen=True)
 class NativeRuntimePollResult:
     status: NativeStatus
@@ -1045,6 +1051,63 @@ class NativeRuntimeConnection:
 
     def poll_workflow_states(self, *, max_events: int | None = None) -> tuple[NativePayloadFamilyEvent, ...]:
         return self.poll_payload_family_events("workflow_state", max_events=max_events)
+
+    def dispatch_events(
+        self,
+        callback: NativeRuntimeEventCallback,
+        *,
+        max_events: int | None = None,
+        event_kind: int | None = None,
+    ) -> int:
+        return _dispatch_callback_batch(
+            self.poll_events(max_events=max_events, event_kind=event_kind),
+            callback,
+        )
+
+    def dispatch_credit_updates(
+        self,
+        callback: NativeCreditUpdateCallback,
+        *,
+        max_events: int | None = None,
+    ) -> int:
+        return _dispatch_callback_batch(self.poll_credit_updates(max_events=max_events), callback)
+
+    def dispatch_payload_family_events(
+        self,
+        payload_family: str,
+        callback: NativePayloadFamilyCallback,
+        *,
+        max_events: int | None = None,
+        event_kind: int = EVENT_KIND_RESULT_PUSHED,
+    ) -> int:
+        return _dispatch_callback_batch(
+            self.poll_payload_family_events(payload_family, max_events=max_events, event_kind=event_kind),
+            callback,
+        )
+
+    def dispatch_structured_events(
+        self,
+        callback: NativePayloadFamilyCallback,
+        *,
+        max_events: int | None = None,
+    ) -> int:
+        return self.dispatch_payload_family_events("structured_event", callback, max_events=max_events)
+
+    def dispatch_tool_deltas(
+        self,
+        callback: NativePayloadFamilyCallback,
+        *,
+        max_events: int | None = None,
+    ) -> int:
+        return self.dispatch_payload_family_events("tool_delta", callback, max_events=max_events)
+
+    def dispatch_workflow_states(
+        self,
+        callback: NativePayloadFamilyCallback,
+        *,
+        max_events: int | None = None,
+    ) -> int:
+        return self.dispatch_payload_family_events("workflow_state", callback, max_events=max_events)
 
     async def async_poll_event(self) -> NativeRuntimeEvent | None:
         return await asyncio.to_thread(self.poll_event)
@@ -1289,6 +1352,23 @@ def _event_matches_operation(event: NativeRuntimeEvent, operation: NativeRuntime
         or event.operation.id == operation.operation_id
         or event.frame_id == operation.frame_id
     )
+
+
+def _dispatch_callback_batch(
+    events: tuple[_CallbackEventT, ...],
+    callback: Callable[[_CallbackEventT], None],
+) -> int:
+    dispatched = 0
+    for event in events:
+        try:
+            callback(event)
+        except Exception as error:
+            raise NativeCallbackRejectedError(
+                NativeStatus(FFI_STATUS_CALLBACK_REJECTED),
+                "native runtime callback rejected an event",
+            ) from error
+        dispatched += 1
+    return dispatched
 
 
 def current_native_platform() -> NativePlatform:

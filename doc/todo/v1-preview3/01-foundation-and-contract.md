@@ -26,7 +26,8 @@
   - [ ] Wrap borrowed buffer-view handles once exported by the ABI.
 - [ ] Implement callback/polling adapters and async runtime glue according to the frozen Rust binding contract.
   - [x] Add explicit polling, bounded polling, async polling, and async event iteration.
-  - [ ] Add structured event, tool delta, and workflow-state async iterators over Rust result pumps.
+  - [x] Add structured event, tool delta, and workflow-state async iterators over Rust result pumps.
+  - [x] Add callback dispatch wrappers over Rust result pump events.
   - [ ] Add batch polling or borrowed-buffer delivery once the ABI exposes it.
 - [ ] Map stable preview3 error families into Python exception/result surfaces without collapsing family/code information.
   - [x] Map stable FFI status codes to Python exception classes while preserving status/family/detail fields.

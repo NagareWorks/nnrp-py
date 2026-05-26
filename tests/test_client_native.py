@@ -44,6 +44,7 @@ class FakeConnection:
         self.transport_id = transport_id
         self.sessions: list[FakeSession] = []
         self.control_calls: list[tuple[int, bytes | bytearray | memoryview]] = []
+        self.dispatch_calls: list[tuple[str, int | None, int | None]] = []
         self.closed = False
 
     def open_session(
@@ -67,6 +68,37 @@ class FakeConnection:
 
     def control(self, *, control_code: int, payload: bytes | bytearray | memoryview = b"") -> None:
         self.control_calls.append((control_code, payload))
+
+    def dispatch_events(self, callback, *, max_events: int | None = None, event_kind: int | None = None) -> int:
+        self.dispatch_calls.append(("events", max_events, event_kind))
+        callback("event")
+        return 1
+
+    def dispatch_credit_updates(self, callback, *, max_events: int | None = None) -> int:
+        self.dispatch_calls.append(("credit_updates", max_events, None))
+        callback("credit")
+        return 1
+
+    def dispatch_payload_family_events(
+        self,
+        payload_family: str,
+        callback,
+        *,
+        max_events: int | None = None,
+        event_kind: int | None = None,
+    ) -> int:
+        self.dispatch_calls.append((payload_family, max_events, event_kind))
+        callback(payload_family)
+        return 1
+
+    def dispatch_structured_events(self, callback, *, max_events: int | None = None) -> int:
+        return self.dispatch_payload_family_events("structured_event", callback, max_events=max_events)
+
+    def dispatch_tool_deltas(self, callback, *, max_events: int | None = None) -> int:
+        return self.dispatch_payload_family_events("tool_delta", callback, max_events=max_events)
+
+    def dispatch_workflow_states(self, callback, *, max_events: int | None = None) -> int:
+        return self.dispatch_payload_family_events("workflow_state", callback, max_events=max_events)
 
     def close(self) -> None:
         self.closed = True
@@ -257,6 +289,44 @@ def test_native_client_connection_falls_back_to_session_close_without_connection
 
     assert first.closed is True
     assert second.closed is True
+
+
+def test_native_client_connection_delegates_callback_dispatch() -> None:
+    backend = FakeBackend()
+    callbacks: list[object] = []
+
+    with connect_native_client_connection(backend=backend) as connection:
+        assert connection.dispatch_events(callbacks.append, max_events=2, event_kind=6) == 1
+        assert connection.dispatch_credit_updates(callbacks.append, max_events=3) == 1
+        assert connection.dispatch_structured_events(callbacks.append, max_events=4) == 1
+        assert connection.dispatch_tool_deltas(callbacks.append, max_events=5) == 1
+        assert connection.dispatch_workflow_states(callbacks.append, max_events=6) == 1
+        assert (
+            connection.dispatch_payload_family_events(
+                "structured_event",
+                callbacks.append,
+                max_events=7,
+                event_kind=9,
+            )
+            == 1
+        )
+
+    assert callbacks == [
+        "event",
+        "credit",
+        "structured_event",
+        "tool_delta",
+        "workflow_state",
+        "structured_event",
+    ]
+    assert backend.connections[0].dispatch_calls == [
+        ("events", 2, 6),
+        ("credit_updates", 3, None),
+        ("structured_event", 4, None),
+        ("tool_delta", 5, None),
+        ("workflow_state", 6, None),
+        ("structured_event", 7, 9),
+    ]
 
 
 def test_native_client_connection_supports_operation_cancellation() -> None:

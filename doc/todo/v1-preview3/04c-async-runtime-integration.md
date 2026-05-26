@@ -13,7 +13,7 @@
   - [x] Add structured-event async iterator over native result pump events.
   - [x] Add tool-delta async iterator over native result pump events.
   - [x] Add workflow-state async iterator over native result pump events.
-  - [ ] Add callback registration wrapper if async iterator alone is insufficient for host integrations.
+  - [x] Add callback registration wrapper if async iterator alone is insufficient for host integrations.
 - [ ] Keep any remaining pure-Python codec code limited to preview2 fixture inspection or other non-hot-path tooling.
   - [x] Keep native runtime backend selection separate from the pure-Python fallback/test fixtures.
   - [ ] Audit preview3 runtime call sites and move remaining Python-owned codec helpers behind fixture/diagnostic paths.

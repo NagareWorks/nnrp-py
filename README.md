@@ -95,6 +95,8 @@ The native helpers provide:
 
 By default the native loader searches `nnrp/native_artifacts/<os>-<arch>/` inside the installed package. Set `NNRP_NATIVE_ARTIFACT_ROOT` when testing an external artifact tree. Pass `require_native=True` in host code that must fail fast instead of falling back to SDK-local fixtures.
 
+Polled native events and results expose Python-owned `bytes` payload snapshots. The current Python API does not expose borrowed result buffers, so a result object remains stable even if the native runtime reuses its poll buffer after the call returns.
+
 ## Public Wire API
 
 The public wire surface remains available for protocol fixtures, diagnostics, and tooling. It should not be treated as the primary host runtime path when native artifacts are available.

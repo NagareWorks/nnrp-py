@@ -6,8 +6,8 @@
   - [ ] Replace SDK runtime calls with the bound native entrypoints.
     - [x] Route adapter conformance smoke execution through the native backend selector.
     - [x] Route new client connection/session helpers through native backend handles.
-    - [ ] Route public submit/result helper paths through native session operations.
-    - [ ] Route public cancellation/control helper paths through native session/operation control calls.
+    - [x] Route public submit/result helper paths through native session operations.
+    - [x] Route public cancellation/control helper paths through native session/operation control calls.
     - [ ] Route cache/schema/profile helper paths through native calls once exposed.
 - [x] Pin the exact `nnrp-rs` commit, tag, or artifact version used by the Python package.
 - [x] Define the packaged native artifact layout for Windows, macOS, Linux, Android, and iOS.
@@ -22,10 +22,10 @@
   - [ ] Add borrowed immutable buffer-view handle wrapper.
   - [ ] Add borrowed mutable buffer-view handle wrapper.
   - [ ] Add lifetime guard tests for borrowed views.
-- [ ] Define ownership and lifetime rules for native buffers returned to Python.
+- [x] Define ownership and lifetime rules for native buffers returned to Python.
   - [x] Snapshot polled native event payloads into Python-owned bytes before returning them to callers.
-  - [ ] Document event/result snapshot behavior in the native client API docs.
-  - [ ] Add tests for payload snapshot independence after native poll buffer reuse.
+  - [x] Document event/result snapshot behavior in the native client API docs.
+  - [x] Add tests for payload snapshot independence after native poll buffer reuse.
 - [ ] Define borrowed-buffer rules for future zero-copy result/body views.
   - [ ] Define when borrowed views may be exposed from sync polling.
   - [ ] Define when borrowed views may be exposed from async polling.

@@ -600,6 +600,25 @@ def test_native_runtime_event_snapshot_copies_payload(tmp_path: Path) -> None:
     assert result.event.diagnostic.status.succeeded is True
 
 
+def test_native_runtime_event_snapshot_survives_native_buffer_reuse(tmp_path: Path) -> None:
+    artifact = tmp_path / "nnrp_ffi.dll"
+    artifact.write_bytes(b"fake")
+    library = FakeRuntimeLibrary(event_payload=b"result")
+
+    connection = load_native_client(artifact, library=library).connect(
+        connection_id=12,
+        generation=2,
+        transport_id=TRANSPORT_SLOT_TCP,
+    )
+    result = connection.await_event()
+    assert result.event is not None
+
+    assert library._event_payload_owner is not None
+    library._event_payload_owner.value = b"reuse!"
+
+    assert result.event.payload == b"result"
+
+
 def test_native_runtime_result_preserves_lifecycle_surface(tmp_path: Path) -> None:
     artifact = tmp_path / "nnrp_ffi.dll"
     artifact.write_bytes(b"fake")

@@ -4,10 +4,26 @@
 - [x] Choose one default Python delivery model for preview3: async iterator, callback registration, or explicit polling.
 - [x] Keep backend selection behind an internal interface so tests can run against pure-Python fixtures and native artifacts.
 - [ ] Avoid per-frame Python object churn on the hot submit/result path; batch or borrow native buffers where the ABI allows it.
+  - [ ] Measure object allocation count for native submit/result loop.
+  - [ ] Add batch poll helper once Rust exposes batched event polling.
+  - [ ] Add borrowed result payload helper once Rust exposes stable borrowed views.
+  - [ ] Add regression test that hot-path payloads are not copied more than the documented boundary.
 - [x] Define cancellation behavior when a Python task is cancelled while a native operation is active.
 - [ ] Expose structured event, tool delta, and workflow-state updates through Python-native async iterators or callbacks backed by Rust result pumps.
+  - [ ] Add structured-event async iterator over native result pump events.
+  - [ ] Add tool-delta async iterator over native result pump events.
+  - [ ] Add workflow-state async iterator over native result pump events.
+  - [ ] Add callback registration wrapper if async iterator alone is insufficient for host integrations.
 - [ ] Keep any remaining pure-Python codec code limited to preview2 fixture inspection or other non-hot-path tooling.
   - [x] Keep native runtime backend selection separate from the pure-Python fallback/test fixtures.
   - [ ] Audit preview3 runtime call sites and move remaining Python-owned codec helpers behind fixture/diagnostic paths.
+    - [ ] Audit `nnrp.client.transport` runtime-facing helpers.
+    - [ ] Audit `nnrp.tools.smoke` runtime-facing examples.
+    - [ ] Audit README/runtime examples.
+    - [ ] Update docs/tests so packet builders are presented as protocol fixtures, not runtime execution.
 - [x] Run the pre-migration benchmark suite and record the baseline in `doc/benchmarks/rs-native-artifacts-migration.md`.
 - [ ] Run the same benchmark suite after native migration and record the deltas in `doc/benchmarks/rs-native-artifacts-migration.md`.
+  - [ ] Build/download matching `nnrp-rs` native artifacts for the benchmark host.
+  - [ ] Run conformance benchmark plan against native-backed Python helpers.
+  - [ ] Record p50/p95/p99 latency deltas.
+  - [ ] Record throughput/CPU/memory deltas.

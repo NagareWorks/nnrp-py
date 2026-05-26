@@ -107,6 +107,28 @@ jobs:
         run: |
           python scripts/resolve_version.py apply --package-version "${{ steps.version.outputs.package_version }}"
 
+      - name: Download Rust native artifacts
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          version="${{ steps.version.outputs.package_version }}"
+          tag="v${version}"
+          mkdir -p artifacts/native-downloads
+          gh release download "$tag" \
+            --repo "${{ github.repository_owner }}/nnrp-rs" \
+            --pattern "nnrp-ffi-native-*-${version}.zip" \
+            --dir artifacts/native-downloads
+
+      - name: Prepare package native artifacts
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          python scripts/prepare_native_artifacts.py --clean artifacts/native-downloads/*.zip
+
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip

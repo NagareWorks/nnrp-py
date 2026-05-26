@@ -2,12 +2,12 @@
 
 ## Cache Lease Surface
 
-- [ ] Add Python host models for cache lease, object version, expiry, renewal, and dependency invalidation backed by Rust results.
-  - [ ] Add cache object identity wrapper.
-  - [ ] Add cache lease descriptor wrapper.
-  - [ ] Add cache object version wrapper.
-  - [ ] Add cache expiry/renewal result wrapper.
-  - [ ] Add dependency invalidation result wrapper.
+- [x] Add Python host models for cache lease, object version, expiry, renewal, and dependency invalidation backed by Rust results.
+  - [x] Add cache object identity wrapper.
+  - [x] Add cache lease descriptor wrapper.
+  - [x] Add cache object version wrapper.
+  - [x] Add cache expiry/renewal result wrapper.
+  - [x] Add dependency invalidation result wrapper.
 - [ ] Add Python cache query, touch, prefetch, and release helpers without re-implementing cache semantics locally.
   - [ ] Add cache query helper that delegates to Rust.
   - [ ] Add cache touch helper that delegates to Rust.
@@ -15,17 +15,17 @@
   - [ ] Add cache release helper that delegates to Rust.
   - [ ] Add tests proving cache miss/lease-expiry diagnostics pass through Rust errors.
 - [ ] Preserve Rust ownership of lease policy, object dependency validation, and invalidation rules.
-  - [ ] Keep Python cache helpers from accepting local policy callbacks.
-  - [ ] Add tests that Python wrappers do not mutate dependency graphs locally.
+  - [x] Keep Python cache helpers from accepting local policy callbacks.
+  - [x] Add tests that Python wrappers do not mutate dependency graphs locally.
 
 ## Schema And Registry Surface
 
-- [ ] Add Python helpers for schema/profile installation, lookup, invalidation, and version mismatch handling.
-  - [ ] Add schema install helper.
-  - [ ] Add profile install helper.
-  - [ ] Add schema/profile lookup helper.
-  - [ ] Add schema/profile invalidation helper.
-  - [ ] Add version mismatch diagnostic wrapper.
+- [x] Add Python helpers for schema/profile installation, lookup, invalidation, and version mismatch handling.
+  - [x] Add schema install helper.
+  - [x] Add profile install helper.
+  - [x] Add schema/profile lookup helper.
+  - [x] Add schema/profile invalidation helper.
+  - [x] Add version mismatch diagnostic wrapper.
 - [x] Model schema descriptor common headers and typed payload descriptor views against the frozen 32B / 24B layouts plus the first-round standard registry assignments from `nnrp-doc`.
   - [x] Add schema descriptor common-header view.
   - [x] Add typed payload descriptor view.
@@ -33,7 +33,7 @@
   - [x] Add tests for descriptor size/alignment pass-through.
 - [ ] Keep schema/profile interpretation Rust-owned; Python should expose stable descriptors and host-friendly wrappers only.
   - [x] Avoid body-specific schema decoding in Python helpers.
-  - [ ] Add tests for unknown schema/profile pass-through.
+  - [x] Add tests for unknown schema/profile pass-through.
 
 ## Standard Profiles And Payload Families
 

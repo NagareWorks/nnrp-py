@@ -51,6 +51,21 @@ class TypedPayloadDescriptorFlags(IntFlag):
     PROFILE_HINT_PRESENT = 0x0008
 
 
+class SchemaRegistryAction(IntEnum):
+    INSTALLED = 1
+    ALREADY_INSTALLED = 2
+    UPDATED = 3
+    INVALIDATED = 4
+
+
+class SchemaRegistryFailure(IntEnum):
+    UNKNOWN = 1
+    VERSION_UNKNOWN = 2
+    HASH_CONFLICT = 3
+    INCOMPATIBLE = 4
+    UPDATE_REJECTED = 5
+
+
 @dataclass(frozen=True, slots=True)
 class SchemaDescriptorHeader:
     schema_id: int
@@ -123,6 +138,92 @@ class SchemaDescriptorHeader:
             int(self.default_stream_semantics),
             self.schema_hash,
         )
+
+
+@dataclass(frozen=True, slots=True)
+class SchemaVersionMismatch:
+    requested_schema_id: int
+    requested_schema_version: int
+    available_schema_version: int | None
+    profile_id: int | StandardProfile
+    failure: SchemaRegistryFailure = SchemaRegistryFailure.VERSION_UNKNOWN
+
+    def __post_init__(self) -> None:
+        _validate_u32("requested_schema_id", self.requested_schema_id)
+        _validate_u32("requested_schema_version", self.requested_schema_version)
+        if self.available_schema_version is not None:
+            _validate_u32("available_schema_version", self.available_schema_version)
+        _validate_u16("profile_id", int(self.profile_id))
+        SchemaRegistryFailure(self.failure)
+
+
+class SchemaRegistryCatalog:
+    """Host-side descriptor catalog.
+
+    This catalog stores descriptor headers and performs exact key lookup only.
+    It does not decode body schemas, resolve compatibility policy, or mutate
+    dependency graphs locally.
+    """
+
+    def __init__(self, descriptors: tuple[SchemaDescriptorHeader, ...] = ()) -> None:
+        self._descriptors: dict[tuple[int, int], SchemaDescriptorHeader] = {}
+        for descriptor in descriptors:
+            self.install(descriptor)
+
+    def install(self, descriptor: SchemaDescriptorHeader) -> SchemaRegistryAction:
+        key = (descriptor.schema_id, descriptor.schema_version)
+        existing = self._descriptors.get(key)
+        if existing == descriptor:
+            return SchemaRegistryAction.ALREADY_INSTALLED
+        if existing is not None and existing.schema_hash != descriptor.schema_hash:
+            raise ValueError("schema hash conflict for installed schema version")
+
+        has_older_version = any(schema_id == descriptor.schema_id for schema_id, _ in self._descriptors)
+        self._descriptors[key] = descriptor
+        return SchemaRegistryAction.UPDATED if has_older_version else SchemaRegistryAction.INSTALLED
+
+    def install_profile(self, descriptor: SchemaDescriptorHeader) -> SchemaRegistryAction:
+        return self.install(descriptor)
+
+    def lookup(self, schema_id: int, schema_version: int) -> SchemaDescriptorHeader | None:
+        _validate_u32("schema_id", schema_id)
+        _validate_u32("schema_version", schema_version)
+        return self._descriptors.get((schema_id, schema_version))
+
+    def lookup_profile(self, profile_id: int | StandardProfile) -> tuple[SchemaDescriptorHeader, ...]:
+        _validate_u16("profile_id", int(profile_id))
+        return tuple(descriptor for descriptor in self._descriptors.values() if descriptor.profile_id == profile_id)
+
+    def invalidate(self, schema_id: int, schema_version: int) -> SchemaRegistryAction:
+        _validate_u32("schema_id", schema_id)
+        _validate_u32("schema_version", schema_version)
+        self._descriptors.pop((schema_id, schema_version), None)
+        return SchemaRegistryAction.INVALIDATED
+
+    def version_mismatch(
+        self,
+        *,
+        schema_id: int,
+        requested_schema_version: int,
+        profile_id: int | StandardProfile,
+    ) -> SchemaVersionMismatch | None:
+        _validate_u32("schema_id", schema_id)
+        _validate_u32("requested_schema_version", requested_schema_version)
+        _validate_u16("profile_id", int(profile_id))
+        if self.lookup(schema_id, requested_schema_version) is not None:
+            return None
+        available_versions = [
+            version for (registered_schema_id, version) in self._descriptors if registered_schema_id == schema_id
+        ]
+        return SchemaVersionMismatch(
+            requested_schema_id=schema_id,
+            requested_schema_version=requested_schema_version,
+            available_schema_version=max(available_versions) if available_versions else None,
+            profile_id=profile_id,
+        )
+
+    def descriptors(self) -> tuple[SchemaDescriptorHeader, ...]:
+        return tuple(self._descriptors.values())
 
 
 @dataclass(frozen=True, slots=True)
@@ -302,6 +403,10 @@ __all__ = [
     "Preview3TypedPayloadDescriptor",
     "SchemaDescriptorFlags",
     "SchemaDescriptorHeader",
+    "SchemaRegistryAction",
+    "SchemaRegistryCatalog",
+    "SchemaRegistryFailure",
+    "SchemaVersionMismatch",
     "StandardProfile",
     "StreamSemantics",
     "TypedPayloadDescriptorFlags",

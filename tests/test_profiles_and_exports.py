@@ -1,6 +1,9 @@
 from nnrp import (
+    CacheLeaseDescriptor,
+    CacheObjectIdentity,
     Preview3TypedPayloadDescriptor,
     SchemaDescriptorHeader,
+    SchemaRegistryCatalog,
     StandardProfile,
     StreamSemantics,
     token_delta_payload_descriptor,
@@ -344,7 +347,10 @@ def test_current_typed_models_are_exported() -> None:
     assert MigrationTriggerMonitor.__name__ == "MigrationTriggerMonitor"
     assert Result.__name__ == "Result"
     assert ResultRouter.__name__ == "ResultRouter"
+    assert CacheObjectIdentity.__name__ == "CacheObjectIdentity"
+    assert CacheLeaseDescriptor.__name__ == "CacheLeaseDescriptor"
     assert SchemaDescriptorHeader.__name__ == "SchemaDescriptorHeader"
+    assert SchemaRegistryCatalog.__name__ == "SchemaRegistryCatalog"
     assert Preview3TypedPayloadDescriptor.__name__ == "Preview3TypedPayloadDescriptor"
     assert StandardProfile.TOKEN == 2
     assert StreamSemantics.APPEND == 2

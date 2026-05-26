@@ -43,6 +43,7 @@ from nnrp.native import (
     NativeMutableBufferView,
     NativeOperationHandle,
     NativeOperationLifecycle,
+    NativeOperationSchedulingHint,
     NativePlatform,
     NativeProtocolError,
     NativeRuntimeBackend,
@@ -56,6 +57,7 @@ from nnrp.native import (
     NativeRuntimeResult,
     NativeRuntimeSession,
     NativeSessionHandle,
+    NativeSessionPriorityClass,
     NativeStatus,
     NativeStructuredDiagnostic,
     NativeWouldBlockError,
@@ -504,14 +506,18 @@ def test_native_runtime_client_runs_connection_session_submit_close_roundtrip(tm
         profile_id=4,
         schema_id=5,
         schema_version=6,
+        priority_class=NativeSessionPriorityClass.INTERACTIVE,
     )
     operation = session.submit(operation_id=99, frame_id=7, payload=b"payload")
     operation_scope = session.submit_operation(
         operation_id=100,
         frame_id=8,
         payload=b"payload",
-        parent_operation_id=99,
-        operation_group_id=1234,
+        scheduling_hint=NativeOperationSchedulingHint(
+            parent_operation_id=99,
+            operation_group_id=1234,
+            deadline_ms=250,
+        ),
     )
     connection.control(control_code=10, payload=b"connection-control")
     operation_scope.cancel()
@@ -525,12 +531,14 @@ def test_native_runtime_client_runs_connection_session_submit_close_roundtrip(tm
     assert connection.handle.handle.id == 11
     assert session.connection.handle.id == 11
     assert session.handle.handle.id == 41
+    assert session.priority_class is NativeSessionPriorityClass.INTERACTIVE
     assert operation.handle.id == 99
     assert isinstance(operation_scope, NativeRuntimeOperation)
     assert operation_scope.operation_id == 100
     assert operation_scope.frame_id == 8
     assert operation_scope.parent_operation_id == 99
     assert operation_scope.operation_group_id == 1234
+    assert operation_scope.scheduling_hint.deadline_ms == 250
     submit_request = library.nnrp_client_submit.calls[0][0]
     assert submit_request.frame_id == 7
     assert submit_request.payload.len == 7
@@ -540,6 +548,50 @@ def test_native_runtime_client_runs_connection_session_submit_close_roundtrip(tm
     assert library.nnrp_client_cancel.calls[1][0].frame_id == 7
     assert library.nnrp_control.calls[1][0].control_code == 11
     assert library.nnrp_control.calls[1][0].payload.len == len(b"session-control")
+
+
+def test_native_scheduling_models_validate_frozen_value_ranges() -> None:
+    assert NativeSessionPriorityClass.from_code(0) is NativeSessionPriorityClass.INTERACTIVE
+    assert NativeSessionPriorityClass.from_code(1) is NativeSessionPriorityClass.BALANCED
+    assert NativeSessionPriorityClass.from_code(2) is NativeSessionPriorityClass.BACKGROUND
+    assert NativeSessionPriorityClass.BACKGROUND.code == 2
+    assert NativeOperationSchedulingHint(
+        parent_operation_id=99,
+        operation_group_id=1234,
+        deadline_ms=250,
+    ).has_scope
+
+    with pytest.raises(NativeHandleError, match="unknown native session priority class"):
+        NativeSessionPriorityClass.from_code(3)
+    with pytest.raises(NativeHandleError, match="deadline_ms"):
+        NativeOperationSchedulingHint(deadline_ms=0x1_0000_0000)
+    with pytest.raises(NativeHandleError, match="parent_operation_id"):
+        NativeOperationSchedulingHint(parent_operation_id=-1)
+
+
+def test_native_submit_rejects_conflicting_scheduling_hint_scope(tmp_path: Path) -> None:
+    artifact = tmp_path / "nnrp_ffi.dll"
+    artifact.write_bytes(b"fake")
+    library = FakeRuntimeLibrary()
+    session = load_native_client(artifact, library=library).connect(
+        connection_id=11,
+        generation=2,
+        transport_id=TRANSPORT_SLOT_TCP,
+    ).open_session(
+        requested_session_id=41,
+        generation=3,
+        profile_id=4,
+        schema_id=5,
+        schema_version=6,
+    )
+
+    with pytest.raises(NativeHandleError, match="parent_operation_id conflicts"):
+        session.submit_operation(
+            operation_id=100,
+            frame_id=8,
+            parent_operation_id=101,
+            scheduling_hint=NativeOperationSchedulingHint(parent_operation_id=99),
+        )
 
 
 def test_native_runtime_connection_can_open_multiple_sessions(tmp_path: Path) -> None:

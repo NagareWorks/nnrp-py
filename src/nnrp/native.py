@@ -786,6 +786,43 @@ class NativeOperationLifecycle(StrEnum):
     FAILED = "failed"
 
 
+class NativeSessionPriorityClass(StrEnum):
+    INTERACTIVE = "interactive"
+    BALANCED = "balanced"
+    BACKGROUND = "background"
+
+    @property
+    def code(self) -> int:
+        return _SESSION_PRIORITY_CLASS_CODES[self]
+
+    @classmethod
+    def from_code(cls, code: int) -> NativeSessionPriorityClass:
+        _validate_u32("priority_class", code)
+        try:
+            return _SESSION_PRIORITY_CLASS_BY_CODE[code]
+        except KeyError as exc:
+            raise NativeHandleError(f"unknown native session priority class {code}") from exc
+
+
+@dataclass(frozen=True)
+class NativeOperationSchedulingHint:
+    parent_operation_id: int | None = None
+    operation_group_id: int | None = None
+    deadline_ms: int | None = None
+
+    def __post_init__(self) -> None:
+        if self.parent_operation_id is not None:
+            _validate_u64("parent_operation_id", self.parent_operation_id)
+        if self.operation_group_id is not None:
+            _validate_u64("operation_group_id", self.operation_group_id)
+        if self.deadline_ms is not None:
+            _validate_u32("deadline_ms", self.deadline_ms)
+
+    @property
+    def has_scope(self) -> bool:
+        return self.parent_operation_id is not None or self.operation_group_id is not None
+
+
 @dataclass(frozen=True)
 class NativeRuntimeResult:
     state: NativeOperationLifecycle
@@ -820,6 +857,7 @@ class NativeRuntimeOperation:
     handle: NativeOperationHandle
     operation_id: int
     frame_id: int
+    scheduling_hint: NativeOperationSchedulingHint = field(default_factory=NativeOperationSchedulingHint)
     parent_operation_id: int | None = None
     operation_group_id: int | None = None
 
@@ -883,8 +921,10 @@ class NativeRuntimeConnection:
         profile_id: int,
         schema_id: int,
         schema_version: int,
+        priority_class: NativeSessionPriorityClass | str = NativeSessionPriorityClass.BALANCED,
     ) -> NativeRuntimeSession:
         self._ensure_open()
+        selected_priority_class = NativeSessionPriorityClass(priority_class)
         request = _NnrpSessionOpenRequest(
             self.handle.to_ffi(),
             requested_session_id,
@@ -896,7 +936,12 @@ class NativeRuntimeConnection:
         out_session = _NnrpHandle()
         status = self.entrypoints.client_open_session(request, ctypes.byref(out_session))
         raise_for_native_status(status)
-        return NativeRuntimeSession(self.entrypoints, self.handle, NativeSessionHandle.from_ffi(out_session))
+        return NativeRuntimeSession(
+            self.entrypoints,
+            self.handle,
+            NativeSessionHandle.from_ffi(out_session),
+            selected_priority_class,
+        )
 
     def await_event(self) -> NativeRuntimePollResult:
         self._ensure_open()
@@ -979,6 +1024,7 @@ class NativeRuntimeSession:
     entrypoints: NativeRuntimeEntrypoints
     connection: NativeConnectionHandle
     handle: NativeSessionHandle
+    priority_class: NativeSessionPriorityClass = NativeSessionPriorityClass.BALANCED
     _closed: bool = field(default=False, init=False, repr=False, compare=False)
 
     def submit(
@@ -999,8 +1045,14 @@ class NativeRuntimeSession:
         payload: bytes | bytearray | memoryview = b"",
         parent_operation_id: int | None = None,
         operation_group_id: int | None = None,
+        scheduling_hint: NativeOperationSchedulingHint | None = None,
     ) -> NativeRuntimeOperation:
         self._ensure_open()
+        selected_scheduling_hint = _coerce_operation_scheduling_hint(
+            scheduling_hint,
+            parent_operation_id=parent_operation_id,
+            operation_group_id=operation_group_id,
+        )
         payload_view, _payload_owner = _buffer_view_from_payload(payload)
         request = _NnrpSubmitRequest(self.handle.to_ffi(), operation_id, frame_id, payload_view)
         out_operation = _NnrpHandle()
@@ -1012,8 +1064,9 @@ class NativeRuntimeSession:
             handle=NativeOperationHandle.from_ffi(out_operation),
             operation_id=operation_id,
             frame_id=frame_id,
-            parent_operation_id=parent_operation_id,
-            operation_group_id=operation_group_id,
+            scheduling_hint=selected_scheduling_hint,
+            parent_operation_id=selected_scheduling_hint.parent_operation_id,
+            operation_group_id=selected_scheduling_hint.operation_group_id,
         )
 
     async def async_submit_operation(
@@ -1024,6 +1077,7 @@ class NativeRuntimeSession:
         payload: bytes | bytearray | memoryview = b"",
         parent_operation_id: int | None = None,
         operation_group_id: int | None = None,
+        scheduling_hint: NativeOperationSchedulingHint | None = None,
     ) -> NativeRuntimeOperation:
         try:
             return await asyncio.to_thread(
@@ -1033,6 +1087,7 @@ class NativeRuntimeSession:
                 payload=payload,
                 parent_operation_id=parent_operation_id,
                 operation_group_id=operation_group_id,
+                scheduling_hint=scheduling_hint,
             )
         except asyncio.CancelledError:
             self.cancel(frame_id=frame_id)
@@ -1073,6 +1128,7 @@ class NativeRuntimeSession:
         payload: bytes | bytearray | memoryview = b"",
         parent_operation_id: int | None = None,
         operation_group_id: int | None = None,
+        scheduling_hint: NativeOperationSchedulingHint | None = None,
         state: NativeOperationLifecycle | str | None = None,
         max_events: int | None = None,
     ) -> NativeRuntimeResult:
@@ -1082,6 +1138,7 @@ class NativeRuntimeSession:
             payload=payload,
             parent_operation_id=parent_operation_id,
             operation_group_id=operation_group_id,
+            scheduling_hint=scheduling_hint,
         )
         return self.poll_result(operation, state=state, max_events=max_events)
 
@@ -1093,6 +1150,7 @@ class NativeRuntimeSession:
         payload: bytes | bytearray | memoryview = b"",
         parent_operation_id: int | None = None,
         operation_group_id: int | None = None,
+        scheduling_hint: NativeOperationSchedulingHint | None = None,
         state: NativeOperationLifecycle | str | None = None,
         max_events: int | None = None,
     ) -> NativeRuntimeResult:
@@ -1103,6 +1161,7 @@ class NativeRuntimeSession:
             payload=payload,
             parent_operation_id=parent_operation_id,
             operation_group_id=operation_group_id,
+            scheduling_hint=scheduling_hint,
             state=state,
             max_events=max_events,
         )
@@ -1399,6 +1458,24 @@ def _copy_buffer_view(view: _NnrpBufferView) -> bytes:
     return ctypes.string_at(view.ptr, length)
 
 
+def _coerce_operation_scheduling_hint(
+    scheduling_hint: NativeOperationSchedulingHint | None,
+    *,
+    parent_operation_id: int | None,
+    operation_group_id: int | None,
+) -> NativeOperationSchedulingHint:
+    if scheduling_hint is None:
+        return NativeOperationSchedulingHint(
+            parent_operation_id=parent_operation_id,
+            operation_group_id=operation_group_id,
+        )
+    if parent_operation_id is not None and scheduling_hint.parent_operation_id != parent_operation_id:
+        raise NativeHandleError("parent_operation_id conflicts with scheduling_hint")
+    if operation_group_id is not None and scheduling_hint.operation_group_id != operation_group_id:
+        raise NativeHandleError("operation_group_id conflicts with scheduling_hint")
+    return scheduling_hint
+
+
 def _infer_lifecycle_from_event(event: NativeRuntimeEvent) -> NativeOperationLifecycle:
     if not event.diagnostic.status.succeeded or event.kind == EVENT_KIND_ERROR:
         return NativeOperationLifecycle.FAILED
@@ -1461,4 +1538,14 @@ _EVENT_KIND_NAMES = {
     EVENT_KIND_FLOW_UPDATED: "flow_updated",
     EVENT_KIND_CONTROL: "control",
     EVENT_KIND_ERROR: "error",
+}
+
+_SESSION_PRIORITY_CLASS_CODES = {
+    NativeSessionPriorityClass.INTERACTIVE: 0,
+    NativeSessionPriorityClass.BALANCED: 1,
+    NativeSessionPriorityClass.BACKGROUND: 2,
+}
+
+_SESSION_PRIORITY_CLASS_BY_CODE = {
+    code: priority_class for priority_class, code in _SESSION_PRIORITY_CLASS_CODES.items()
 }

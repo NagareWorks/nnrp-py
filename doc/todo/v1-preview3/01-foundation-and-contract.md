@@ -47,7 +47,7 @@
   - [x] Preserve operation lifecycle states on Python result wrappers.
   - [x] Add operation cancellation helpers on native sessions and operations.
   - [ ] Add priority and scheduling hint wrappers.
-  - [ ] Add `FLOW_UPDATE`/credit wrappers over Rust control/event delivery.
+  - [x] Add `FLOW_UPDATE`/credit wrappers over Rust control/event delivery.
 - [ ] Implement cache lease, schema registry, and typed payload descriptor wrappers against the frozen 32B / 24B layouts and standard error behavior.
   - [ ] Add cache lease descriptor wrappers.
   - [ ] Add schema/profile descriptor wrappers.

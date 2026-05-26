@@ -10,6 +10,8 @@ import pytest
 from nnrp.native import (
     DEFAULT_ARTIFACT_ROOT_ENV,
     ERROR_FAMILY_CACHE,
+    EVENT_KIND_CONTROL,
+    EVENT_KIND_FLOW_UPDATED,
     FFI_STATUS_CALLBACK_REJECTED,
     FFI_STATUS_INTERNAL_ERROR,
     FFI_STATUS_INVALID_ARGUMENT,
@@ -30,6 +32,7 @@ from nnrp.native import (
     NativeBufferView,
     NativeCallbackRejectedError,
     NativeConnectionHandle,
+    NativeCreditUpdateEvent,
     NativeEventPumpHandle,
     NativeHandle,
     NativeHandleError,
@@ -150,9 +153,16 @@ class FakeEntrypointLibrary:
 
 
 class FakeRuntimeLibrary(FakeEntrypointLibrary):
-    def __init__(self, *, status: _NnrpFfiStatus | None = None, event_payload: bytes = b"") -> None:
+    def __init__(
+        self,
+        *,
+        status: _NnrpFfiStatus | None = None,
+        event_payload: bytes = b"",
+        event_kind: int = 6,
+    ) -> None:
         super().__init__()
         self.status = status or NativeStatus.ok().to_ffi()
+        self.event_kind = event_kind
         self._event_payload_owner = (
             ctypes.create_string_buffer(event_payload, len(event_payload)) if event_payload else None
         )
@@ -208,7 +218,7 @@ class FakeRuntimeLibrary(FakeEntrypointLibrary):
         target.status = NativeStatus.ok().to_ffi()
         target.has_event = 1 if self._event_payload_owner is not None else 0
         if self._event_payload_owner is not None:
-            target.event.kind = 6
+            target.event.kind = self.event_kind
             target.event.connection = handle
             target.event.session = _NnrpHandle(HANDLE_KIND_SESSION, 41, 3, 0)
             target.event.operation = _NnrpHandle(HANDLE_KIND_OPERATION, 99, 1, 0)
@@ -683,6 +693,45 @@ def test_native_runtime_result_maps_error_and_drop_events() -> None:
     assert NativeRuntimeResult.from_event(drop_event).state is NativeOperationLifecycle.CANCELLED
 
 
+def test_native_runtime_event_classifies_control_and_credit_updates() -> None:
+    flow_event = NativeRuntimeEvent(
+        kind=EVENT_KIND_FLOW_UPDATED,
+        connection=NativeHandle(HANDLE_KIND_CONNECTION, 12, 2),
+        session=NativeHandle(HANDLE_KIND_SESSION, 41, 3),
+        operation=NativeHandle(HANDLE_KIND_OPERATION, 99, 1),
+        frame_id=7,
+        payload=b"opaque-native-credit-state",
+        diagnostic=NativeRuntimeDiagnostic(NativeStatus.ok(), 12, 41, 99, 7),
+    )
+    control_event = NativeRuntimeEvent(
+        kind=EVENT_KIND_CONTROL,
+        connection=NativeHandle(HANDLE_KIND_CONNECTION, 12, 2),
+        session=NativeHandle(HANDLE_KIND_SESSION, 41, 3),
+        operation=NativeHandle(HANDLE_KIND_OPERATION, 99, 1),
+        frame_id=8,
+        payload=b"opaque-control-state",
+        diagnostic=NativeRuntimeDiagnostic(NativeStatus.ok(), 12, 41, 99, 8),
+    )
+
+    update = flow_event.to_credit_update()
+
+    assert flow_event.kind_name == "flow_updated"
+    assert flow_event.is_flow_update is True
+    assert flow_event.is_control_event is True
+    assert flow_event.is_result_event is False
+    assert isinstance(update, NativeCreditUpdateEvent)
+    assert update.connection.id == 12
+    assert update.session.id == 41
+    assert update.operation.id == 99
+    assert update.frame_id == 7
+    assert update.diagnostic.related_session_id == 41
+    assert control_event.kind_name == "control"
+    assert control_event.is_control_event is True
+    assert control_event.is_flow_update is False
+    with pytest.raises(NativeHandleError, match="expected native flow update event"):
+        control_event.to_credit_update()
+
+
 def test_native_runtime_connection_polls_event_delivery_model(tmp_path: Path) -> None:
     artifact = tmp_path / "nnrp_ffi.dll"
     artifact.write_bytes(b"fake")
@@ -707,6 +756,32 @@ def test_native_runtime_connection_polls_event_delivery_model(tmp_path: Path) ->
 
     with pytest.raises(ValueError, match="max_events"):
         connection.poll_events(max_events=-1)
+
+
+def test_native_runtime_connection_filters_credit_update_events(tmp_path: Path) -> None:
+    artifact = tmp_path / "nnrp_ffi.dll"
+    artifact.write_bytes(b"fake")
+    library = FakeRuntimeLibrary(event_payload=b"credits", event_kind=EVENT_KIND_FLOW_UPDATED)
+    connection = load_native_client(artifact, library=library).connect(
+        connection_id=12,
+        generation=2,
+        transport_id=TRANSPORT_SLOT_TCP,
+    )
+
+    updates = connection.poll_credit_updates(max_events=1)
+    async_updates = asyncio.run(_collect_async_credit_updates(connection))
+    async_control_events = asyncio.run(_collect_async_events_by_kind(connection, EVENT_KIND_CONTROL))
+
+    assert len(updates) == 1
+    assert updates[0].connection.id == 12
+    assert updates[0].session.id == 41
+    assert updates[0].operation.id == 99
+    assert updates[0].frame_id == 7
+    assert updates[0].diagnostic.status.succeeded is True
+    assert len(async_updates) == 1
+    assert async_updates[0].session.id == 41
+    assert async_control_events == []
+    assert not hasattr(updates[0], "credits")
 
 
 def test_native_runtime_connection_rejects_use_after_close(tmp_path: Path) -> None:
@@ -886,6 +961,17 @@ def test_native_runtime_client_raises_mapped_status_errors(tmp_path: Path) -> No
 
 async def _collect_async_events(connection: NativeRuntimeConnection) -> list[NativeRuntimeEvent]:
     return [event async for event in connection.iter_events(max_events=1)]
+
+
+async def _collect_async_events_by_kind(
+    connection: NativeRuntimeConnection,
+    event_kind: int,
+) -> list[NativeRuntimeEvent]:
+    return [event async for event in connection.iter_events(max_events=1, event_kind=event_kind)]
+
+
+async def _collect_async_credit_updates(connection: NativeRuntimeConnection) -> list[NativeCreditUpdateEvent]:
+    return [event async for event in connection.iter_credit_updates(max_events=1)]
 
 
 async def _cancel_async_submit(session: NativeRuntimeSession) -> None:

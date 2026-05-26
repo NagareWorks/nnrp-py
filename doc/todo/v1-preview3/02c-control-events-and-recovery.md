@@ -2,9 +2,9 @@
 
 - [x] Add async-friendly wrappers for result/event pump delivery.
 - [ ] Add async-friendly wrappers for `FLOW_UPDATE` and `RESULT_HINT`.
-  - [ ] Add `FLOW_UPDATE` event wrapper over Rust poll results.
+  - [x] Add `FLOW_UPDATE` event wrapper over Rust poll results.
   - [ ] Add `RESULT_HINT` event wrapper over Rust poll results.
-  - [ ] Add async iterator helpers for control-event filtering.
+  - [x] Add async iterator helpers for control-event filtering.
   - [ ] Add cancellation behavior tests for control-event iterators.
 - [x] Keep Python event delivery aligned with Rust-native semantics rather than inventing a second Python session-pump contract.
 - [ ] Add resume/recovery helpers only after the recovery object boundary freezes upstream.

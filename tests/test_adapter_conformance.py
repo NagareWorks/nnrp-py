@@ -3,6 +3,8 @@ from pathlib import Path
 
 import pytest
 
+from nnrp.native import NativeArtifactError
+from nnrp.tools import adapter_conformance
 from nnrp.tools.adapter_conformance import build_adapter_case_results_report, main, write_adapter_case_results
 
 
@@ -63,6 +65,83 @@ def test_build_adapter_case_results_report_executes_supported_cases() -> None:
         "l1.cache.unimplemented",
     ]
     assert [result["outcome"] for result in report["results"]] == ["pass", "pass", "skip"]
+
+
+def test_build_adapter_case_results_report_marks_runtime_smoke_failures() -> None:
+    class RejectingBackend:
+        def connect(self, *, connection_id: int, generation: int, transport_id: int) -> object:
+            raise RuntimeError("boom")
+
+        def bootstrap_connection(self, *, connection_id: int, generation: int, transport_id: int) -> object:
+            raise RuntimeError("boom")
+
+    report = build_adapter_case_results_report(
+        {
+            "protocol_version": "nnrp-1",
+            "cases": [{"id": "l1.handshake.basic"}],
+        },
+        backend=RejectingBackend(),
+    )
+
+    assert report["results"][0]["outcome"] == "fail"
+    assert "boom" in report["results"][0]["message"]
+
+
+def test_build_adapter_case_results_report_executes_all_supported_smoke_paths() -> None:
+    report = build_adapter_case_results_report(
+        {
+            "protocol_version": "nnrp-1",
+            "cases": [
+                {"id": "l1.frame_submit.tensor.inline"},
+                {"id": "l1.frame_submit.tensor.inline.routing.validation"},
+                {"id": "l1.result_push.basic.terminal.validation"},
+            ],
+        }
+    )
+
+    assert [result["outcome"] for result in report["results"]] == ["pass", "pass", "pass"]
+
+
+def test_adapter_backend_loader_can_require_native(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def reject_native_backend(*args: object, **kwargs: object) -> object:
+        raise NativeArtifactError("missing native")
+
+    monkeypatch.setattr(adapter_conformance, "select_native_runtime_backend", reject_native_backend)
+    monkeypatch.setenv("NNRP_ADAPTER_REQUIRE_NATIVE", "true")
+
+    with pytest.raises(NativeArtifactError, match="missing native"):
+        adapter_conformance._load_adapter_backend()
+
+
+def test_adapter_smoke_backend_bootstrap_and_closed_session_guards() -> None:
+    backend = adapter_conformance._AdapterSmokeBackend()
+    connection = backend.bootstrap_connection(connection_id=7, generation=2, transport_id=1)
+    session = connection.open_session(
+        requested_session_id=8,
+        generation=3,
+        profile_id=4,
+        schema_id=5,
+        schema_version=6,
+    )
+    operation = session.submit_operation(
+        operation_id=9,
+        frame_id=10,
+        payload=memoryview(b"payload"),
+        parent_operation_id=1,
+        operation_group_id=2,
+    )
+    result = session.poll_result(operation, max_events=1)
+    session.control(control_code=11, payload=bytearray(b"control"))
+    session.cancel(frame_id=10)
+    session.close()
+
+    assert result.payload == b"payload"
+    assert session.controls == [(11, b"control")]
+    assert session.cancelled_frames == [10]
+    with pytest.raises(RuntimeError, match="closed"):
+        session.cancel(frame_id=10)
 
 
 def test_main_reads_paths_from_environment_and_writes_report(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

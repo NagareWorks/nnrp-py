@@ -11,8 +11,9 @@
 - [x] Add Python integration tests that exercise multiple native preview3 sessions on one live connection facade.
 - [ ] Add Python integration tests that exercise routed multi-session preview3 result delivery on one live connection.
 - [ ] Add Python integration tests for cache lease expiry, schema mismatch, operation cancellation, priority-aware flow updates, and resume paths.
-- [ ] Keep the active Python preview regression suite green while preview3 Rust-backed helpers replace the prior preview surface.
+- [x] Keep the active Python preview regression suite green while preview3 Rust-backed helpers replace the prior preview surface.
 - [ ] Add performance smoke checks that verify Python preview3 hot paths do not regress into full payload copies by default.
+- [x] Add release packaging validation for installing `nnrp-rs` native artifacts into the Python wheel source tree.
 
 ## Documentation And Rollout
 

@@ -6,6 +6,7 @@
   - [ ] Replace SDK runtime calls with the bound native entrypoints.
 - [x] Pin the exact `nnrp-rs` commit, tag, or artifact version used by the Python package.
 - [x] Define the packaged native artifact layout for Windows, macOS, Linux, Android, and iOS.
+- [x] Add release packaging glue that normalizes `nnrp-rs` native artifact zips into the Python package layout before wheel build.
 - [x] Add a platform and architecture resolver for x86, x86_64, arm, and arm64 variants.
 - [x] Load the native artifact through one internal backend module before exposing any host-facing API.
 - [x] Probe ABI version, protocol version, enabled transport slots, and feature flags before accepting the native artifact.

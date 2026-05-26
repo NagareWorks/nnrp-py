@@ -1,0 +1,146 @@
+from __future__ import annotations
+
+import json
+import sys
+import zipfile
+from importlib.util import module_from_spec, spec_from_file_location
+from pathlib import Path
+
+import pytest
+
+_SCRIPT_PATH = Path(__file__).resolve().parents[1] / "scripts" / "prepare_native_artifacts.py"
+_SPEC = spec_from_file_location("prepare_native_artifacts", _SCRIPT_PATH)
+assert _SPEC is not None and _SPEC.loader is not None
+_MODULE = module_from_spec(_SPEC)
+sys.modules[_SPEC.name] = _MODULE
+_SPEC.loader.exec_module(_MODULE)
+prepare_native_artifacts = _MODULE.prepare_native_artifacts
+prepare_native_artifacts_main = _MODULE.main
+
+
+def _write_package(root: Path, name: str, *, os_name: str, arch: str, library: str) -> Path:
+    package_dir = root / name
+    package_dir.mkdir(parents=True)
+    (package_dir / library).write_bytes(b"native")
+    (package_dir / "manifest.json").write_text(
+        json.dumps(
+            {
+                "package": "nnrp-ffi",
+                "os": os_name,
+                "arch": arch,
+                "library_kind": "dynamic",
+                "library": library,
+                "libraries": [library],
+            }
+        ),
+        encoding="utf-8",
+    )
+    return package_dir
+
+
+def test_prepare_native_artifacts_installs_directory_packages(tmp_path: Path) -> None:
+    package_dir = _write_package(tmp_path, "linux-aarch64", os_name="linux", arch="aarch64", library="libnnrp_ffi.so")
+    output = tmp_path / "out"
+
+    installed = prepare_native_artifacts([package_dir], output)
+
+    assert output.joinpath("linux-arm64", "libnnrp_ffi.so").read_bytes() == b"native"
+    assert output.joinpath("linux-arm64", "manifest.json").is_file()
+    assert installed == [
+        output / "linux-arm64" / "libnnrp_ffi.so",
+        output / "linux-arm64" / "manifest.json",
+    ]
+
+
+def test_prepare_native_artifacts_installs_release_zip_packages(tmp_path: Path) -> None:
+    package_dir = _write_package(
+        tmp_path / "packages",
+        "windows-x86_64",
+        os_name="windows",
+        arch="x86_64",
+        library="nnrp_ffi.dll",
+    )
+    archive_path = tmp_path / "nnrp-ffi-native-windows-x86_64.zip"
+    with zipfile.ZipFile(archive_path, "w") as archive:
+        for item in package_dir.rglob("*"):
+            archive.write(item, item.relative_to(package_dir.parent).as_posix())
+
+    output = tmp_path / "out"
+    prepare_native_artifacts([archive_path], output)
+
+    assert output.joinpath("windows-x86_64", "nnrp_ffi.dll").read_bytes() == b"native"
+
+
+def test_prepare_native_artifacts_rejects_missing_manifest_library(tmp_path: Path) -> None:
+    package_dir = tmp_path / "bad"
+    package_dir.mkdir()
+    (package_dir / "manifest.json").write_text(
+        json.dumps({"os": "linux", "arch": "x86_64", "library": "libnnrp_ffi.so"}),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="missing library"):
+        prepare_native_artifacts([package_dir], tmp_path / "out")
+
+
+def test_prepare_native_artifacts_clean_removes_previous_output(tmp_path: Path) -> None:
+    package_dir = _write_package(tmp_path, "macos-x86_64", os_name="macos", arch="x86_64", library="libnnrp_ffi.dylib")
+    output = tmp_path / "out"
+    stale = output / "stale.txt"
+    stale.parent.mkdir()
+    stale.write_text("stale", encoding="utf-8")
+
+    prepare_native_artifacts([package_dir], output, clean=True)
+
+    assert not stale.exists()
+    assert output.joinpath("macos-x86_64", "libnnrp_ffi.dylib").is_file()
+
+
+def test_prepare_native_artifacts_rejects_invalid_inputs(tmp_path: Path) -> None:
+    unsupported_file = tmp_path / "artifact.txt"
+    unsupported_file.write_text("bad", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="directory or zip"):
+        prepare_native_artifacts([unsupported_file], tmp_path / "out")
+
+    with pytest.raises(ValueError, match="does not exist"):
+        prepare_native_artifacts([tmp_path / "missing"], tmp_path / "out")
+
+
+def test_prepare_native_artifacts_rejects_invalid_manifest_shapes(tmp_path: Path) -> None:
+    package_dir = tmp_path / "bad-shape"
+    package_dir.mkdir()
+    (package_dir / "manifest.json").write_text("[]", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="JSON object"):
+        prepare_native_artifacts([package_dir], tmp_path / "out")
+
+    (package_dir / "manifest.json").write_text(
+        json.dumps({"os": "linux", "library": "libnnrp_ffi.so"}),
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="'arch'"):
+        prepare_native_artifacts([package_dir], tmp_path / "out")
+
+    (package_dir / "manifest.json").write_text(
+        json.dumps({"os": "linux", "arch": "x86_64", "library": "not-nnrp.so"}),
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="supported nnrp-ffi"):
+        prepare_native_artifacts([package_dir], tmp_path / "out")
+
+
+def test_prepare_native_artifacts_cli_prints_installed_paths(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    package_dir = _write_package(tmp_path, "android-armv7", os_name="android", arch="armv7", library="libnnrp_ffi.so")
+    output = tmp_path / "out"
+    monkeypatch.setattr(sys, "argv", ["prepare_native_artifacts.py", str(package_dir), "--output", str(output)])
+
+    assert prepare_native_artifacts_main() == 0
+
+    captured = capsys.readouterr()
+    assert "android-arm" in captured.out
+    assert output.joinpath("android-arm", "libnnrp_ffi.so").is_file()

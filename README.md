@@ -117,7 +117,7 @@ assert descriptor.stream_semantics is StreamSemantics.APPEND
 
 `StandardProfile.UNSPECIFIED` stays distinct from `StandardProfile.TENSOR`; structured-event and tool-delta remain payload families interpreted through schema/profile bindings rather than standalone standard profiles.
 
-`CacheObjectIdentity`, `CacheLeaseDescriptor`, and `SchemaRegistryCatalog` are host-side value wrappers for native/runtime results and diagnostics. They do not accept local lease policy callbacks or profile body decoders; those decisions remain owned by Rust and the conformance baseline.
+`CacheObjectIdentity`, `CacheLeaseDescriptor`, and `SchemaRegistryCatalog` are host-side value wrappers for native/runtime results and diagnostics. Cache query/touch/prefetch/release helpers delegate to a backend object and do not accept local lease policy callbacks or profile body decoders; those decisions remain owned by Rust and the conformance baseline.
 
 The wire surface is centered on two modules:
 

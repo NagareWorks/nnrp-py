@@ -8,13 +8,13 @@
   - [x] Add cache object version wrapper.
   - [x] Add cache expiry/renewal result wrapper.
   - [x] Add dependency invalidation result wrapper.
-- [ ] Add Python cache query, touch, prefetch, and release helpers without re-implementing cache semantics locally.
-  - [ ] Add cache query helper that delegates to Rust.
-  - [ ] Add cache touch helper that delegates to Rust.
-  - [ ] Add cache prefetch helper that delegates to Rust.
-  - [ ] Add cache release helper that delegates to Rust.
-  - [ ] Add tests proving cache miss/lease-expiry diagnostics pass through Rust errors.
-- [ ] Preserve Rust ownership of lease policy, object dependency validation, and invalidation rules.
+- [x] Add Python cache query, touch, prefetch, and release helpers without re-implementing cache semantics locally.
+  - [x] Add cache query helper that delegates to Rust.
+  - [x] Add cache touch helper that delegates to Rust.
+  - [x] Add cache prefetch helper that delegates to Rust.
+  - [x] Add cache release helper that delegates to Rust.
+  - [x] Add tests proving cache miss/lease-expiry diagnostics pass through Rust errors.
+- [x] Preserve Rust ownership of lease policy, object dependency validation, and invalidation rules.
   - [x] Keep Python cache helpers from accepting local policy callbacks.
   - [x] Add tests that Python wrappers do not mutate dependency graphs locally.
 

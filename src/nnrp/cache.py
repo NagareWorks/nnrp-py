@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import StrEnum
+from typing import Protocol
 
 from nnrp.core import CacheObjectKind
 
@@ -136,6 +137,46 @@ class CacheDependencyInvalidation:
         return len(self.affected)
 
 
+class CacheRuntimeBackend(Protocol):
+    def query_cache(self, identity: CacheObjectIdentity) -> CacheLeaseResult:
+        """Return the native/runtime cache state for one object."""
+
+    def touch_cache(self, identity: CacheObjectIdentity, *, ttl_ms: int | None = None) -> CacheLeaseResult:
+        """Renew or validate a cache lease through the native/runtime backend."""
+
+    def prefetch_cache(self, identities: tuple[CacheObjectIdentity, ...]) -> tuple[CacheLeaseResult, ...]:
+        """Ask the native/runtime backend to prefetch cache objects."""
+
+    def release_cache(self, identity: CacheObjectIdentity) -> CacheLeaseResult:
+        """Release a cache lease through the native/runtime backend."""
+
+
+def cache_query(backend: CacheRuntimeBackend, identity: CacheObjectIdentity) -> CacheLeaseResult:
+    return backend.query_cache(identity)
+
+
+def cache_touch(
+    backend: CacheRuntimeBackend,
+    identity: CacheObjectIdentity,
+    *,
+    ttl_ms: int | None = None,
+) -> CacheLeaseResult:
+    if ttl_ms is not None:
+        _validate_u32("ttl_ms", ttl_ms)
+    return backend.touch_cache(identity, ttl_ms=ttl_ms)
+
+
+def cache_prefetch(
+    backend: CacheRuntimeBackend,
+    identities: tuple[CacheObjectIdentity, ...] | list[CacheObjectIdentity],
+) -> tuple[CacheLeaseResult, ...]:
+    return backend.prefetch_cache(tuple(identities))
+
+
+def cache_release(backend: CacheRuntimeBackend, identity: CacheObjectIdentity) -> CacheLeaseResult:
+    return backend.release_cache(identity)
+
+
 def _validate_u16(name: str, value: int) -> None:
     if not isinstance(value, int) or value < 0 or value > 0xFFFF:
         raise ValueError(f"{name} must be a uint16 value")
@@ -159,4 +200,9 @@ __all__ = [
     "CacheLeaseResult",
     "CacheObjectIdentity",
     "CacheObjectVersion",
+    "CacheRuntimeBackend",
+    "cache_prefetch",
+    "cache_query",
+    "cache_release",
+    "cache_touch",
 ]

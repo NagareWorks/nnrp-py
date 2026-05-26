@@ -43,6 +43,7 @@ It does not contain neural rendering runtime business logic.
 - `src/nnrp/core/`: shared protocol primitives and wire helpers.
 - `src/nnrp/native.py`: FFI loader, ABI/protocol probes, native handle wrappers, and runtime facade.
 - `src/nnrp/native_artifacts/`: packaged `nnrp-rs` native libraries, arranged by platform tag.
+- `src/nnrp/schema.py`: Preview3 schema/profile descriptor views and first-round standard registry constants.
 - `src/nnrp/client/`: client-facing native connection/session helpers plus transport smoke helpers.
 - `src/nnrp/server/`: server-facing helpers and types.
 - `src/nnrp/adapters/`: transport or host integration adapters.
@@ -100,6 +101,20 @@ Polled native events and results expose Python-owned `bytes` payload snapshots. 
 ## Public Wire API
 
 The public wire surface remains available for protocol fixtures, diagnostics, and tooling. It should not be treated as the primary host runtime path when native artifacts are available.
+
+### Schema And Profile Constants
+
+Preview3 schema/profile helpers expose stable descriptor views without decoding profile-private payload bodies:
+
+```python
+from nnrp import StandardProfile, StreamSemantics, token_delta_payload_descriptor
+
+descriptor = token_delta_payload_descriptor(offset=0, length=128)
+assert descriptor.profile_id is StandardProfile.TOKEN
+assert descriptor.stream_semantics is StreamSemantics.APPEND
+```
+
+`StandardProfile.UNSPECIFIED` stays distinct from `StandardProfile.TENSOR`; structured-event and tool-delta remain payload families interpreted through schema/profile bindings rather than standalone standard profiles.
 
 The wire surface is centered on two modules:
 

@@ -37,7 +37,7 @@
   - [x] Add native submit/result/cancel/control examples.
   - [x] Add fallback/require-native behavior section.
 - [ ] Keep `doc/benchmarks/rs-native-artifacts-migration.md` updated with the native artifact plan, supported platform matrix, and pre/post migration benchmark results.
-  - [ ] Update pinned `nnrp-rs` tag/commit before release.
+  - [x] Update pinned `nnrp-rs` tag/commit before release.
   - [ ] Fill post-migration benchmark environment row.
   - [ ] Fill post-migration latency table.
   - [ ] Fill post-migration throughput table.

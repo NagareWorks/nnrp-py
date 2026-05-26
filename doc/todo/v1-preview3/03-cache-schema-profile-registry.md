@@ -26,31 +26,31 @@
   - [ ] Add schema/profile lookup helper.
   - [ ] Add schema/profile invalidation helper.
   - [ ] Add version mismatch diagnostic wrapper.
-- [ ] Model schema descriptor common headers and typed payload descriptor views against the frozen 32B / 24B layouts plus the first-round standard registry assignments from `nnrp-doc`.
-  - [ ] Add schema descriptor common-header view.
-  - [ ] Add typed payload descriptor view.
-  - [ ] Add registry assignment constants from `nnrp-doc`.
-  - [ ] Add tests for descriptor size/alignment pass-through.
+- [x] Model schema descriptor common headers and typed payload descriptor views against the frozen 32B / 24B layouts plus the first-round standard registry assignments from `nnrp-doc`.
+  - [x] Add schema descriptor common-header view.
+  - [x] Add typed payload descriptor view.
+  - [x] Add registry assignment constants from `nnrp-doc`.
+  - [x] Add tests for descriptor size/alignment pass-through.
 - [ ] Keep schema/profile interpretation Rust-owned; Python should expose stable descriptors and host-friendly wrappers only.
-  - [ ] Avoid body-specific schema decoding in Python helpers.
+  - [x] Avoid body-specific schema decoding in Python helpers.
   - [ ] Add tests for unknown schema/profile pass-through.
 
 ## Standard Profiles And Payload Families
 
-- [ ] Treat `tensor` and `token` as peer first-round standard profiles on the public Python surface.
-  - [ ] Add tensor profile descriptor wrapper.
-  - [ ] Add token profile descriptor wrapper.
-  - [ ] Add tests that token profile does not depend on tensor defaults.
+- [x] Treat `tensor` and `token` as peer first-round standard profiles on the public Python surface.
+  - [x] Add tensor profile descriptor wrapper.
+  - [x] Add token profile descriptor wrapper.
+  - [x] Add tests that token profile does not depend on tensor defaults.
 - [ ] Treat `profile_id = 0` as `unspecified` on the Python public surface rather than an implicit tensor default.
-  - [ ] Add unspecified profile constant/wrapper.
+  - [x] Add unspecified profile constant/wrapper.
   - [ ] Audit public APIs for implicit tensor default behavior.
-  - [ ] Add tests for profile id 0 pass-through.
-- [ ] Add token-profile wrappers against the frozen token minimum semantics and first-round registry assignments from `nnrp-doc`.
-  - [ ] Add token stream profile wrapper.
-  - [ ] Add token delta/result wrapper.
-  - [ ] Add tests for minimum token profile fields.
+  - [x] Add tests for profile id 0 pass-through.
+- [x] Add token-profile wrappers against the frozen token minimum semantics and first-round registry assignments from `nnrp-doc`.
+  - [x] Add token stream profile wrapper.
+  - [x] Add token delta/result wrapper.
+  - [x] Add tests for minimum token profile fields.
 - [ ] Surface `structured_event` and `tool_delta` as protocol-visible payload families without hard-coding their bodies into Python fixed metadata models.
-  - [ ] Add structured-event payload family wrapper.
-  - [ ] Add tool-delta payload family wrapper.
+  - [x] Add structured-event payload family wrapper.
+  - [x] Add tool-delta payload family wrapper.
   - [ ] Add async delivery tests for structured-event payloads.
   - [ ] Add async delivery tests for tool-delta payloads.

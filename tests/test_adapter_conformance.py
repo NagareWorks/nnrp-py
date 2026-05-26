@@ -3,7 +3,7 @@ from pathlib import Path
 
 import pytest
 
-from nnrp.native import NativeArtifactError
+from nnrp.native import FFI_STATUS_INVALID_ARGUMENT, NativeArtifactError, NativeInvalidArgumentError, NativeStatus
 from nnrp.tools import adapter_conformance
 from nnrp.tools.adapter_conformance import build_adapter_case_results_report, main, write_adapter_case_results
 
@@ -102,6 +102,162 @@ def test_build_adapter_case_results_report_executes_all_supported_smoke_paths() 
     assert [result["outcome"] for result in report["results"]] == ["pass", "pass", "pass"]
 
 
+def test_build_adapter_case_results_report_uses_case_parameters_and_writes_evidence(tmp_path: Path) -> None:
+    evidence_dir = tmp_path / "evidence"
+
+    report = build_adapter_case_results_report(
+        {
+            "protocol_version": "nnrp-1",
+            "artifacts": {"evidence_dir": str(evidence_dir)},
+            "cases": [
+                {
+                    "id": "l1.result_push.basic.terminal.validation",
+                    "parameters": {
+                        "connection_id": 7,
+                        "session_id": 8,
+                        "operation_id": 9,
+                        "frame_id": 10,
+                        "payload": [1, 2, 3],
+                        "max_events": 2,
+                    },
+                },
+            ],
+        }
+    )
+
+    assert report["results"][0]["outcome"] == "pass"
+    evidence = json.loads((evidence_dir / "l1-result_push-basic-terminal-validation.json").read_text())
+    assert evidence["case_id"] == "l1.result_push.basic.terminal.validation"
+    assert evidence["session_id"] == 8
+    assert evidence["operation_id"] == 9
+    assert evidence["frame_id"] == 10
+    assert evidence["result_payload_bytes"] == 3
+
+
+def test_adapter_case_parameter_validation_failures_are_reported() -> None:
+    report = build_adapter_case_results_report(
+        {
+            "protocol_version": "nnrp-1",
+            "cases": [
+                {
+                    "id": "l1.handshake.basic",
+                    "parameters": {"connection_id": "bad"},
+                },
+                {
+                    "id": "l1.result_push.basic.terminal.validation",
+                    "parameters": {"expected_result_state": ""},
+                },
+                {
+                    "id": "l1.frame_submit.tensor.inline",
+                    "parameters": {"payload": [256]},
+                },
+            ],
+        }
+    )
+
+    assert [result["outcome"] for result in report["results"]] == ["fail", "fail", "fail"]
+    assert [result["diagnostic"]["error_type"] for result in report["results"]] == [
+        "ValueError",
+        "ValueError",
+        "ValueError",
+    ]
+
+
+def test_adapter_case_rejects_invalid_parameter_container() -> None:
+    report = build_adapter_case_results_report(
+        {
+            "protocol_version": "nnrp-1",
+            "cases": [
+                {
+                    "id": "l1.handshake.basic",
+                    "parameters": [],
+                },
+            ],
+        }
+    )
+
+    assert report["results"][0]["outcome"] == "fail"
+    assert "parameters" in report["results"][0]["message"]
+
+
+def test_adapter_result_state_validation_failure_is_reported() -> None:
+    class StatefulResult(adapter_conformance._AdapterSmokeResult):
+        state = "completed"
+
+    class StatefulSession(adapter_conformance._AdapterSmokeSession):
+        def poll_result(
+            self,
+            operation: adapter_conformance._AdapterSmokeOperation,
+            *,
+            max_events: int | None = None,
+        ) -> StatefulResult:
+            return StatefulResult(operation.operation_id, operation.frame_id, operation.payload)
+
+    class StatefulConnection(adapter_conformance._AdapterSmokeConnection):
+        def open_session(
+            self,
+            *,
+            requested_session_id: int,
+            generation: int,
+            profile_id: int,
+            schema_id: int,
+            schema_version: int,
+        ) -> StatefulSession:
+            return StatefulSession(
+                connection=self,
+                session_id=requested_session_id,
+                generation=generation,
+                profile_id=profile_id,
+                schema_id=schema_id,
+                schema_version=schema_version,
+            )
+
+    class StatefulBackend(adapter_conformance._AdapterSmokeBackend):
+        def connect(self, *, connection_id: int, generation: int, transport_id: int) -> StatefulConnection:
+            return StatefulConnection(connection_id, generation, transport_id)
+
+    report = build_adapter_case_results_report(
+        {
+            "protocol_version": "nnrp-1",
+            "cases": [
+                {
+                    "id": "l1.result_push.basic.terminal.validation",
+                    "parameters": {"expected_result_state": "failed"},
+                }
+            ],
+        },
+        backend=StatefulBackend(),
+    )
+
+    assert report["results"][0]["outcome"] == "fail"
+    assert "expected result state" in report["results"][0]["message"]
+
+
+def test_adapter_runtime_helpers_read_native_handle_shapes() -> None:
+    class Handle:
+        def __init__(self) -> None:
+            self.id = 123
+
+    class Wrapper:
+        def __init__(self) -> None:
+            self.handle = Handle()
+            self._closed = True
+
+    assert adapter_conformance._runtime_id(Wrapper()) == 123
+    assert adapter_conformance._runtime_id(object()) == 0
+    assert adapter_conformance._runtime_closed(Wrapper()) is True
+    assert adapter_conformance._runtime_closed(object()) is False
+
+
+def test_adapter_evidence_dir_resolution_ignores_invalid_shapes(tmp_path: Path) -> None:
+    assert adapter_conformance._resolve_evidence_dir({}) is None
+    assert adapter_conformance._resolve_evidence_dir({"artifacts": {"evidence_dir": ""}}) is None
+    assert adapter_conformance._resolve_evidence_dir(
+        {"artifacts": {"evidence_dir": "evidence"}},
+        base_dir=tmp_path,
+    ) == tmp_path / "evidence"
+
+
 def test_adapter_backend_loader_can_require_native(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -113,6 +269,41 @@ def test_adapter_backend_loader_can_require_native(
 
     with pytest.raises(NativeArtifactError, match="missing native"):
         adapter_conformance._load_adapter_backend()
+
+
+def test_adapter_case_failure_preserves_native_diagnostics() -> None:
+    class RejectingOperationBackend:
+        def connect(self, *, connection_id: int, generation: int, transport_id: int) -> object:
+            return adapter_conformance._AdapterSmokeConnection(connection_id, generation, transport_id)
+
+        def bootstrap_connection(self, *, connection_id: int, generation: int, transport_id: int) -> object:
+            return self.connect(connection_id=connection_id, generation=generation, transport_id=transport_id)
+
+    class RejectingExecution(adapter_conformance._AdapterCaseExecution):
+        def _submit_operation(self, session: object) -> object:
+            raise NativeInvalidArgumentError(NativeStatus(FFI_STATUS_INVALID_ARGUMENT, 12, 34, 56))
+
+    original_execution = adapter_conformance._AdapterCaseExecution
+    adapter_conformance._AdapterCaseExecution = RejectingExecution
+    try:
+        report = build_adapter_case_results_report(
+            {
+                "protocol_version": "nnrp-1",
+                "cases": [{"id": "l1.frame_submit.tensor.inline"}],
+            },
+            backend=RejectingOperationBackend(),
+        )
+    finally:
+        adapter_conformance._AdapterCaseExecution = original_execution
+
+    result = report["results"][0]
+    assert result["outcome"] == "fail"
+    assert result["diagnostic"] == {
+        "status_code": FFI_STATUS_INVALID_ARGUMENT,
+        "error_family": 12,
+        "protocol_error_code": 34,
+        "detail_code": 56,
+    }
 
 
 def test_adapter_smoke_backend_bootstrap_and_closed_session_guards() -> None:
@@ -156,6 +347,7 @@ def test_main_reads_paths_from_environment_and_writes_report(tmp_path: Path, mon
     assert report["protocol_version"] == "nnrp-1"
     assert len(report["results"]) == 2
     assert report["results"][0]["outcome"] == "pass"
+    assert (tmp_path / "artifacts" / "evidence" / "l1-handshake-basic.json").is_file()
 
 
 def test_main_accepts_explicit_cli_paths_and_creates_parent_directory(tmp_path: Path) -> None:

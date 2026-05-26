@@ -26,9 +26,9 @@ The existing Python SDK owns helper-level packet construction, transport-oriente
 
 ## Pinned Native Contract
 
-The current preview3 binding work consumes `nnrp-rs` commit `b38858dad4abd1b3c764f4c1afff918f38cebf6b`.
+The current preview3 binding work consumes `nnrp-rs` native artifact version `1.0.0-preview.3.1`.
 
-This commit is not treated as a crates.io release boundary for Python. It is the native artifact contract pin for the current migration branch and includes:
+This version is the native artifact contract pin for the current migration branch and includes:
 
 1. The `nnrp_runtime_capabilities` export.
 2. ABI version `1.0.0`.
@@ -36,17 +36,17 @@ This commit is not treated as a crates.io release boundary for Python. It is the
 4. Runtime feature flags for protocol core, client/server APIs, event polling, callback dispatch, cache/schema, recovery, typed payloads, and transport slots.
 5. Transport slot bits for TCP and optional QUIC.
 
-If a later `nnrp-rs` commit changes exported symbol names, ABI struct layout, required feature flags, or transport-slot meanings, update this pin and rerun the pre/post migration benchmark table before accepting the new artifact.
+If a later `nnrp-rs` release changes exported symbol names, ABI struct layout, required feature flags, or transport-slot meanings, update this pin and rerun the pre/post migration benchmark table before accepting the new artifact.
 
 ## Target Platform Matrix
 
 | OS | Architectures | Packaging target | Required before GA |
 | --- | --- | --- | --- |
-| Windows | x86, x86_64, arm64 | Wheel native data or per-platform wheels | Yes |
-| macOS | x86_64, arm64 | Universal or per-arch wheel artifacts | Yes |
-| Linux | x86, x86_64, arm, arm64 | manylinux or equivalent wheel artifacts | Yes |
-| Android | x86, x86_64, armv7, arm64 | Embedded host package or downstream app bundle | Preview gate |
-| iOS | x86_64 simulator, arm64 simulator/device | Embedded host package or downstream app bundle | Preview gate |
+| Windows | x86, x86_64, arm64 | Dynamic `nnrp_ffi.dll` from `nnrp-rs` release assets | Yes |
+| macOS | x86_64, arm64 | Dynamic `libnnrp_ffi.dylib` from `nnrp-rs` release assets | Yes |
+| Linux | x86, x86_64, armv7, arm64 | Dynamic `libnnrp_ffi.so` from `nnrp-rs` release assets | Yes |
+| Android | x86, x86_64, armv7, arm64 | Dynamic `libnnrp_ffi.so` for downstream app bundle use | Preview gate |
+| iOS | x86_64 simulator, arm64 simulator/device | Static `libnnrp_ffi.a` for downstream app/toolchain linking | Preview gate |
 
 ## Benchmark Protocol
 
@@ -65,7 +65,7 @@ Rules:
 | Run | Date | SDK commit | nnrp-rs artifact | Python | OS/arch | CPU | Notes |
 | --- | --- | --- | --- | --- | --- | --- | --- |
 | Pre-migration baseline | 2026-05-25 | b83dadb | N/A | 3.13.5 | windows/amd64 | Intel(R) Core(TM)2 Duo CPU T7700 @ 2.40GHz | Conformance benchmark runner selected and measured 9 scenarios. |
-| Post-migration native | TBD | TBD | b38858dad4abd1b3c764f4c1afff918f38cebf6b | TBD | TBD | TBD | TBD |
+| Post-migration native | TBD | TBD | 1.0.0-preview.3.1 | TBD | TBD | TBD | TBD |
 
 ### Latency Benchmarks
 

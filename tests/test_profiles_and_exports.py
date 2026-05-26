@@ -1,3 +1,11 @@
+from nnrp import (
+    Preview3TypedPayloadDescriptor,
+    SchemaDescriptorHeader,
+    StandardProfile,
+    StreamSemantics,
+    token_delta_payload_descriptor,
+    token_delta_schema_descriptor,
+)
 from nnrp.client import (
     ClientControlBootstrapSession,
     ClientDialPolicy,
@@ -336,6 +344,12 @@ def test_current_typed_models_are_exported() -> None:
     assert MigrationTriggerMonitor.__name__ == "MigrationTriggerMonitor"
     assert Result.__name__ == "Result"
     assert ResultRouter.__name__ == "ResultRouter"
+    assert SchemaDescriptorHeader.__name__ == "SchemaDescriptorHeader"
+    assert Preview3TypedPayloadDescriptor.__name__ == "Preview3TypedPayloadDescriptor"
+    assert StandardProfile.TOKEN == 2
+    assert StreamSemantics.APPEND == 2
+    assert token_delta_schema_descriptor().profile_id is StandardProfile.TOKEN
+    assert token_delta_payload_descriptor(offset=0, length=1).profile_id is StandardProfile.TOKEN
 
 
 def test_current_result_helpers_expose_payload_kinds_without_tensor_coverage() -> None:

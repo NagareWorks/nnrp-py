@@ -6,12 +6,12 @@
 - [x] Freeze that `nnrp-conformance` owns only the execution-plan/result JSON and selected-case semantics; `nnrp-py` owns the module path, interpreter selection, extra flags, and runtime bootstrap around the adapter wrapper.
 - [x] Add the initial `nnrp.tools.adapter_conformance` wrapper so it can read the suite-owned execution plan and emit a schema-valid case-result report.
 - [x] Implement SDK-local adapter smoke execution inside `nnrp.tools.adapter_conformance` so selected core cases stop returning placeholder results.
-- [ ] Extend adapter execution from SDK-local smoke coverage to full suite-selected case behavior.
-  - [ ] Add case dispatch table that maps suite-selected case ids to native host API operations.
-  - [ ] Add case parameter decoding for connection/session/operation ids.
-  - [ ] Add case parameter decoding for payload shapes and expected result states.
-  - [ ] Add evidence artifact writing for each executed adapter case.
-  - [ ] Add failure diagnostics that preserve native status/family/detail fields.
+- [x] Extend adapter execution from SDK-local smoke coverage to full suite-selected case behavior.
+  - [x] Add case dispatch table that maps suite-selected case ids to native host API operations.
+  - [x] Add case parameter decoding for connection/session/operation ids.
+  - [x] Add case parameter decoding for payload shapes and expected result states.
+  - [x] Add evidence artifact writing for each executed adapter case.
+  - [x] Add failure diagnostics that preserve native status/family/detail fields.
 - [x] Keep conformance integration adapter-first: Python declares capabilities and executes suite-owned plans rather than maintaining SDK-owned vector generation.
 - [x] Add Python integration tests that exercise multiple native preview3 sessions on one live connection facade.
 - [x] Add Python integration tests that exercise routed multi-session preview3 result delivery on one live connection.

@@ -4,6 +4,7 @@ from pathlib import Path
 
 import pytest
 
+import nnrp.client.native as client_native_module
 from nnrp.client import (
     NativeClientConnectionOptions,
     NativeClientSessionOpenOptions,
@@ -202,3 +203,61 @@ def test_native_client_connection_supports_operation_cancellation() -> None:
 def test_select_client_native_backend_can_require_native(tmp_path: Path) -> None:
     with pytest.raises(NativeArtifactError):
         select_client_native_backend(tmp_path / "missing.dll", fallback=FakeBackend(), require_native=True)
+
+
+def test_select_client_native_backend_uses_fallback_when_artifact_missing(tmp_path: Path) -> None:
+    fallback = FakeBackend()
+
+    backend = select_client_native_backend(tmp_path / "missing.dll", fallback=fallback)
+
+    assert backend is fallback
+
+
+def test_connect_native_client_connection_uses_fallback_when_artifact_missing(tmp_path: Path) -> None:
+    fallback = FakeBackend()
+
+    with connect_native_client_connection(tmp_path / "missing.dll", fallback=fallback) as connection:
+        session = connection.open_session(NativeClientSessionOpenOptions(requested_session_id=12))
+
+        assert session.requested_session_id == 12
+
+    assert fallback.connections[0].sessions[0].closed is True
+
+
+def test_connect_native_client_session_can_require_native_artifact(tmp_path: Path) -> None:
+    with pytest.raises(NativeArtifactError):
+        with connect_native_client_session(
+            tmp_path / "missing.dll",
+            fallback=FakeBackend(),
+            require_native=True,
+        ):
+            pass
+
+
+def test_select_client_native_backend_prefers_native_artifact_when_available(monkeypatch: pytest.MonkeyPatch) -> None:
+    native_backend = FakeBackend()
+    fallback_backend = FakeBackend()
+
+    def select_backend(
+        artifact_path: Path | str | None = None,
+        *,
+        root: Path | str | None = None,
+        native_platform: object | None = None,
+        library: object | None = None,
+        fallback: object | None = None,
+        require_native: bool = False,
+    ) -> FakeBackend:
+        assert artifact_path == "nnrp_ffi.dll"
+        assert root is None
+        assert native_platform is None
+        assert library is None
+        assert fallback is fallback_backend
+        assert require_native is False
+        return native_backend
+
+    monkeypatch.setattr(client_native_module, "select_native_runtime_backend", select_backend)
+
+    backend = select_client_native_backend("nnrp_ffi.dll", fallback=fallback_backend)
+
+    assert backend is native_backend
+    assert fallback_backend.connections == []

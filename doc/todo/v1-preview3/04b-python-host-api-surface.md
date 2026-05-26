@@ -23,10 +23,10 @@
     - [ ] Keep packet codecs only for fixture inspection, diagnostics, and unsupported runtime combinations.
       - [x] Move packet codec references in docs to fixture/diagnostic sections.
       - [ ] Keep raw packet tests as protocol tests, not runtime API examples.
-    - [ ] Add explicit fallback selection so native-backed paths are the default when artifacts are present.
-      - [ ] Add public/backend setting for require-native mode.
-      - [ ] Add tests for missing artifact fallback behavior.
-      - [ ] Add tests for require-native failure behavior from client helpers.
+    - [x] Add explicit fallback selection so native-backed paths are the default when artifacts are present.
+      - [x] Add public/backend setting for require-native mode.
+      - [x] Add tests for missing artifact fallback behavior.
+      - [x] Add tests for require-native failure behavior from client helpers.
 - [x] Add host-facing submit/result/control helpers that compose Rust preview3 handles rather than rebuilding packet logic in Python.
 - [x] Add a client-facing native session context helper so host code can open Rust-backed sessions without using packet transport helpers.
 - [x] Add a client-facing native connection context helper for opening multiple Rust-backed sessions on one connection.

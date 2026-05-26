@@ -132,6 +132,18 @@ class NativeStatus:
     def succeeded(self) -> bool:
         return self.status_code == FFI_STATUS_OK
 
+    @property
+    def status_name(self) -> str:
+        return _STATUS_NAMES.get(self.status_code, "unknown")
+
+    @property
+    def error_family_name(self) -> str:
+        return _ERROR_FAMILY_NAMES.get(self.error_family, "unknown")
+
+    @property
+    def is_protocol_error(self) -> bool:
+        return self.status_code == FFI_STATUS_PROTOCOL_ERROR
+
     def to_ffi(self) -> _NnrpFfiStatus:
         return _NnrpFfiStatus(self.status_code, self.error_family, self.protocol_error_code, self.detail_code)
 
@@ -633,6 +645,56 @@ class NativeRuntimeDiagnostic:
 
 
 @dataclass(frozen=True)
+class NativeStructuredDiagnostic:
+    status: NativeStatus
+    related_connection_id: int = 0
+    related_session_id: int = 0
+    related_operation_id: int = 0
+    related_frame_id: int = 0
+
+    @classmethod
+    def from_status(cls, status: NativeStatus) -> NativeStructuredDiagnostic:
+        return cls(status=status)
+
+    @classmethod
+    def from_runtime_diagnostic(cls, diagnostic: NativeRuntimeDiagnostic) -> NativeStructuredDiagnostic:
+        return cls(
+            status=diagnostic.status,
+            related_connection_id=diagnostic.related_connection_id,
+            related_session_id=diagnostic.related_session_id,
+            related_operation_id=diagnostic.related_operation_id,
+            related_frame_id=diagnostic.related_frame_id,
+        )
+
+    @property
+    def status_name(self) -> str:
+        return self.status.status_name
+
+    @property
+    def error_family_name(self) -> str:
+        return self.status.error_family_name
+
+    @property
+    def failed(self) -> bool:
+        return not self.status.succeeded
+
+    def to_report(self) -> dict[str, int | str | bool]:
+        return {
+            "status_code": self.status.status_code,
+            "status_name": self.status_name,
+            "error_family": self.status.error_family,
+            "error_family_name": self.error_family_name,
+            "protocol_error_code": self.status.protocol_error_code,
+            "detail_code": self.status.detail_code,
+            "failed": self.failed,
+            "related_connection_id": self.related_connection_id,
+            "related_session_id": self.related_session_id,
+            "related_operation_id": self.related_operation_id,
+            "related_frame_id": self.related_frame_id,
+        }
+
+
+@dataclass(frozen=True)
 class NativeRuntimeEvent:
     kind: int
     connection: NativeHandle
@@ -683,6 +745,7 @@ class NativeRuntimeResult:
     frame_id: int
     payload: bytes
     event: NativeRuntimeEvent
+    diagnostic: NativeStructuredDiagnostic
 
     @classmethod
     def from_event(
@@ -698,6 +761,7 @@ class NativeRuntimeResult:
             frame_id=event.frame_id,
             payload=event.payload,
             event=event,
+            diagnostic=NativeStructuredDiagnostic.from_runtime_diagnostic(event.diagnostic),
         )
 
 
@@ -1287,4 +1351,26 @@ _STATUS_EXCEPTION_TYPES = {
     FFI_STATUS_WOULD_BLOCK: NativeWouldBlockError,
     FFI_STATUS_CALLBACK_REJECTED: NativeCallbackRejectedError,
     FFI_STATUS_INTERNAL_ERROR: NativeInternalError,
+}
+
+_STATUS_NAMES = {
+    FFI_STATUS_OK: "ok",
+    FFI_STATUS_INVALID_ARGUMENT: "invalid_argument",
+    FFI_STATUS_INVALID_HANDLE: "invalid_handle",
+    FFI_STATUS_INVALID_STATE: "invalid_state",
+    FFI_STATUS_PROTOCOL_ERROR: "protocol_error",
+    FFI_STATUS_WOULD_BLOCK: "would_block",
+    FFI_STATUS_CALLBACK_REJECTED: "callback_rejected",
+    FFI_STATUS_INTERNAL_ERROR: "internal_error",
+}
+
+_ERROR_FAMILY_NAMES = {
+    ERROR_FAMILY_NONE: "none",
+    ERROR_FAMILY_SESSION: "session",
+    ERROR_FAMILY_CACHE: "cache",
+    ERROR_FAMILY_SCHEMA: "schema",
+    ERROR_FAMILY_TRANSPORT: "transport",
+    ERROR_FAMILY_LIFECYCLE: "lifecycle",
+    ERROR_FAMILY_OPERATION: "operation",
+    ERROR_FAMILY_INTERNAL: "internal",
 }

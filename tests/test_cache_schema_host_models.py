@@ -9,14 +9,52 @@ from nnrp import (
     CacheObjectIdentity,
     CacheObjectKind,
     CacheObjectVersion,
+    CacheRuntimeBackend,
+    NativeProtocolError,
+    NativeStatus,
     SchemaDescriptorHeader,
     SchemaRegistryAction,
     SchemaRegistryCatalog,
     SchemaRegistryFailure,
     StandardProfile,
     StreamSemantics,
+    cache_prefetch,
+    cache_query,
+    cache_release,
+    cache_touch,
     token_delta_schema_descriptor,
 )
+
+
+class FakeCacheBackend:
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, object]] = []
+        self.fail_query: BaseException | None = None
+
+    def query_cache(self, identity: CacheObjectIdentity) -> CacheLeaseResult:
+        self.calls.append(("query", identity))
+        if self.fail_query is not None:
+            raise self.fail_query
+        return CacheLeaseResult(identity=identity, outcome=CacheLeaseOutcome.VALID)
+
+    def touch_cache(self, identity: CacheObjectIdentity, *, ttl_ms: int | None = None) -> CacheLeaseResult:
+        self.calls.append(("touch", (identity, ttl_ms)))
+        lease = CacheLeaseDescriptor(
+            identity=identity,
+            owner_session_id=1,
+            lease_epoch=2,
+            expires_at_ms=100,
+            ttl_ms=ttl_ms or 0,
+        )
+        return CacheLeaseResult(identity=identity, outcome=CacheLeaseOutcome.RENEWED, lease=lease)
+
+    def prefetch_cache(self, identities: tuple[CacheObjectIdentity, ...]) -> tuple[CacheLeaseResult, ...]:
+        self.calls.append(("prefetch", identities))
+        return tuple(CacheLeaseResult(identity=identity, outcome=CacheLeaseOutcome.VALID) for identity in identities)
+
+    def release_cache(self, identity: CacheObjectIdentity) -> CacheLeaseResult:
+        self.calls.append(("release", identity))
+        return CacheLeaseResult(identity=identity, outcome=CacheLeaseOutcome.RELEASED)
 
 
 def test_cache_identity_and_version_wrappers_are_stable_value_objects() -> None:
@@ -70,6 +108,39 @@ def test_cache_dependency_invalidation_freezes_affected_snapshot_without_policy_
     assert invalidation.affected_count == 2
     assert invalidation.affected[0].object_kind == CacheObjectKind.PROMPT_SEGMENT
     assert invalidation.reason is CacheInvalidationReason.DEPENDENCY_INVALIDATED
+
+
+def test_cache_runtime_helpers_delegate_without_local_policy() -> None:
+    identity = CacheObjectIdentity(namespace=1, object_kind=CacheObjectKind.PROMPT_SEGMENT, key_hi=1, key_lo=2)
+    other = CacheObjectIdentity(namespace=1, object_kind=CacheObjectKind.TOOL_SCHEMA, key_hi=3, key_lo=4)
+    backend: CacheRuntimeBackend = FakeCacheBackend()
+
+    assert cache_query(backend, identity).outcome is CacheLeaseOutcome.VALID
+    assert cache_touch(backend, identity, ttl_ms=250).lease is not None
+    assert [result.identity for result in cache_prefetch(backend, [identity, other])] == [identity, other]
+    assert cache_release(backend, identity).outcome is CacheLeaseOutcome.RELEASED
+
+    assert backend.calls == [
+        ("query", identity),
+        ("touch", (identity, 250)),
+        ("prefetch", (identity, other)),
+        ("release", identity),
+    ]
+
+
+def test_cache_runtime_helpers_preserve_native_cache_diagnostics() -> None:
+    identity = CacheObjectIdentity(namespace=1, object_kind=CacheObjectKind.PROMPT_SEGMENT, key_hi=1, key_lo=2)
+    backend = FakeCacheBackend()
+    backend.fail_query = NativeProtocolError(
+        NativeStatus(status_code=4, error_family=2, protocol_error_code=0x2001, detail_code=0),
+        "cache miss from native runtime",
+    )
+
+    with pytest.raises(NativeProtocolError) as error:
+        cache_query(backend, identity)
+
+    assert error.value.status.error_family_name == "cache"
+    assert error.value.status.protocol_error_code == 0x2001
 
 
 def test_schema_registry_catalog_installs_looks_up_invalidates_and_reports_version_mismatch() -> None:

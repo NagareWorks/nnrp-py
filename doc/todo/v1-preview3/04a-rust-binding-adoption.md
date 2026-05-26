@@ -4,6 +4,11 @@
   - [x] Bind and load the frozen preview3 runtime entrypoint table and request/event structs behind the native backend module.
   - [x] Add a native-backed client/session facade for connect, bootstrap, open-session, submit, cancel, control, event polling, and close.
   - [ ] Replace SDK runtime calls with the bound native entrypoints.
+    - [x] Route adapter conformance smoke execution through the native backend selector.
+    - [x] Route new client connection/session helpers through native backend handles.
+    - [ ] Route public submit/result helper paths through native session operations.
+    - [ ] Route public cancellation/control helper paths through native session/operation control calls.
+    - [ ] Route cache/schema/profile helper paths through native calls once exposed.
 - [x] Pin the exact `nnrp-rs` commit, tag, or artifact version used by the Python package.
 - [x] Define the packaged native artifact layout for Windows, macOS, Linux, Android, and iOS.
 - [x] Add release packaging glue that normalizes `nnrp-rs` native artifact zips into the Python package layout before wheel build.
@@ -13,13 +18,29 @@
 - [x] Reject ABI/protocol mismatches with a deterministic Python exception and actionable diagnostic text.
 - [x] Map connection, session, operation, event pump, and buffer value handles into Python-owned wrapper types.
 - [ ] Map schema and stable borrowed buffer-view handles into Python-owned wrapper types once those handles are exposed by the frozen ABI.
+  - [ ] Add schema handle wrapper.
+  - [ ] Add borrowed immutable buffer-view handle wrapper.
+  - [ ] Add borrowed mutable buffer-view handle wrapper.
+  - [ ] Add lifetime guard tests for borrowed views.
 - [ ] Define ownership and lifetime rules for native buffers returned to Python.
   - [x] Snapshot polled native event payloads into Python-owned bytes before returning them to callers.
+  - [ ] Document event/result snapshot behavior in the native client API docs.
+  - [ ] Add tests for payload snapshot independence after native poll buffer reuse.
 - [ ] Define borrowed-buffer rules for future zero-copy result/body views.
+  - [ ] Define when borrowed views may be exposed from sync polling.
+  - [ ] Define when borrowed views may be exposed from async polling.
+  - [ ] Define copy fallback behavior when borrowed view lifetime cannot be guaranteed.
 - [ ] Ensure callbacks or poll results never outlive the native connection/session handle that owns them.
   - [x] Return SDK-owned poll/event snapshots from the native connection facade instead of raw FFI structs.
   - [x] Guard native session operations after explicit close on the Python facade.
   - [ ] Add connection-level lifetime guards once native connection close/dispose is exposed.
+  - [x] Add host-level native connection wrapper that closes owned sessions on context exit.
+  - [ ] Add native connection close/dispose FFI binding once exported.
+  - [ ] Add tests for use-after-close on native connection handles after FFI dispose exists.
 - [x] Map stable Rust error codes into Python exception hierarchies.
 - [ ] Keep pure-Python codec helpers limited to fixture inspection, diagnostics, and explicitly unsupported runtime combinations.
+  - [ ] Inventory pure-Python helpers used by runtime-facing public APIs.
+  - [ ] Move fixture-only helpers under test/tooling documentation.
+  - [ ] Add explicit runtime fallback selection instead of implicit pure-Python execution.
+  - [ ] Add tests that default host runtime uses native artifacts when available.
 - [x] Add loader and probe tests for every supported platform tag using fake or fixture native artifacts where real artifacts are unavailable.

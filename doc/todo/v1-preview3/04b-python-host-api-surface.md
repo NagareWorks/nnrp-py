@@ -4,12 +4,29 @@
   - [x] Add Rust-backed connection/session/submit/result/control facades.
   - [ ] Redirect existing public preview helper call sites to the Rust-backed facades.
     - [ ] Redirect client connection/session bootstrap helpers.
+      - [x] Add `connect_native_client_session` for direct native session bootstrap.
+      - [x] Add `connect_native_client_connection` for direct native connection bootstrap.
+      - [ ] Update README/current examples to use native connection/session helpers.
+      - [ ] Deprecate or move old packet transport bootstrap examples to smoke/tooling docs.
     - [ ] Redirect submit/result helper paths.
+      - [x] Expose native submit/result operations on sessions.
+      - [x] Expose native connection-level result polling wrapper for multi-session hosts.
+      - [ ] Add higher-level submit/result convenience helper over native operations.
+      - [ ] Replace old packet-level submit/result examples where raw packet behavior is not under test.
     - [ ] Redirect cancellation/control helper paths.
+      - [x] Expose native session cancel/control helpers.
+      - [x] Expose native operation cancel helper.
+      - [ ] Add host-friendly cancellation scope wrapper.
+      - [ ] Add host-friendly control event wrapper.
     - [x] Redirect adapter conformance execution from placeholder reports to native-backed smoke case execution.
   - [ ] Remove or quarantine superseded Python-owned hot-path packet/session implementations.
     - [ ] Keep packet codecs only for fixture inspection, diagnostics, and unsupported runtime combinations.
+      - [ ] Move packet codec references in docs to fixture/diagnostic sections.
+      - [ ] Keep raw packet tests as protocol tests, not runtime API examples.
     - [ ] Add explicit fallback selection so native-backed paths are the default when artifacts are present.
+      - [ ] Add public/backend setting for require-native mode.
+      - [ ] Add tests for missing artifact fallback behavior.
+      - [ ] Add tests for require-native failure behavior from client helpers.
 - [x] Add host-facing submit/result/control helpers that compose Rust preview3 handles rather than rebuilding packet logic in Python.
 - [x] Add a client-facing native session context helper so host code can open Rust-backed sessions without using packet transport helpers.
 - [x] Add a client-facing native connection context helper for opening multiple Rust-backed sessions on one connection.

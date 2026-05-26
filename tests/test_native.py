@@ -161,10 +161,12 @@ class FakeRuntimeLibrary(FakeEntrypointLibrary):
         status: _NnrpFfiStatus | None = None,
         event_payload: bytes = b"",
         event_kind: int = 6,
+        await_event_delay_seconds: float = 0.0,
     ) -> None:
         super().__init__()
         self.status = status or NativeStatus.ok().to_ffi()
         self.event_kind = event_kind
+        self.await_event_delay_seconds = await_event_delay_seconds
         self._event_payload_owner = (
             ctypes.create_string_buffer(event_payload, len(event_payload)) if event_payload else None
         )
@@ -214,6 +216,8 @@ class FakeRuntimeLibrary(FakeEntrypointLibrary):
         return self.status if request.handle.kind != 0 else _NnrpFfiStatus(FFI_STATUS_INVALID_HANDLE, 0, 0, 0)
 
     def _await_event(self, handle: _NnrpHandle, out_result: object) -> _NnrpFfiStatus:
+        if self.await_event_delay_seconds:
+            time.sleep(self.await_event_delay_seconds)
         target = getattr(out_result, "_obj", None)
         if target is None:
             target = ctypes.cast(out_result, ctypes.POINTER(_NnrpPollResult)).contents
@@ -836,6 +840,23 @@ def test_native_runtime_connection_filters_credit_update_events(tmp_path: Path) 
     assert not hasattr(updates[0], "credits")
 
 
+def test_native_control_event_iterator_propagates_cancellation(tmp_path: Path) -> None:
+    artifact = tmp_path / "nnrp_ffi.dll"
+    artifact.write_bytes(b"fake")
+    library = FakeRuntimeLibrary(
+        event_payload=b"credits",
+        event_kind=EVENT_KIND_FLOW_UPDATED,
+        await_event_delay_seconds=0.05,
+    )
+    connection = load_native_client(artifact, library=library).connect(
+        connection_id=12,
+        generation=2,
+        transport_id=TRANSPORT_SLOT_TCP,
+    )
+
+    asyncio.run(_cancel_async_credit_updates(connection))
+
+
 def test_native_runtime_connection_rejects_use_after_close(tmp_path: Path) -> None:
     artifact = tmp_path / "nnrp_ffi.dll"
     artifact.write_bytes(b"fake")
@@ -1024,6 +1045,14 @@ async def _collect_async_events_by_kind(
 
 async def _collect_async_credit_updates(connection: NativeRuntimeConnection) -> list[NativeCreditUpdateEvent]:
     return [event async for event in connection.iter_credit_updates(max_events=1)]
+
+
+async def _cancel_async_credit_updates(connection: NativeRuntimeConnection) -> None:
+    task = asyncio.create_task(_collect_async_credit_updates(connection))
+    await asyncio.sleep(0)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
 
 
 async def _cancel_async_submit(session: NativeRuntimeSession) -> None:

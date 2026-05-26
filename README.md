@@ -119,6 +119,8 @@ assert descriptor.stream_semantics is StreamSemantics.APPEND
 
 `CacheObjectIdentity`, `CacheLeaseDescriptor`, and `SchemaRegistryCatalog` are host-side value wrappers for native/runtime results and diagnostics. Cache query/touch/prefetch/release helpers delegate to a backend object and do not accept local lease policy callbacks or profile body decoders; those decisions remain owned by Rust and the conformance baseline.
 
+Native connections also expose async iterators for `structured_event`, `tool_delta`, and workflow-state payload families. These iterators wrap result/control events from the native pump and preserve Python-owned payload snapshots; profile-private body decoding still belongs to schema/profile handlers rather than the iterator itself.
+
 The wire surface is centered on two modules:
 
 1. `nnrp.core`: fixed-width header/message codecs, packet builders, tensor section helpers, and packet/body parsing.

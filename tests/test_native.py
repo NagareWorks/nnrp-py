@@ -12,6 +12,7 @@ from nnrp.native import (
     ERROR_FAMILY_CACHE,
     EVENT_KIND_CONTROL,
     EVENT_KIND_FLOW_UPDATED,
+    EVENT_KIND_RESULT_PUSHED,
     FFI_STATUS_CALLBACK_REJECTED,
     FFI_STATUS_INTERNAL_ERROR,
     FFI_STATUS_INVALID_ARGUMENT,
@@ -44,6 +45,7 @@ from nnrp.native import (
     NativeOperationHandle,
     NativeOperationLifecycle,
     NativeOperationSchedulingHint,
+    NativePayloadFamilyEvent,
     NativePlatform,
     NativeProtocolError,
     NativeRuntimeBackend,
@@ -840,6 +842,64 @@ def test_native_runtime_connection_filters_credit_update_events(tmp_path: Path) 
     assert not hasattr(updates[0], "credits")
 
 
+def test_native_runtime_connection_wraps_payload_family_events(tmp_path: Path) -> None:
+    artifact = tmp_path / "nnrp_ffi.dll"
+    artifact.write_bytes(b"fake")
+    library = FakeRuntimeLibrary(event_payload=b'{"delta":"ok"}', event_kind=EVENT_KIND_RESULT_PUSHED)
+    connection = load_native_client(artifact, library=library).connect(
+        connection_id=12,
+        generation=2,
+        transport_id=TRANSPORT_SLOT_TCP,
+    )
+
+    structured = connection.poll_structured_events(max_events=1)
+    tool_deltas = connection.poll_tool_deltas(max_events=1)
+    workflow_states = connection.poll_workflow_states(max_events=1)
+    async_structured = asyncio.run(_collect_async_structured_events(connection))
+    async_tool_deltas = asyncio.run(_collect_async_tool_deltas(connection))
+    async_workflow_states = asyncio.run(_collect_async_workflow_states(connection))
+
+    assert structured[0].payload_family == "structured_event"
+    assert structured[0].is_structured_event is True
+    assert structured[0].payload == b'{"delta":"ok"}'
+    assert isinstance(structured[0], NativePayloadFamilyEvent)
+    assert tool_deltas[0].payload_family == "tool_delta"
+    assert tool_deltas[0].is_tool_delta is True
+    assert workflow_states[0].payload_family == "workflow_state"
+    assert workflow_states[0].is_workflow_state is True
+    assert [event.payload for event in async_structured] == [b'{"delta":"ok"}']
+    assert [event.payload_family for event in async_tool_deltas] == ["tool_delta"]
+    assert [event.payload_family for event in async_workflow_states] == ["workflow_state"]
+
+
+def test_native_payload_family_event_rejects_unknown_family_and_non_payload_event(tmp_path: Path) -> None:
+    artifact = tmp_path / "nnrp_ffi.dll"
+    artifact.write_bytes(b"fake")
+    result_library = FakeRuntimeLibrary(event_payload=b"payload", event_kind=EVENT_KIND_RESULT_PUSHED)
+    result_connection = load_native_client(artifact, library=result_library).connect(
+        connection_id=12,
+        generation=2,
+        transport_id=TRANSPORT_SLOT_TCP,
+    )
+
+    with pytest.raises(NativeHandleError, match="unknown native payload family"):
+        result_connection.poll_payload_family_events("private_family", max_events=1)
+
+    flow_library = FakeRuntimeLibrary(event_payload=b"credits", event_kind=EVENT_KIND_FLOW_UPDATED)
+    flow_connection = load_native_client(artifact, library=flow_library).connect(
+        connection_id=12,
+        generation=2,
+        transport_id=TRANSPORT_SLOT_TCP,
+    )
+
+    with pytest.raises(NativeHandleError, match="expected native result/control event"):
+        flow_connection.poll_payload_family_events(
+            "structured_event",
+            max_events=1,
+            event_kind=EVENT_KIND_FLOW_UPDATED,
+        )
+
+
 def test_native_control_event_iterator_propagates_cancellation(tmp_path: Path) -> None:
     artifact = tmp_path / "nnrp_ffi.dll"
     artifact.write_bytes(b"fake")
@@ -1045,6 +1105,18 @@ async def _collect_async_events_by_kind(
 
 async def _collect_async_credit_updates(connection: NativeRuntimeConnection) -> list[NativeCreditUpdateEvent]:
     return [event async for event in connection.iter_credit_updates(max_events=1)]
+
+
+async def _collect_async_structured_events(connection: NativeRuntimeConnection) -> list[NativePayloadFamilyEvent]:
+    return [event async for event in connection.iter_structured_events(max_events=1)]
+
+
+async def _collect_async_tool_deltas(connection: NativeRuntimeConnection) -> list[NativePayloadFamilyEvent]:
+    return [event async for event in connection.iter_tool_deltas(max_events=1)]
+
+
+async def _collect_async_workflow_states(connection: NativeRuntimeConnection) -> list[NativePayloadFamilyEvent]:
+    return [event async for event in connection.iter_workflow_states(max_events=1)]
 
 
 async def _cancel_async_credit_updates(connection: NativeRuntimeConnection) -> None:

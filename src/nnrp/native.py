@@ -766,6 +766,48 @@ class NativeCreditUpdateEvent:
 
 
 @dataclass(frozen=True)
+class NativePayloadFamilyEvent:
+    payload_family: str
+    connection: NativeHandle
+    session: NativeHandle
+    operation: NativeHandle
+    frame_id: int
+    payload: bytes
+    event: NativeRuntimeEvent
+    diagnostic: NativeStructuredDiagnostic
+
+    @classmethod
+    def from_event(cls, event: NativeRuntimeEvent, *, payload_family: str) -> NativePayloadFamilyEvent:
+        normalized_family = payload_family.strip().lower()
+        if normalized_family not in _PAYLOAD_FAMILY_NAMES:
+            raise NativeHandleError(f"unknown native payload family {payload_family!r}")
+        if not event.is_result_event and event.kind != EVENT_KIND_CONTROL:
+            raise NativeHandleError(f"expected native result/control event, got {event.kind_name}")
+        return cls(
+            payload_family=normalized_family,
+            connection=event.connection,
+            session=event.session,
+            operation=event.operation,
+            frame_id=event.frame_id,
+            payload=event.payload,
+            event=event,
+            diagnostic=NativeStructuredDiagnostic.from_runtime_diagnostic(event.diagnostic),
+        )
+
+    @property
+    def is_structured_event(self) -> bool:
+        return self.payload_family == "structured_event"
+
+    @property
+    def is_tool_delta(self) -> bool:
+        return self.payload_family == "tool_delta"
+
+    @property
+    def is_workflow_state(self) -> bool:
+        return self.payload_family == "workflow_state"
+
+
+@dataclass(frozen=True)
 class NativeRuntimePollResult:
     status: NativeStatus
     event: NativeRuntimeEvent | None = None
@@ -983,6 +1025,27 @@ class NativeRuntimeConnection:
             for event in self.poll_events(max_events=max_events, event_kind=EVENT_KIND_FLOW_UPDATED)
         )
 
+    def poll_payload_family_events(
+        self,
+        payload_family: str,
+        *,
+        max_events: int | None = None,
+        event_kind: int = EVENT_KIND_RESULT_PUSHED,
+    ) -> tuple[NativePayloadFamilyEvent, ...]:
+        return tuple(
+            NativePayloadFamilyEvent.from_event(event, payload_family=payload_family)
+            for event in self.poll_events(max_events=max_events, event_kind=event_kind)
+        )
+
+    def poll_structured_events(self, *, max_events: int | None = None) -> tuple[NativePayloadFamilyEvent, ...]:
+        return self.poll_payload_family_events("structured_event", max_events=max_events)
+
+    def poll_tool_deltas(self, *, max_events: int | None = None) -> tuple[NativePayloadFamilyEvent, ...]:
+        return self.poll_payload_family_events("tool_delta", max_events=max_events)
+
+    def poll_workflow_states(self, *, max_events: int | None = None) -> tuple[NativePayloadFamilyEvent, ...]:
+        return self.poll_payload_family_events("workflow_state", max_events=max_events)
+
     async def async_poll_event(self) -> NativeRuntimeEvent | None:
         return await asyncio.to_thread(self.poll_event)
 
@@ -998,6 +1061,34 @@ class NativeRuntimeConnection:
     async def iter_credit_updates(self, *, max_events: int | None = None) -> AsyncIterator[NativeCreditUpdateEvent]:
         for update in await asyncio.to_thread(self.poll_credit_updates, max_events=max_events):
             yield update
+
+    async def iter_payload_family_events(
+        self,
+        payload_family: str,
+        *,
+        max_events: int | None = None,
+        event_kind: int = EVENT_KIND_RESULT_PUSHED,
+    ) -> AsyncIterator[NativePayloadFamilyEvent]:
+        events = await asyncio.to_thread(
+            self.poll_payload_family_events,
+            payload_family,
+            max_events=max_events,
+            event_kind=event_kind,
+        )
+        for event in events:
+            yield event
+
+    async def iter_structured_events(self, *, max_events: int | None = None) -> AsyncIterator[NativePayloadFamilyEvent]:
+        async for event in self.iter_payload_family_events("structured_event", max_events=max_events):
+            yield event
+
+    async def iter_tool_deltas(self, *, max_events: int | None = None) -> AsyncIterator[NativePayloadFamilyEvent]:
+        async for event in self.iter_payload_family_events("tool_delta", max_events=max_events):
+            yield event
+
+    async def iter_workflow_states(self, *, max_events: int | None = None) -> AsyncIterator[NativePayloadFamilyEvent]:
+        async for event in self.iter_payload_family_events("workflow_state", max_events=max_events):
+            yield event
 
     def control(self, *, control_code: int, payload: bytes | bytearray | memoryview = b"") -> None:
         self._ensure_open()
@@ -1539,6 +1630,8 @@ _EVENT_KIND_NAMES = {
     EVENT_KIND_CONTROL: "control",
     EVENT_KIND_ERROR: "error",
 }
+
+_PAYLOAD_FAMILY_NAMES = {"structured_event", "tool_delta", "workflow_state"}
 
 _SESSION_PRIORITY_CLASS_CODES = {
     NativeSessionPriorityClass.INTERACTIVE: 0,

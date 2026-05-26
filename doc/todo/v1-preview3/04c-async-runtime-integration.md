@@ -9,10 +9,10 @@
   - [ ] Add borrowed result payload helper once Rust exposes stable borrowed views.
   - [ ] Add regression test that hot-path payloads are not copied more than the documented boundary.
 - [x] Define cancellation behavior when a Python task is cancelled while a native operation is active.
-- [ ] Expose structured event, tool delta, and workflow-state updates through Python-native async iterators or callbacks backed by Rust result pumps.
-  - [ ] Add structured-event async iterator over native result pump events.
-  - [ ] Add tool-delta async iterator over native result pump events.
-  - [ ] Add workflow-state async iterator over native result pump events.
+- [x] Expose structured event, tool delta, and workflow-state updates through Python-native async iterators or callbacks backed by Rust result pumps.
+  - [x] Add structured-event async iterator over native result pump events.
+  - [x] Add tool-delta async iterator over native result pump events.
+  - [x] Add workflow-state async iterator over native result pump events.
   - [ ] Add callback registration wrapper if async iterator alone is insufficient for host integrations.
 - [ ] Keep any remaining pure-Python codec code limited to preview2 fixture inspection or other non-hot-path tooling.
   - [x] Keep native runtime backend selection separate from the pure-Python fallback/test fixtures.

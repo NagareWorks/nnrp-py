@@ -9,6 +9,9 @@ from nnrp.client import (
     MigrationTriggerMonitor,
     MigrationTriggerPolicy,
     MigrationTriggerSnapshot,
+    NativeClientConnection,
+    NativeClientConnectionOptions,
+    NativeClientSessionOpenOptions,
     NativeClientSessionOptions,
     PathHealthSample,
     Result,
@@ -24,6 +27,7 @@ from nnrp.client import (
     connect_client_control_with_probe,
     connect_client_session,
     connect_client_session_with_probe,
+    connect_native_client_connection,
     connect_native_client_session,
     plan_client_transport,
     probe_client_transport,
@@ -313,7 +317,11 @@ def test_connect_client_session_is_exported() -> None:
     assert ClientSession.__name__ == "ClientSession"
     assert callable(connect_client_session)
     assert callable(connect_client_session_with_probe)
+    assert NativeClientConnection.__name__ == "NativeClientConnection"
+    assert NativeClientConnectionOptions.__name__ == "NativeClientConnectionOptions"
     assert NativeClientSessionOptions.__name__ == "NativeClientSessionOptions"
+    assert NativeClientSessionOpenOptions.__name__ == "NativeClientSessionOpenOptions"
+    assert callable(connect_native_client_connection)
     assert callable(connect_native_client_session)
     assert callable(select_client_native_backend)
 

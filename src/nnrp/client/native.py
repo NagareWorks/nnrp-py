@@ -4,13 +4,16 @@ from __future__ import annotations
 
 from collections.abc import Iterator
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 from nnrp.native import (
     NativePlatform,
     NativeRuntimeBackend,
+    NativeRuntimeConnection,
+    NativeRuntimeOperation,
+    NativeRuntimeResult,
     NativeRuntimeSession,
     select_native_runtime_backend,
 )
@@ -26,6 +29,64 @@ class NativeClientSessionOptions:
     profile_id: int = 0
     schema_id: int = 0
     schema_version: int = 0
+
+
+@dataclass(frozen=True, slots=True)
+class NativeClientConnectionOptions:
+    connection_id: int = 1
+    connection_generation: int = 1
+    transport_id: int = 1
+
+
+@dataclass(frozen=True, slots=True)
+class NativeClientSessionOpenOptions:
+    requested_session_id: int = 1
+    session_generation: int = 1
+    profile_id: int = 0
+    schema_id: int = 0
+    schema_version: int = 0
+
+
+@dataclass(slots=True)
+class NativeClientConnection:
+    connection: NativeRuntimeConnection
+    _sessions: list[NativeRuntimeSession] = field(default_factory=list, init=False, repr=False)
+    _closed: bool = field(default=False, init=False, repr=False)
+
+    def open_session(self, options: NativeClientSessionOpenOptions | None = None) -> NativeRuntimeSession:
+        self._ensure_open()
+        resolved_options = options or NativeClientSessionOpenOptions()
+        session = self.connection.open_session(
+            requested_session_id=resolved_options.requested_session_id,
+            generation=resolved_options.session_generation,
+            profile_id=resolved_options.profile_id,
+            schema_id=resolved_options.schema_id,
+            schema_version=resolved_options.schema_version,
+        )
+        self._sessions.append(session)
+        return session
+
+    def poll_result(
+        self,
+        session: NativeRuntimeSession,
+        operation: NativeRuntimeOperation,
+        *,
+        max_events: int | None = None,
+    ) -> NativeRuntimeResult:
+        self._ensure_open()
+        return session.poll_result(operation, max_events=max_events)
+
+    def close(self) -> None:
+        if self._closed:
+            return
+        for session in reversed(self._sessions):
+            if not getattr(session, "_closed", False):
+                session.close()
+        self._closed = True
+
+    def _ensure_open(self) -> None:
+        if self._closed:
+            raise RuntimeError("native client connection is closed")
 
 
 def select_client_native_backend(
@@ -48,7 +109,7 @@ def select_client_native_backend(
 
 
 @contextmanager
-def connect_native_client_session(
+def connect_native_client_connection(
     artifact_path: Path | str | None = None,
     *,
     root: Path | str | None = None,
@@ -57,9 +118,9 @@ def connect_native_client_session(
     backend: NativeRuntimeBackend | None = None,
     fallback: NativeRuntimeBackend | None = None,
     require_native: bool = False,
-    options: NativeClientSessionOptions | None = None,
-) -> Iterator[NativeRuntimeSession]:
-    resolved_options = options or NativeClientSessionOptions()
+    options: NativeClientConnectionOptions | None = None,
+) -> Iterator[NativeClientConnection]:
+    resolved_options = options or NativeClientConnectionOptions()
     resolved_backend = backend or select_client_native_backend(
         artifact_path,
         root=root,
@@ -73,15 +134,47 @@ def connect_native_client_session(
         generation=resolved_options.connection_generation,
         transport_id=resolved_options.transport_id,
     )
-    session = connection.open_session(
+    client_connection = NativeClientConnection(connection)
+    try:
+        yield client_connection
+    finally:
+        client_connection.close()
+
+
+@contextmanager
+def connect_native_client_session(
+    artifact_path: Path | str | None = None,
+    *,
+    root: Path | str | None = None,
+    native_platform: NativePlatform | None = None,
+    library: Any | None = None,
+    backend: NativeRuntimeBackend | None = None,
+    fallback: NativeRuntimeBackend | None = None,
+    require_native: bool = False,
+    options: NativeClientSessionOptions | None = None,
+) -> Iterator[NativeRuntimeSession]:
+    resolved_options = options or NativeClientSessionOptions()
+    connection_options = NativeClientConnectionOptions(
+        connection_id=resolved_options.connection_id,
+        connection_generation=resolved_options.connection_generation,
+        transport_id=resolved_options.transport_id,
+    )
+    session_options = NativeClientSessionOpenOptions(
         requested_session_id=resolved_options.requested_session_id,
-        generation=resolved_options.session_generation,
+        session_generation=resolved_options.session_generation,
         profile_id=resolved_options.profile_id,
         schema_id=resolved_options.schema_id,
         schema_version=resolved_options.schema_version,
     )
-    try:
+    with connect_native_client_connection(
+        artifact_path,
+        root=root,
+        native_platform=native_platform,
+        library=library,
+        backend=backend,
+        fallback=fallback,
+        require_native=require_native,
+        options=connection_options,
+    ) as client_connection:
+        session = client_connection.open_session(session_options)
         yield session
-    finally:
-        if not getattr(session, "_closed", False):
-            session.close()

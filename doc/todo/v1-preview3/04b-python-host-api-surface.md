@@ -12,5 +12,6 @@
     - [ ] Add explicit fallback selection so native-backed paths are the default when artifacts are present.
 - [x] Add host-facing submit/result/control helpers that compose Rust preview3 handles rather than rebuilding packet logic in Python.
 - [x] Add a client-facing native session context helper so host code can open Rust-backed sessions without using packet transport helpers.
+- [x] Add a client-facing native connection context helper for opening multiple Rust-backed sessions on one connection.
 - [x] Add Python-facing operation identifiers, parent/group relationships, and cancellation scopes on top of Rust lifecycle primitives.
 - [x] Preserve the distinction among `partial`, `degraded`, `stale_reuse`, `cancelled`, `failed`, and `completed` lifecycle states on the Python API surface.

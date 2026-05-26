@@ -61,8 +61,16 @@ HANDLE_KIND_SESSION = 2
 HANDLE_KIND_OPERATION = 3
 HANDLE_KIND_EVENT_PUMP = 4
 HANDLE_KIND_BUFFER = 5
+EVENT_KIND_NONE = 0
+EVENT_KIND_CONNECTION_OPENED = 1
+EVENT_KIND_SESSION_OPENED = 2
+EVENT_KIND_SESSION_PATCHED = 3
+EVENT_KIND_SESSION_CLOSED = 4
+EVENT_KIND_SUBMIT_ACCEPTED = 5
 EVENT_KIND_RESULT_PUSHED = 6
 EVENT_KIND_RESULT_DROPPED = 7
+EVENT_KIND_FLOW_UPDATED = 8
+EVENT_KIND_CONTROL = 9
 EVENT_KIND_ERROR = 10
 DEFAULT_ARTIFACT_ROOT_ENV = "NNRP_NATIVE_ARTIFACT_ROOT"
 
@@ -716,6 +724,46 @@ class NativeRuntimeEvent:
             diagnostic=NativeRuntimeDiagnostic.from_ffi(event.diagnostic),
         )
 
+    @property
+    def kind_name(self) -> str:
+        return _EVENT_KIND_NAMES.get(self.kind, "unknown")
+
+    @property
+    def is_result_event(self) -> bool:
+        return self.kind in {EVENT_KIND_RESULT_PUSHED, EVENT_KIND_RESULT_DROPPED}
+
+    @property
+    def is_flow_update(self) -> bool:
+        return self.kind == EVENT_KIND_FLOW_UPDATED
+
+    @property
+    def is_control_event(self) -> bool:
+        return self.kind in {EVENT_KIND_FLOW_UPDATED, EVENT_KIND_CONTROL}
+
+    def to_credit_update(self) -> NativeCreditUpdateEvent:
+        return NativeCreditUpdateEvent.from_event(self)
+
+
+@dataclass(frozen=True)
+class NativeCreditUpdateEvent:
+    connection: NativeHandle
+    session: NativeHandle
+    operation: NativeHandle
+    frame_id: int
+    diagnostic: NativeStructuredDiagnostic
+
+    @classmethod
+    def from_event(cls, event: NativeRuntimeEvent) -> NativeCreditUpdateEvent:
+        if not event.is_flow_update:
+            raise NativeHandleError(f"expected native flow update event, got {event.kind_name}")
+        return cls(
+            connection=event.connection,
+            session=event.session,
+            operation=event.operation,
+            frame_id=event.frame_id,
+            diagnostic=NativeStructuredDiagnostic.from_runtime_diagnostic(event.diagnostic),
+        )
+
 
 @dataclass(frozen=True)
 class NativeRuntimePollResult:
@@ -861,24 +909,50 @@ class NativeRuntimeConnection:
     def poll_event(self) -> NativeRuntimeEvent | None:
         return self.await_event().event
 
-    def poll_events(self, *, max_events: int | None = None) -> tuple[NativeRuntimeEvent, ...]:
+    def poll_events(
+        self,
+        *,
+        max_events: int | None = None,
+        event_kind: int | None = None,
+    ) -> tuple[NativeRuntimeEvent, ...]:
         if max_events is not None and max_events < 0:
             raise ValueError("max_events must be non-negative")
+        if event_kind is not None:
+            _validate_u32("event_kind", event_kind)
 
         events: list[NativeRuntimeEvent] = []
-        while max_events is None or len(events) < max_events:
+        polled = 0
+        while max_events is None or polled < max_events:
             event = self.poll_event()
             if event is None:
                 break
+            polled += 1
+            if event_kind is not None and event.kind != event_kind:
+                continue
             events.append(event)
         return tuple(events)
+
+    def poll_credit_updates(self, *, max_events: int | None = None) -> tuple[NativeCreditUpdateEvent, ...]:
+        return tuple(
+            event.to_credit_update()
+            for event in self.poll_events(max_events=max_events, event_kind=EVENT_KIND_FLOW_UPDATED)
+        )
 
     async def async_poll_event(self) -> NativeRuntimeEvent | None:
         return await asyncio.to_thread(self.poll_event)
 
-    async def iter_events(self, *, max_events: int | None = None) -> AsyncIterator[NativeRuntimeEvent]:
-        for event in await asyncio.to_thread(self.poll_events, max_events=max_events):
+    async def iter_events(
+        self,
+        *,
+        max_events: int | None = None,
+        event_kind: int | None = None,
+    ) -> AsyncIterator[NativeRuntimeEvent]:
+        for event in await asyncio.to_thread(self.poll_events, max_events=max_events, event_kind=event_kind):
             yield event
+
+    async def iter_credit_updates(self, *, max_events: int | None = None) -> AsyncIterator[NativeCreditUpdateEvent]:
+        for update in await asyncio.to_thread(self.poll_credit_updates, max_events=max_events):
+            yield update
 
     def control(self, *, control_code: int, payload: bytes | bytearray | memoryview = b"") -> None:
         self._ensure_open()
@@ -1373,4 +1447,18 @@ _ERROR_FAMILY_NAMES = {
     ERROR_FAMILY_LIFECYCLE: "lifecycle",
     ERROR_FAMILY_OPERATION: "operation",
     ERROR_FAMILY_INTERNAL: "internal",
+}
+
+_EVENT_KIND_NAMES = {
+    EVENT_KIND_NONE: "none",
+    EVENT_KIND_CONNECTION_OPENED: "connection_opened",
+    EVENT_KIND_SESSION_OPENED: "session_opened",
+    EVENT_KIND_SESSION_PATCHED: "session_patched",
+    EVENT_KIND_SESSION_CLOSED: "session_closed",
+    EVENT_KIND_SUBMIT_ACCEPTED: "submit_accepted",
+    EVENT_KIND_RESULT_PUSHED: "result_pushed",
+    EVENT_KIND_RESULT_DROPPED: "result_dropped",
+    EVENT_KIND_FLOW_UPDATED: "flow_updated",
+    EVENT_KIND_CONTROL: "control",
+    EVENT_KIND_ERROR: "error",
 }

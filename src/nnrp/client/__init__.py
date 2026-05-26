@@ -1,7 +1,11 @@
 """Client-facing NNRP helpers."""
 
 from nnrp.client.native import (
+    NativeClientConnection,
+    NativeClientConnectionOptions,
+    NativeClientSessionOpenOptions,
     NativeClientSessionOptions,
+    connect_native_client_connection,
     connect_native_client_session,
     select_client_native_backend,
 )
@@ -48,7 +52,10 @@ __all__ = [
     "MigrationTriggerMonitor",
     "MigrationTriggerPolicy",
     "MigrationTriggerSnapshot",
+    "NativeClientConnection",
+    "NativeClientConnectionOptions",
     "NativeClientSessionOptions",
+    "NativeClientSessionOpenOptions",
     "PathHealthSample",
     "Result",
     "ResultRouter",
@@ -63,6 +70,7 @@ __all__ = [
     "connect_client_control_with_probe",
     "connect_client_session",
     "connect_client_session_with_probe",
+    "connect_native_client_connection",
     "connect_native_client_session",
     "probe_client_transport",
     "plan_client_transport",

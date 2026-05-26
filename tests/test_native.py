@@ -161,6 +161,7 @@ class FakeRuntimeLibrary(FakeEntrypointLibrary):
         self.nnrp_client_open_session.handler = self._open_session
         self.nnrp_client_submit.handler = self._submit
         self.nnrp_client_close.handler = self._close
+        self.nnrp_client_close_connection.handler = self._close_connection
         self.nnrp_client_cancel.handler = self._cancel
         self.nnrp_client_await_event.handler = self._await_event
         self.nnrp_control.handler = self._control
@@ -183,6 +184,13 @@ class FakeRuntimeLibrary(FakeEntrypointLibrary):
 
     def _close(self, handle: _NnrpHandle) -> _NnrpFfiStatus:
         return self.status if handle.kind == HANDLE_KIND_SESSION else _NnrpFfiStatus(FFI_STATUS_INVALID_HANDLE, 0, 0, 0)
+
+    def _close_connection(self, handle: _NnrpHandle) -> _NnrpFfiStatus:
+        return (
+            self.status
+            if handle.kind == HANDLE_KIND_CONNECTION
+            else _NnrpFfiStatus(FFI_STATUS_INVALID_HANDLE, 0, 0, 0)
+        )
 
     def _cancel(self, request: _NnrpClientCancelRequest) -> _NnrpFfiStatus:
         if request.session.kind != HANDLE_KIND_SESSION:
@@ -260,6 +268,7 @@ RUNTIME_ENTRYPOINT_SYMBOLS = [
     "nnrp_client_submit",
     "nnrp_session_close",
     "nnrp_client_close",
+    "nnrp_client_close_connection",
     "nnrp_client_cancel",
     "nnrp_client_await_event",
     "nnrp_server_bind",
@@ -693,6 +702,35 @@ def test_native_runtime_connection_polls_event_delivery_model(tmp_path: Path) ->
 
     with pytest.raises(ValueError, match="max_events"):
         connection.poll_events(max_events=-1)
+
+
+def test_native_runtime_connection_rejects_use_after_close(tmp_path: Path) -> None:
+    artifact = tmp_path / "nnrp_ffi.dll"
+    artifact.write_bytes(b"fake")
+    library = FakeRuntimeLibrary(event_payload=b"result")
+    connection = load_native_client(artifact, library=library).connect(
+        connection_id=12,
+        generation=2,
+        transport_id=TRANSPORT_SLOT_TCP,
+    )
+
+    connection.close()
+
+    assert library.nnrp_client_close_connection.calls[0][0].id == 12
+    with pytest.raises(NativeInvalidStateError, match="connection is closed"):
+        connection.open_session(
+            requested_session_id=41,
+            generation=3,
+            profile_id=4,
+            schema_id=5,
+            schema_version=6,
+        )
+    with pytest.raises(NativeInvalidStateError, match="connection is closed"):
+        connection.poll_event()
+    with pytest.raises(NativeInvalidStateError, match="connection is closed"):
+        connection.control(control_code=10)
+    with pytest.raises(NativeInvalidStateError, match="connection is closed"):
+        connection.close()
 
 
 def test_native_runtime_session_submits_and_polls_result(tmp_path: Path) -> None:

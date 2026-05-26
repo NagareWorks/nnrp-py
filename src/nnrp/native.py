@@ -564,6 +564,9 @@ class NativeRuntimeEntrypoints:
         )
         self.session_close = _bind_native_function(library, "nnrp_session_close", _NnrpFfiStatus, [_NnrpHandle])
         self.client_close = _bind_native_function(library, "nnrp_client_close", _NnrpFfiStatus, [_NnrpHandle])
+        self.client_close_connection = _bind_native_function(
+            library, "nnrp_client_close_connection", _NnrpFfiStatus, [_NnrpHandle]
+        )
         self.client_cancel = _bind_native_function(
             library, "nnrp_client_cancel", _NnrpFfiStatus, [_NnrpClientCancelRequest]
         )
@@ -758,6 +761,7 @@ class NativeRuntimeClient:
 class NativeRuntimeConnection:
     entrypoints: NativeRuntimeEntrypoints
     handle: NativeConnectionHandle
+    _closed: bool = field(default=False, init=False, repr=False, compare=False)
 
     def open_session(
         self,
@@ -768,6 +772,7 @@ class NativeRuntimeConnection:
         schema_id: int,
         schema_version: int,
     ) -> NativeRuntimeSession:
+        self._ensure_open()
         request = _NnrpSessionOpenRequest(
             self.handle.to_ffi(),
             requested_session_id,
@@ -782,6 +787,7 @@ class NativeRuntimeConnection:
         return NativeRuntimeSession(self.entrypoints, self.handle, NativeSessionHandle.from_ffi(out_session))
 
     def await_event(self) -> NativeRuntimePollResult:
+        self._ensure_open()
         result = _NnrpPollResult()
         status = self.entrypoints.client_await_event(self.handle.to_ffi(), ctypes.byref(result))
         raise_for_native_status(status)
@@ -811,10 +817,23 @@ class NativeRuntimeConnection:
             yield event
 
     def control(self, *, control_code: int, payload: bytes | bytearray | memoryview = b"") -> None:
+        self._ensure_open()
         payload_view, _payload_owner = _buffer_view_from_payload(payload)
         request = _NnrpControlRequest(self.handle.to_ffi(), control_code, payload_view)
         status = self.entrypoints.control(request)
         raise_for_native_status(status)
+
+    def close(self) -> None:
+        self._ensure_open()
+        status = self.entrypoints.client_close_connection(self.handle.to_ffi())
+        raise_for_native_status(status)
+        object.__setattr__(self, "_closed", True)
+
+    def _ensure_open(self) -> None:
+        if self._closed:
+            raise NativeInvalidStateError(
+                NativeStatus(FFI_STATUS_INVALID_STATE), "native runtime connection is closed"
+            )
 
 
 @dataclass(frozen=True)

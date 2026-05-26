@@ -30,13 +30,13 @@
   - [ ] Define when borrowed views may be exposed from sync polling.
   - [ ] Define when borrowed views may be exposed from async polling.
   - [ ] Define copy fallback behavior when borrowed view lifetime cannot be guaranteed.
-- [ ] Ensure callbacks or poll results never outlive the native connection/session handle that owns them.
+- [x] Ensure callbacks or poll results never outlive the native connection/session handle that owns them.
   - [x] Return SDK-owned poll/event snapshots from the native connection facade instead of raw FFI structs.
   - [x] Guard native session operations after explicit close on the Python facade.
-  - [ ] Add connection-level lifetime guards once native connection close/dispose is exposed.
+  - [x] Add connection-level lifetime guards once native connection close/dispose is exposed.
   - [x] Add host-level native connection wrapper that closes owned sessions on context exit.
-  - [ ] Add native connection close/dispose FFI binding once exported.
-  - [ ] Add tests for use-after-close on native connection handles after FFI dispose exists.
+  - [x] Add native connection close/dispose FFI binding once exported.
+  - [x] Add tests for use-after-close on native connection handles after FFI dispose exists.
 - [x] Map stable Rust error codes into Python exception hierarchies.
 - [ ] Keep pure-Python codec helpers limited to fixture inspection, diagnostics, and explicitly unsupported runtime combinations.
   - [ ] Inventory pure-Python helpers used by runtime-facing public APIs.

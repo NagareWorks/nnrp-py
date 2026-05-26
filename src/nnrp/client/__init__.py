@@ -3,6 +3,7 @@
 from nnrp.client.native import (
     NativeClientConnection,
     NativeClientConnectionOptions,
+    NativeClientOperationScope,
     NativeClientSessionOpenOptions,
     NativeClientSessionOptions,
     connect_native_client_connection,
@@ -54,6 +55,7 @@ __all__ = [
     "MigrationTriggerSnapshot",
     "NativeClientConnection",
     "NativeClientConnectionOptions",
+    "NativeClientOperationScope",
     "NativeClientSessionOptions",
     "NativeClientSessionOpenOptions",
     "PathHealthSample",

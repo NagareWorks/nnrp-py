@@ -1,16 +1,24 @@
 # Python Preview3 Rust Binding Adoption
 
 - [ ] Consume the frozen Rust FFI surface from `nnrp-rs`.
+  - [x] Bind and load the frozen preview3 runtime entrypoint table and request/event structs behind the native backend module.
+  - [x] Add a native-backed client/session facade for connect, bootstrap, open-session, submit, cancel, control, event polling, and close.
+  - [ ] Replace SDK runtime calls with the bound native entrypoints.
 - [x] Pin the exact `nnrp-rs` commit, tag, or artifact version used by the Python package.
 - [x] Define the packaged native artifact layout for Windows, macOS, Linux, Android, and iOS.
 - [x] Add a platform and architecture resolver for x86, x86_64, arm, and arm64 variants.
 - [x] Load the native artifact through one internal backend module before exposing any host-facing API.
 - [x] Probe ABI version, protocol version, enabled transport slots, and feature flags before accepting the native artifact.
 - [x] Reject ABI/protocol mismatches with a deterministic Python exception and actionable diagnostic text.
-- [ ] Map connection, session, operation, schema, and buffer handles into Python-owned wrapper types.
-- [x] Map the currently frozen Rust FFI value handles for connection, session, operation, event pump, and buffer into Python-owned wrapper types.
+- [x] Map connection, session, operation, event pump, and buffer value handles into Python-owned wrapper types.
+- [ ] Map schema and stable borrowed buffer-view handles into Python-owned wrapper types once those handles are exposed by the frozen ABI.
 - [ ] Define ownership and lifetime rules for native buffers returned to Python.
+  - [x] Snapshot polled native event payloads into Python-owned bytes before returning them to callers.
+- [ ] Define borrowed-buffer rules for future zero-copy result/body views.
 - [ ] Ensure callbacks or poll results never outlive the native connection/session handle that owns them.
+  - [x] Return SDK-owned poll/event snapshots from the native connection facade instead of raw FFI structs.
+  - [x] Guard native session operations after explicit close on the Python facade.
+  - [ ] Add connection-level lifetime guards once native connection close/dispose is exposed.
 - [x] Map stable Rust error codes into Python exception hierarchies.
 - [ ] Keep pure-Python codec helpers limited to fixture inspection, diagnostics, and explicitly unsupported runtime combinations.
 - [x] Add loader and probe tests for every supported platform tag using fake or fixture native artifacts where real artifacts are unavailable.

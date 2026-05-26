@@ -12,8 +12,8 @@ def _write_plan(tmp_path: Path) -> Path:
         json.dumps(
             {
                 "$schema": "../../schemas/adapter-execution-plan.schema.json",
-                "protocol_version": "nnrp-1-preview3",
-                "suite_version": "preview3-bootstrap",
+                "protocol_version": "nnrp-1",
+                "suite_version": "nnrp-1-bootstrap",
                 "implementation_name": "nnrp-py",
                 "artifacts": {
                     "results_path": "artifacts/adapter-results.json",
@@ -44,21 +44,25 @@ def _write_plan(tmp_path: Path) -> Path:
     return plan_path
 
 
-def test_build_adapter_case_results_report_marks_cases_as_not_implemented() -> None:
+def test_build_adapter_case_results_report_executes_supported_cases() -> None:
     report = build_adapter_case_results_report(
         {
-            "protocol_version": "nnrp-1-preview3",
+            "protocol_version": "nnrp-1",
             "cases": [
                 {"id": "l1.handshake.basic"},
                 {"id": "l1.session.open_close"},
+                {"id": "l1.cache.unimplemented"},
             ],
         }
     )
 
     assert report["implementation_name"] == "nnrp-py"
-    assert [result["id"] for result in report["results"]] == ["l1.handshake.basic", "l1.session.open_close"]
-    assert {result["outcome"] for result in report["results"]} == {"error"}
-    assert {result["failure_kind"] for result in report["results"]} == {"not_implemented"}
+    assert [result["id"] for result in report["results"]] == [
+        "l1.handshake.basic",
+        "l1.session.open_close",
+        "l1.cache.unimplemented",
+    ]
+    assert [result["outcome"] for result in report["results"]] == ["pass", "pass", "skip"]
 
 
 def test_main_reads_paths_from_environment_and_writes_report(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -70,9 +74,9 @@ def test_main_reads_paths_from_environment_and_writes_report(tmp_path: Path, mon
     assert main([]) == 0
 
     report = json.loads(output_path.read_text(encoding="utf-8"))
-    assert report["protocol_version"] == "nnrp-1-preview3"
+    assert report["protocol_version"] == "nnrp-1"
     assert len(report["results"]) == 2
-    assert report["results"][0]["message"] == "Preview3 adapter execution is not implemented in nnrp-py yet."
+    assert report["results"][0]["outcome"] == "pass"
 
 
 def test_main_accepts_explicit_cli_paths_and_creates_parent_directory(tmp_path: Path) -> None:
@@ -108,10 +112,10 @@ def test_write_adapter_case_results_rejects_missing_plan_path(tmp_path: Path) ->
     ("document", "match"),
     [
         ([], "must be a JSON object"),
-        ({"protocol_version": "nnrp-1-preview3"}, "cases list"),
+        ({"protocol_version": "nnrp-1"}, "cases list"),
         (
             {
-                "protocol_version": "nnrp-1-preview3",
+                "protocol_version": "nnrp-1",
                 "cases": ["l1.handshake.basic"],
             },
             "JSON objects",

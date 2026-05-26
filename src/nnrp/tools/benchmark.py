@@ -1,4 +1,4 @@
-"""Preview3 benchmark wrapper for suite-owned execution plans."""
+"""NNRP/1 benchmark wrapper for suite-owned execution plans."""
 
 from __future__ import annotations
 

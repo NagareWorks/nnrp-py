@@ -52,7 +52,7 @@ from nnrp.core import (
     pack_typed_payload_frames,
 )
 
-_SUPPORTED_PROTOCOL_VERSION = "nnrp-1-preview2"
+_SUPPORTED_PROTOCOL_VERSION = "nnrp-1-preview3"
 _VECTOR_KIND_BY_RECIPE_TYPE = {
     "header": "header",
     "client_hello_metadata": "metadata",

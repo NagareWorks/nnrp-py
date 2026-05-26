@@ -72,6 +72,7 @@ class FakeSession:
         self.schema_version = schema_version
         self.closed = False
         self.operations: list[FakeOperation] = []
+        self.cancelled_frames: list[int] = []
 
     def close(self) -> None:
         self.closed = True
@@ -95,6 +96,9 @@ class FakeSession:
             max_events=max_events,
         )
 
+    def cancel(self, *, frame_id: int) -> None:
+        self.cancelled_frames.append(frame_id)
+
 
 class FakeOperation:
     def __init__(self, *, session_id: int, operation_id: int, frame_id: int, payload: bytes) -> None:
@@ -102,6 +106,10 @@ class FakeOperation:
         self.operation_id = operation_id
         self.frame_id = frame_id
         self.payload = payload
+        self.cancelled = False
+
+    def cancel(self) -> None:
+        self.cancelled = True
 
 
 class FakeResult:
@@ -176,6 +184,19 @@ def test_native_client_connection_rejects_use_after_close() -> None:
 
     with pytest.raises(RuntimeError, match="closed"):
         connection.open_session()
+
+
+def test_native_client_connection_supports_operation_cancellation() -> None:
+    backend = FakeBackend()
+    with connect_native_client_connection(backend=backend) as connection:
+        session = connection.open_session()
+        operation = session.submit_operation(operation_id=100, frame_id=7, payload=b"payload")
+
+        operation.cancel()
+        session.cancel(frame_id=7)
+
+        assert operation.cancelled is True
+        assert session.cancelled_frames == [7]
 
 
 def test_select_client_native_backend_can_require_native(tmp_path: Path) -> None:

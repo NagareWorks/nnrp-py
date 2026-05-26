@@ -18,7 +18,7 @@
 - [ ] Add Python integration tests for cache lease expiry, schema mismatch, operation cancellation, priority-aware flow updates, and resume paths.
   - [ ] Add cache lease expiry integration test once Rust exposes cache lease operations.
   - [ ] Add schema mismatch integration test once Rust exposes schema registry operations.
-  - [ ] Add operation cancellation integration test through native session/operation helpers.
+  - [x] Add operation cancellation integration test through native session/operation helpers.
   - [ ] Add priority-aware flow update integration test once Rust exposes priority/credit events.
   - [ ] Add resume-path integration test once Rust exposes recovery/resume operations.
 - [x] Keep the active Python preview regression suite green while preview3 Rust-backed helpers replace the prior preview surface.

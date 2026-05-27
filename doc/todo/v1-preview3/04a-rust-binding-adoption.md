@@ -25,14 +25,14 @@
       - [x] Keep packet-level benchmarks labeled as fixture/diagnostic baselines.
 - [x] Pin the exact `nnrp-rs` commit, tag, or artifact version used by the Python package.
 - [x] Define the packaged native artifact layout for Windows, macOS, Linux, Android, and iOS.
-- [ ] Add release packaging glue that normalizes `nnrp-rs` native artifact zips into platform wheel contents before publish.
+- [x] Add release packaging glue that normalizes `nnrp-rs` native artifact zips into platform wheel contents before publish.
   - [x] Add native artifact normalization script for release zips.
   - [x] Add wheel inspection script that rejects missing native payloads.
-  - [ ] Build platform-specific wheels instead of a `py3-none-any` wheel when native artifacts are required.
-  - [ ] Ensure each wheel contains only the native artifact for its platform tag.
-  - [ ] Verify wheel tags match the embedded native artifact OS/architecture.
-  - [ ] Keep sdist free of prebuilt native libraries unless release policy explicitly changes.
-  - [ ] Add CI/release checks that fail if a native release publishes a universal wheel.
+  - [x] Build platform-specific wheels instead of a `py3-none-any` wheel when native artifacts are required.
+  - [x] Ensure each wheel contains only the native artifact for its platform tag.
+  - [x] Verify wheel tags match the embedded native artifact OS/architecture.
+  - [x] Keep sdist free of prebuilt native libraries unless release policy explicitly changes.
+  - [x] Add CI/release checks that fail if a native release publishes a universal wheel.
 - [x] Add a platform and architecture resolver for x86, x86_64, arm, and arm64 variants.
 - [x] Load the native artifact through one internal backend module before exposing any host-facing API.
 - [x] Probe ABI version, protocol version, enabled transport slots, and feature flags before accepting the native artifact.

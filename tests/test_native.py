@@ -10,9 +10,12 @@ import pytest
 from nnrp.cache import CacheLeaseOutcome, CacheObjectIdentity
 from nnrp.core.messages.control import SessionMigrateAckMetadata
 from nnrp.native import (
+    CACHE_ERROR_DEPENDENCY_INVALID,
+    CACHE_ERROR_MISS,
     DEFAULT_ARTIFACT_ROOT_ENV,
     ERROR_FAMILY_CACHE,
     ERROR_FAMILY_SCHEMA,
+    ERROR_FAMILY_SESSION,
     EVENT_KIND_CONTROL,
     EVENT_KIND_FLOW_UPDATED,
     EVENT_KIND_RESULT_PUSHED,
@@ -32,6 +35,8 @@ from nnrp.native import (
     HANDLE_KIND_SCHEMA_REGISTRY,
     HANDLE_KIND_SESSION,
     REQUIRED_RUNTIME_FEATURES,
+    SCHEMA_ERROR_HASH_CONFLICT,
+    SESSION_ERROR_PRIORITY_REJECTED,
     SESSION_RECOVERY_OUTCOME_RESUME_ENABLED,
     SESSION_RECOVERY_OUTCOME_RESUMED,
     TRANSPORT_SLOT_TCP,
@@ -2189,6 +2194,7 @@ def test_native_structured_diagnostic_preserves_status_family_detail_and_related
     assert diagnostic.status is status
     assert diagnostic.status_name == "protocol_error"
     assert diagnostic.error_family_name == "cache"
+    assert diagnostic.protocol_error_name == "unknown"
     assert diagnostic.failed is True
     assert diagnostic.to_report() == {
         "status_code": FFI_STATUS_PROTOCOL_ERROR,
@@ -2196,13 +2202,45 @@ def test_native_structured_diagnostic_preserves_status_family_detail_and_related
         "error_family": ERROR_FAMILY_CACHE,
         "error_family_name": "cache",
         "protocol_error_code": 0x22,
+        "protocol_error_name": "unknown",
         "detail_code": 0x33,
         "failed": True,
+        "retryable": False,
+        "downgrade": False,
         "related_connection_id": 12,
         "related_session_id": 41,
         "related_operation_id": 99,
         "related_frame_id": 7,
     }
+
+
+def test_native_diagnostic_helpers_classify_stable_protocol_error_families() -> None:
+    cache_status = NativeStatus(FFI_STATUS_PROTOCOL_ERROR, ERROR_FAMILY_CACHE, CACHE_ERROR_MISS, 0x11)
+    schema_status = NativeStatus(FFI_STATUS_PROTOCOL_ERROR, ERROR_FAMILY_SCHEMA, SCHEMA_ERROR_HASH_CONFLICT, 0x22)
+    downgrade_status = NativeStatus(
+        FFI_STATUS_PROTOCOL_ERROR,
+        ERROR_FAMILY_SESSION,
+        SESSION_ERROR_PRIORITY_REJECTED,
+        0x33,
+    )
+
+    cache = NativeStructuredDiagnostic.from_status(cache_status)
+    schema = NativeStructuredDiagnostic.from_status(schema_status)
+    downgrade = NativeStructuredDiagnostic.from_status(downgrade_status)
+
+    assert cache.is_cache_error is True
+    assert cache.is_schema_error is False
+    assert cache.protocol_error_name == "cache.miss"
+    assert cache.is_retryable is True
+    assert schema.is_schema_error is True
+    assert schema.protocol_error_name == "schema.hash_conflict"
+    assert schema.is_retryable is False
+    assert downgrade.is_session_error is True
+    assert downgrade.protocol_error_name == "session.priority_rejected"
+    assert downgrade.is_downgrade is True
+    assert downgrade.to_report()["downgrade"] is True
+    assert NativeStatus(FFI_STATUS_PROTOCOL_ERROR, ERROR_FAMILY_CACHE, CACHE_ERROR_DEPENDENCY_INVALID).is_retryable
+    assert NativeStatus(FFI_STATUS_WOULD_BLOCK).is_retryable
 
 
 def test_native_runtime_entrypoints_bind_frozen_symbol_table() -> None:

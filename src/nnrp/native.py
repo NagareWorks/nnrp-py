@@ -77,6 +77,27 @@ ERROR_FAMILY_TRANSPORT = 4
 ERROR_FAMILY_LIFECYCLE = 5
 ERROR_FAMILY_OPERATION = 6
 ERROR_FAMILY_INTERNAL = 0xFFFF
+SESSION_ERROR_NONE = 0x00000000
+SESSION_ERROR_AUTH_FAILED = 0x00010001
+SESSION_ERROR_PROFILE_UNSUPPORTED = 0x00010002
+SESSION_ERROR_SCHEMA_UNSUPPORTED = 0x00010003
+SESSION_ERROR_PRIORITY_REJECTED = 0x00010004
+SESSION_ERROR_LEASE_POLICY_REJECTED = 0x00010005
+SESSION_ERROR_RESUME_REJECTED = 0x00010006
+SESSION_ERROR_LIMIT_REACHED = 0x00010007
+CACHE_ERROR_NONE = 0x00030000
+CACHE_ERROR_MISS = 0x00030001
+CACHE_ERROR_LEASE_EXPIRED = 0x00030002
+CACHE_ERROR_VERSION_MISMATCH = 0x00030003
+CACHE_ERROR_DEPENDENCY_INVALID = 0x00030004
+CACHE_ERROR_SCHEMA_MISMATCH = 0x00030005
+SCHEMA_ERROR_NONE = 0x00040000
+SCHEMA_ERROR_UNKNOWN = 0x00040001
+SCHEMA_ERROR_VERSION_UNKNOWN = 0x00040002
+SCHEMA_ERROR_HASH_CONFLICT = 0x00040003
+SCHEMA_ERROR_INCOMPATIBLE = 0x00040004
+SCHEMA_ERROR_DEPENDENCY_MISSING = 0x00040005
+SCHEMA_ERROR_UPDATE_REJECTED = 0x00040006
 HANDLE_KIND_INVALID = 0
 HANDLE_KIND_CONNECTION = 1
 HANDLE_KIND_SESSION = 2
@@ -175,8 +196,32 @@ class NativeStatus:
         return _ERROR_FAMILY_NAMES.get(self.error_family, "unknown")
 
     @property
+    def protocol_error_name(self) -> str:
+        return _PROTOCOL_ERROR_NAMES.get(self.protocol_error_code, "unknown")
+
+    @property
     def is_protocol_error(self) -> bool:
         return self.status_code == FFI_STATUS_PROTOCOL_ERROR
+
+    @property
+    def is_session_error(self) -> bool:
+        return self.error_family == ERROR_FAMILY_SESSION
+
+    @property
+    def is_cache_error(self) -> bool:
+        return self.error_family == ERROR_FAMILY_CACHE
+
+    @property
+    def is_schema_error(self) -> bool:
+        return self.error_family == ERROR_FAMILY_SCHEMA
+
+    @property
+    def is_retryable(self) -> bool:
+        return self.status_code == FFI_STATUS_WOULD_BLOCK or self.protocol_error_code in _RETRYABLE_PROTOCOL_ERRORS
+
+    @property
+    def is_downgrade(self) -> bool:
+        return self.is_session_error and self.protocol_error_code == SESSION_ERROR_PRIORITY_REJECTED
 
     def to_ffi(self) -> _NnrpFfiStatus:
         return _NnrpFfiStatus(self.status_code, self.error_family, self.protocol_error_code, self.detail_code)
@@ -1220,8 +1265,32 @@ class NativeStructuredDiagnostic:
         return self.status.error_family_name
 
     @property
+    def protocol_error_name(self) -> str:
+        return self.status.protocol_error_name
+
+    @property
     def failed(self) -> bool:
         return not self.status.succeeded
+
+    @property
+    def is_session_error(self) -> bool:
+        return self.status.is_session_error
+
+    @property
+    def is_cache_error(self) -> bool:
+        return self.status.is_cache_error
+
+    @property
+    def is_schema_error(self) -> bool:
+        return self.status.is_schema_error
+
+    @property
+    def is_retryable(self) -> bool:
+        return self.status.is_retryable
+
+    @property
+    def is_downgrade(self) -> bool:
+        return self.status.is_downgrade
 
     def to_report(self) -> dict[str, int | str | bool]:
         return {
@@ -1230,8 +1299,11 @@ class NativeStructuredDiagnostic:
             "error_family": self.status.error_family,
             "error_family_name": self.error_family_name,
             "protocol_error_code": self.status.protocol_error_code,
+            "protocol_error_name": self.protocol_error_name,
             "detail_code": self.status.detail_code,
             "failed": self.failed,
+            "retryable": self.is_retryable,
+            "downgrade": self.is_downgrade,
             "related_connection_id": self.related_connection_id,
             "related_session_id": self.related_session_id,
             "related_operation_id": self.related_operation_id,
@@ -2570,6 +2642,40 @@ _ERROR_FAMILY_NAMES = {
     ERROR_FAMILY_LIFECYCLE: "lifecycle",
     ERROR_FAMILY_OPERATION: "operation",
     ERROR_FAMILY_INTERNAL: "internal",
+}
+
+_PROTOCOL_ERROR_NAMES = {
+    SESSION_ERROR_NONE: "session.none",
+    SESSION_ERROR_AUTH_FAILED: "session.auth_failed",
+    SESSION_ERROR_PROFILE_UNSUPPORTED: "session.profile_unsupported",
+    SESSION_ERROR_SCHEMA_UNSUPPORTED: "session.schema_unsupported",
+    SESSION_ERROR_PRIORITY_REJECTED: "session.priority_rejected",
+    SESSION_ERROR_LEASE_POLICY_REJECTED: "session.lease_policy_rejected",
+    SESSION_ERROR_RESUME_REJECTED: "session.resume_rejected",
+    SESSION_ERROR_LIMIT_REACHED: "session.limit_reached",
+    CACHE_ERROR_NONE: "cache.none",
+    CACHE_ERROR_MISS: "cache.miss",
+    CACHE_ERROR_LEASE_EXPIRED: "cache.lease_expired",
+    CACHE_ERROR_VERSION_MISMATCH: "cache.version_mismatch",
+    CACHE_ERROR_DEPENDENCY_INVALID: "cache.dependency_invalid",
+    CACHE_ERROR_SCHEMA_MISMATCH: "cache.schema_mismatch",
+    SCHEMA_ERROR_NONE: "schema.none",
+    SCHEMA_ERROR_UNKNOWN: "schema.unknown",
+    SCHEMA_ERROR_VERSION_UNKNOWN: "schema.version_unknown",
+    SCHEMA_ERROR_HASH_CONFLICT: "schema.hash_conflict",
+    SCHEMA_ERROR_INCOMPATIBLE: "schema.incompatible",
+    SCHEMA_ERROR_DEPENDENCY_MISSING: "schema.dependency_missing",
+    SCHEMA_ERROR_UPDATE_REJECTED: "schema.update_rejected",
+}
+
+_RETRYABLE_PROTOCOL_ERRORS = {
+    SESSION_ERROR_LIMIT_REACHED,
+    CACHE_ERROR_MISS,
+    CACHE_ERROR_LEASE_EXPIRED,
+    CACHE_ERROR_VERSION_MISMATCH,
+    CACHE_ERROR_DEPENDENCY_INVALID,
+    SCHEMA_ERROR_VERSION_UNKNOWN,
+    SCHEMA_ERROR_DEPENDENCY_MISSING,
 }
 
 _EVENT_KIND_NAMES = {

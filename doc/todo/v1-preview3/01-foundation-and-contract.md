@@ -31,9 +31,9 @@
   - [x] Add callback dispatch wrappers over Rust result pump events.
   - [x] Add batch polling once the ABI exposes it.
   - [ ] Add borrowed-buffer delivery once the ABI exposes stable borrowed handles.
-- [ ] Map stable preview3 error families into Python exception/result surfaces without collapsing family/code information.
+- [x] Map stable preview3 error families into Python exception/result surfaces without collapsing family/code information.
   - [x] Map stable FFI status codes to Python exception classes while preserving status/family/detail fields.
-  - [ ] Add public diagnostic helpers for structured downgrade, retry, cache, and schema errors.
+  - [x] Add public diagnostic helpers for structured downgrade, retry, cache, and schema errors.
 - [ ] Enforce buffer ownership and bounded-copy rules on Python views and async iterators.
   - [x] Snapshot polled native event payloads into Python-owned bytes.
   - [ ] Document and test copy boundaries for submit payloads, result payloads, and future borrowed views.

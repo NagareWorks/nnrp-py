@@ -23,7 +23,7 @@
   - [x] Add operation cancellation integration test through native session/operation helpers.
   - [ ] Add priority-aware flow update integration test once Rust exposes priority/credit events.
   - [ ] Add resume-path integration test once Rust exposes recovery/resume operations.
-    - [ ] Add recovery validation integration test through `NativeRecoveryCodec`.
+    - [x] Add recovery validation integration test through `NativeRecoveryCodec`.
     - [ ] Add full resume operation integration test after Rust exposes executable resume/open helper.
 - [x] Keep the active Python preview regression suite green while preview3 Rust-backed helpers replace the prior preview surface.
 - [ ] Add performance smoke checks that verify Python preview3 hot paths do not regress into full payload copies by default.

@@ -99,6 +99,38 @@ By default the native loader searches `nnrp/native_artifacts/<os>-<arch>/` insid
 
 Polled native events and results expose Python-owned `bytes` payload snapshots. The current Python API does not expose borrowed result buffers, so a result object remains stable even if the native runtime reuses its poll buffer after the call returns.
 
+Cache leases and schema validation follow the same host/runtime split. Python code passes stable identifiers, descriptors, and payload views into the native runtime; lease policy, schema matching, and diagnostics remain owned by Rust:
+
+```python
+from nnrp import (
+	CacheObjectIdentity,
+	cache_query,
+	cache_touch,
+	token_delta_payload_descriptor,
+	token_delta_schema_descriptor,
+)
+from nnrp.client import NativeClientSessionOpenOptions, connect_native_client_connection
+
+with connect_native_client_connection(require_native=True) as connection:
+	session = connection.open_session(NativeClientSessionOpenOptions(requested_session_id=42))
+
+	cache = session.cache_backend(now_ms=10_000, ttl_ms=30_000)
+	identity = CacheObjectIdentity(namespace=1, object_kind=1, key_hi=0, key_lo=7)
+	lease = cache_query(cache, identity)
+	if lease.succeeded:
+		cache_touch(cache, identity, ttl_ms=60_000)
+
+	registry = connection.schema_registry()
+	registry.install(token_delta_schema_descriptor())
+	registry.validate_typed_payload_binding(
+		token_delta_payload_descriptor(offset=0, length=128)
+	)
+```
+
+`profile_id = 0` means unspecified. It must not be treated as an implicit tensor profile. Tensor and token payloads are peer standard profiles, while structured-event, tool-delta, and workflow-state remain payload families routed through schema/profile bindings before any profile-private body decoding happens.
+
+`NativeRuntimeResult.state` reports the host-visible operation lifecycle as `completed`, `partial`, `degraded`, `stale_reuse`, `cancelled`, or `failed`. `NativeRuntimeResult.diagnostic` preserves native status, error family, protocol detail, and related connection/session/operation/frame ids; use `NativeStructuredDiagnostic.to_report()` when emitting adapter or CI diagnostics instead of flattening native failures into strings.
+
 ## Public Wire API
 
 The public wire surface remains available for protocol fixtures, diagnostics, and tooling. It should not be treated as the primary host runtime path when native artifacts are available.

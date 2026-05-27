@@ -54,12 +54,12 @@
   - [x] Document multiple sessions on one connection.
   - [x] Document routed result polling.
   - [x] Document session close and connection context cleanup behavior.
-- [ ] Document cache lease, schema registry, profile neutrality, and operation/workflow lifecycle semantics for Python hosts.
-  - [ ] Document cache lease host wrapper behavior.
-  - [ ] Document schema/profile registry host wrapper behavior.
-  - [ ] Document `profile_id = 0` as unspecified.
-  - [ ] Document tensor/token parity and structured-event/tool-delta payload families.
-  - [ ] Document operation lifecycle states and diagnostics.
+- [x] Document cache lease, schema registry, profile neutrality, and operation/workflow lifecycle semantics for Python hosts.
+  - [x] Document cache lease host wrapper behavior.
+  - [x] Document schema/profile registry host wrapper behavior.
+  - [x] Document `profile_id = 0` as unspecified.
+  - [x] Document tensor/token parity and structured-event/tool-delta payload families.
+  - [x] Document operation lifecycle states and diagnostics.
 - [x] Document how preview3 Rust-backed helpers replace the prior preview helper surface within `NNRP/1`.
   - [x] Map old packet/session examples to native host API examples.
   - [x] Move packet builder examples into protocol fixture/diagnostic sections.

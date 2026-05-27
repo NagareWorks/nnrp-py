@@ -12,7 +12,7 @@
       - [x] Bind native schema descriptor parse/write and typed payload binding validation.
       - [x] Add native schema codec selection to schema/profile helper entry points.
       - [x] Preserve pure-Python schema catalog as fixture/diagnostic fallback only.
-      - [ ] Add tests proving schema mismatch diagnostics come from native status fields.
+      - [x] Add tests proving schema mismatch diagnostics come from native status fields.
       - [ ] Keep cache helpers on host models until Rust exposes cache lease FFI operations.
     - [ ] Route recovery helper paths through native calls.
       - [x] Bind native recovery request/ack and migration validation helpers.

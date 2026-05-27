@@ -19,10 +19,10 @@
       - [x] Add public recovery helper functions that call `NativeRecoveryCodec`.
       - [x] Add host-facing resume outcome reports without parsing opaque recovery data in Python.
       - [x] Add tests proving invalid recovery inputs preserve native status fields.
-    - [ ] Route benchmark hot paths through native calls where the ABI already exists.
-      - [ ] Replace header/metadata descriptor benchmark runners with native-backed descriptor helpers.
-      - [ ] Add a native event polling benchmark runner.
-      - [ ] Keep packet-level benchmarks labeled as fixture/diagnostic baselines.
+    - [x] Route benchmark hot paths through native calls where the ABI already exists.
+      - [x] Replace header/metadata descriptor benchmark runners with native-backed descriptor helpers.
+      - [x] Add a native event polling benchmark runner.
+      - [x] Keep packet-level benchmarks labeled as fixture/diagnostic baselines.
 - [x] Pin the exact `nnrp-rs` commit, tag, or artifact version used by the Python package.
 - [x] Define the packaged native artifact layout for Windows, macOS, Linux, Android, and iOS.
 - [ ] Add release packaging glue that normalizes `nnrp-rs` native artifact zips into platform wheel contents before publish.

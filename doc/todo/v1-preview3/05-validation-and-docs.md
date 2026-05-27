@@ -16,15 +16,15 @@
 - [x] Add Python integration tests that exercise multiple native preview3 sessions on one live connection facade.
 - [x] Add Python integration tests that exercise routed multi-session preview3 result delivery on one live connection.
 - [ ] Add Python integration tests for cache lease expiry, schema mismatch, operation cancellation, priority-aware flow updates, and resume paths.
-  - [ ] Add cache lease expiry integration test once Rust exposes cache lease operations.
-  - [ ] Add schema mismatch integration test once Rust exposes schema registry operations.
-    - [ ] Add native typed payload binding mismatch test through `NativeSchemaCodec`.
-    - [ ] Add public schema helper mismatch test once helper routing is native-backed.
+  - [x] Add cache lease expiry integration test once Rust exposes cache lease operations.
+  - [x] Add schema mismatch integration test once Rust exposes schema registry operations.
+    - [x] Add native typed payload binding mismatch test through `NativeSchemaCodec`.
+    - [x] Add public schema helper mismatch test once helper routing is native-backed.
   - [x] Add operation cancellation integration test through native session/operation helpers.
   - [ ] Add priority-aware flow update integration test once Rust exposes priority/credit events.
-  - [ ] Add resume-path integration test once Rust exposes recovery/resume operations.
+  - [x] Add resume-path integration test once Rust exposes recovery/resume operations.
     - [x] Add recovery validation integration test through `NativeRecoveryCodec`.
-    - [ ] Add full resume operation integration test after Rust exposes executable resume/open helper.
+    - [x] Add full resume operation integration test after Rust exposes executable resume/open helper.
 - [x] Keep the active Python preview regression suite green while preview3 Rust-backed helpers replace the prior preview surface.
 - [ ] Add performance smoke checks that verify Python preview3 hot paths do not regress into full payload copies by default.
   - [ ] Add submit/result allocation-count smoke.

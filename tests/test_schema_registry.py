@@ -23,6 +23,7 @@ from nnrp import (
     unspecified_payload_descriptor,
     validate_typed_payload_binding,
 )
+from nnrp.native import ERROR_FAMILY_SCHEMA, FFI_STATUS_PROTOCOL_ERROR, NativeProtocolError, NativeStatus
 
 
 def test_schema_descriptor_header_round_trips_frozen_preview3_layout() -> None:
@@ -141,6 +142,19 @@ def test_schema_codec_helpers_keep_python_fixture_fallback() -> None:
         validate_typed_payload_binding((), descriptor)
 
 
+def test_public_schema_binding_helper_preserves_native_mismatch_status() -> None:
+    schema = token_delta_schema_descriptor()
+    descriptor = token_delta_payload_descriptor(offset=8, length=13)
+    codec = NativeMismatchSchemaCodec(schema=schema, descriptor=descriptor)
+
+    with pytest.raises(NativeProtocolError) as mismatch:
+        validate_typed_payload_binding((schema,), descriptor, codec=codec)
+
+    assert mismatch.value.status.error_family == ERROR_FAMILY_SCHEMA
+    assert mismatch.value.status.protocol_error_code == 0x3001
+    assert codec.calls == [("validate_binding", ((schema,), descriptor))]
+
+
 def test_standard_profile_helpers_keep_unspecified_tensor_and_token_distinct() -> None:
     unspecified = unspecified_payload_descriptor(offset=0, length=5)
     tensor = tensor_payload_descriptor(offset=5, length=7)
@@ -195,4 +209,14 @@ class FakeSchemaCodec:
         descriptor: Preview3TypedPayloadDescriptor,
     ) -> None:
         self.calls.append(("validate_binding", (schemas, descriptor)))
+
+
+class NativeMismatchSchemaCodec(FakeSchemaCodec):
+    def validate_typed_payload_binding(
+        self,
+        schemas: tuple[SchemaDescriptorHeader, ...],
+        descriptor: Preview3TypedPayloadDescriptor,
+    ) -> None:
+        self.calls.append(("validate_binding", (schemas, descriptor)))
+        raise NativeProtocolError(NativeStatus(FFI_STATUS_PROTOCOL_ERROR, ERROR_FAMILY_SCHEMA, 0x3001, 0x41))
 

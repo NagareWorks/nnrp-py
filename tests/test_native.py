@@ -617,6 +617,14 @@ class FakeRuntimeLibrary(FakeEntrypointLibrary):
         return self.status
 
 
+class ExpiringCacheRuntimeLibrary(FakeRuntimeLibrary):
+    def _cache_query(self, request: _NnrpCacheLeaseRequest, out_result: object) -> _NnrpFfiStatus:
+        result = _cache_result_target(out_result)
+        self._populate_cache_result(result, request, outcome=2)
+        result.expires_at_ms = request.now_ms
+        return _NnrpFfiStatus(FFI_STATUS_PROTOCOL_ERROR, ERROR_FAMILY_CACHE, 0x30002, 0)
+
+
 def _write_handle(out_handle: object, handle: _NnrpHandle) -> None:
     target = getattr(out_handle, "_obj", None)
     if target is not None:
@@ -1239,6 +1247,34 @@ def test_native_connection_resumes_session_through_executable_resume_abi(tmp_pat
     assert resume_request.resume_token_bytes == 24
 
 
+def test_native_resumed_session_can_submit_operations(tmp_path: Path) -> None:
+    artifact = tmp_path / "nnrp_ffi.dll"
+    artifact.write_bytes(b"fake")
+    library = FakeRuntimeLibrary()
+    connection = load_native_client(artifact, library=library).connect(
+        connection_id=11,
+        generation=2,
+        transport_id=TRANSPORT_SLOT_TCP,
+    )
+    session, outcome = connection.resume_session(
+        requested_session_id=41,
+        generation=3,
+        profile_id=4,
+        schema_id=5,
+        schema_version=6,
+        resume_token_bytes=24,
+    )
+
+    operation = session.submit_operation(operation_id=99, frame_id=7, payload=b"after-resume")
+
+    assert outcome.resumed is True
+    assert operation.session == session.handle
+    assert operation.operation_id == 99
+    submit_request = library.nnrp_client_submit.calls[0][0]
+    assert submit_request.session.id == 41
+    assert submit_request.payload.len == len(b"after-resume")
+
+
 def test_native_cache_backend_routes_lease_ops_through_ffi(tmp_path: Path) -> None:
     artifact = tmp_path / "nnrp_ffi.dll"
     artifact.write_bytes(b"fake")
@@ -1281,6 +1317,36 @@ def test_native_cache_backend_routes_lease_ops_through_ffi(tmp_path: Path) -> No
     assert cache_request.object_id.cache_namespace == 1
     assert cache_request.object_id.object_kind == 2
     assert library.nnrp_cache_touch.calls[0][0].ttl_ms == 750
+
+
+def test_native_cache_backend_preserves_expired_lease_result_from_protocol_status(tmp_path: Path) -> None:
+    artifact = tmp_path / "nnrp_ffi.dll"
+    artifact.write_bytes(b"fake")
+    session = (
+        load_native_client(artifact, library=ExpiringCacheRuntimeLibrary())
+        .connect(
+            connection_id=11,
+            generation=2,
+            transport_id=TRANSPORT_SLOT_TCP,
+        )
+        .open_session(
+            requested_session_id=41,
+            generation=3,
+            profile_id=4,
+            schema_id=5,
+            schema_version=6,
+        )
+    )
+    backend = session.cache_backend(now_ms=5000, expected_version=9)
+    identity = CacheObjectIdentity(namespace=1, object_kind=2, key_hi=3, key_lo=4)
+
+    result = backend.query_cache(identity)
+
+    assert result.outcome is CacheLeaseOutcome.EXPIRED
+    assert result.lease is not None
+    assert result.lease.is_expired(5000) is True
+    assert result.object_version is not None
+    assert result.object_version.object_version == 9
 
 
 def test_native_scheduling_models_validate_frozen_value_ranges() -> None:

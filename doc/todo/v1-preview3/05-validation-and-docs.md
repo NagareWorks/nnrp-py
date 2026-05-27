@@ -30,8 +30,8 @@
   - [ ] Add submit/result allocation-count smoke.
   - [ ] Add payload-copy boundary smoke.
   - [ ] Add native artifact load/probe latency smoke.
-  - [ ] Add native batch event polling latency smoke.
-  - [ ] Add schema descriptor native parse/write latency smoke.
+  - [x] Add native batch event polling latency smoke.
+  - [x] Add schema descriptor native parse/write latency smoke.
   - [ ] Gate smoke thresholds with stable local baselines before enabling CI failure.
 - [x] Add release packaging validation for installing `nnrp-rs` native artifacts into the Python wheel source tree.
 
@@ -44,7 +44,7 @@
   - [x] Add fallback/require-native behavior section.
 - [ ] Keep `doc/benchmarks/rs-native-artifacts-migration.md` updated with the native artifact plan, supported platform matrix, and pre/post migration benchmark results.
   - [x] Update pinned `nnrp-rs` tag/commit before release.
-  - [ ] Update benchmark scenario list after native-backed schema/recovery helpers land.
+  - [x] Update benchmark scenario list after native-backed schema/recovery helpers land.
   - [ ] Fill post-migration benchmark environment row.
   - [ ] Fill post-migration latency table.
   - [ ] Fill post-migration throughput table.

@@ -3,6 +3,8 @@ from pathlib import Path
 
 import pytest
 
+import nnrp.tools.benchmark as benchmark
+from nnrp import NativeArtifactError, token_delta_payload_descriptor, token_delta_schema_descriptor
 from nnrp.tools.benchmark import build_benchmark_results_report, main, write_benchmark_results
 
 
@@ -111,6 +113,33 @@ def _plan_document() -> dict[str, object]:
                 },
             },
             {
+                "id": "l4.native.schema_descriptor.latency",
+                "category": "latency",
+                "feature": "benchmark.native.schema_descriptor",
+                "required_capabilities": ["schema.descriptor.native"],
+                "description": "Native schema descriptor latency.",
+                "workload": {
+                    "operation": "native_schema_descriptor_roundtrip",
+                    "payload": "token_delta_descriptor",
+                    "iterations": 3,
+                    "warmup_iterations": 1,
+                },
+            },
+            {
+                "id": "l4.native.event_polling.latency",
+                "category": "latency",
+                "feature": "benchmark.native.event_polling",
+                "required_capabilities": ["event.polling.batch"],
+                "description": "Native batch event polling latency.",
+                "workload": {
+                    "operation": "native_event_polling",
+                    "payload": "empty_batch",
+                    "iterations": 3,
+                    "warmup_iterations": 1,
+                    "max_events": 2,
+                },
+            },
+            {
                 "id": "l4.session.lifecycle.latency",
                 "category": "latency",
                 "feature": "benchmark.session_lifecycle",
@@ -142,7 +171,10 @@ def _plan_document() -> dict[str, object]:
     }
 
 
-def test_build_benchmark_results_report_measures_configured_scenarios() -> None:
+def test_build_benchmark_results_report_measures_configured_scenarios(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(benchmark, "load_native_schema_codec", _missing_native_schema_codec)
+    monkeypatch.setattr(benchmark, "load_native_client", _missing_native_client)
+
     report = build_benchmark_results_report(_plan_document())
 
     assert report["implementation_name"] == "nnrp-py"
@@ -171,6 +203,8 @@ def test_build_benchmark_results_report_measures_configured_scenarios() -> None:
     assert results["l4.metadata.submit_result.latency"]["outcome"] == "measured"
     assert results["l4.typed_payload.tensor_pack_unpack.latency"]["outcome"] == "measured"
     assert results["l4.runtime.probe.latency"]["outcome"] == "measured"
+    assert results["l4.native.schema_descriptor.latency"]["outcome"] == "skip"
+    assert results["l4.native.event_polling.latency"]["outcome"] == "skip"
     assert results["l4.session.lifecycle.latency"]["outcome"] == "measured"
     assert results["l4.transport.tcp.loopback.throughput"]["outcome"] == "measured"
 
@@ -199,6 +233,39 @@ def test_build_benchmark_results_report_can_override_implementation_name() -> No
     report = build_benchmark_results_report(_plan_document(), implementation_name="custom-runner")
 
     assert report["implementation_name"] == "custom-runner"
+
+
+def test_build_benchmark_results_report_measures_native_scenarios_when_artifacts_are_available(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    schema_codec = FakeNativeSchemaCodec()
+    native_client = FakeNativeClient()
+    monkeypatch.setattr(benchmark, "load_native_schema_codec", lambda: schema_codec)
+    monkeypatch.setattr(benchmark, "load_native_client", lambda: native_client)
+
+    report = build_benchmark_results_report(_plan_document())
+
+    results = {result["id"]: result for result in report["results"]}
+    assert results["l4.native.schema_descriptor.latency"]["outcome"] == "measured"
+    assert results["l4.native.event_polling.latency"]["outcome"] == "measured"
+    assert schema_codec.validations == 4
+    assert native_client.connection.polled_batches == [2, 2, 2, 2]
+    assert native_client.connection.closed is True
+
+
+def test_build_benchmark_results_report_skips_native_scenarios_without_artifacts(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(benchmark, "load_native_schema_codec", _missing_native_schema_codec)
+    monkeypatch.setattr(benchmark, "load_native_client", _missing_native_client)
+
+    report = build_benchmark_results_report(_plan_document())
+
+    results = {result["id"]: result for result in report["results"]}
+    assert results["l4.native.schema_descriptor.latency"]["outcome"] == "skip"
+    assert "missing schema artifact" in results["l4.native.schema_descriptor.latency"]["message"]
+    assert results["l4.native.event_polling.latency"]["outcome"] == "skip"
+    assert "missing client artifact" in results["l4.native.event_polling.latency"]["message"]
 
 
 def test_build_benchmark_results_report_supports_single_sample_header_measurement() -> None:
@@ -255,7 +322,7 @@ def test_main_reads_paths_from_environment_and_writes_report(tmp_path: Path, mon
 
     report = json.loads(output_path.read_text(encoding="utf-8"))
     assert report["protocol_version"] == "nnrp-1"
-    assert len(report["results"]) == 9
+    assert len(report["results"]) == 11
 
 
 def test_main_accepts_explicit_cli_paths_and_creates_parent_directory(tmp_path: Path) -> None:
@@ -309,3 +376,61 @@ def test_write_benchmark_results_rejects_invalid_plan_shapes(
 
     with pytest.raises(ValueError, match=match):
         write_benchmark_results(plan_path, output_path)
+
+
+class FakeNativeSchemaCodec:
+    def __init__(self) -> None:
+        self.schema = token_delta_schema_descriptor()
+        self.descriptor = token_delta_payload_descriptor(offset=8, length=13)
+        self.validations = 0
+
+    def parse_schema_descriptor(self, payload: bytes | bytearray | memoryview):
+        assert bytes(payload) == b"native-schema"
+        return self.schema
+
+    def write_schema_descriptor(self, descriptor):
+        assert descriptor == self.schema
+        return b"native-schema"
+
+    def parse_typed_payload_descriptor(self, payload: bytes | bytearray | memoryview):
+        assert bytes(payload) == b"native-typed"
+        return self.descriptor
+
+    def write_typed_payload_descriptor(self, descriptor):
+        assert descriptor == self.descriptor
+        return b"native-typed"
+
+    def validate_typed_payload_binding(self, schemas, descriptor) -> None:
+        assert schemas == (self.schema,)
+        assert descriptor == self.descriptor
+        self.validations += 1
+
+
+class FakeNativeClient:
+    def __init__(self) -> None:
+        self.connection = FakeNativeConnection()
+
+    def bootstrap_connection(self, *, connection_id: int, generation: int, transport_id: int):
+        assert (connection_id, generation, transport_id) == (1, 1, 2)
+        return self.connection
+
+
+class FakeNativeConnection:
+    def __init__(self) -> None:
+        self.polled_batches: list[int] = []
+        self.closed = False
+
+    def poll_events_batch(self, *, max_events: int):
+        self.polled_batches.append(max_events)
+        return ()
+
+    def close(self) -> None:
+        self.closed = True
+
+
+def _missing_native_schema_codec() -> object:
+    raise NativeArtifactError("missing schema artifact")
+
+
+def _missing_native_client() -> object:
+    raise NativeArtifactError("missing client artifact")

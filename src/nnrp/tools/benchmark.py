@@ -28,6 +28,16 @@ from nnrp.core.packet import (
     unpack_tensor_body,
     unpack_tile_index_block,
 )
+from nnrp.native import NativeArtifactError, load_native_client, load_native_schema_codec
+from nnrp.schema import (
+    pack_schema_descriptor,
+    pack_typed_payload_descriptor,
+    token_delta_payload_descriptor,
+    token_delta_schema_descriptor,
+    unpack_schema_descriptor,
+    unpack_typed_payload_descriptor,
+    validate_typed_payload_binding,
+)
 
 _RESULTS_SCHEMA_URL = "https://raw.githubusercontent.com/NagareWorks/nnrp-conformance/main/schemas/benchmark-results.schema.json"
 _DEFAULT_IMPLEMENTATION_NAME = "nnrp-py"
@@ -284,6 +294,58 @@ def _run_runtime_probe(scenario_id: str, workload: dict[str, Any]) -> dict[str, 
     return _measured_latency_result(scenario_id, samples)
 
 
+def _run_native_schema_descriptor_roundtrip(scenario_id: str, workload: dict[str, Any]) -> dict[str, Any]:
+    iterations = _positive_int(workload.get("iterations"), default=100_000)
+    warmup_iterations = _non_negative_int(workload.get("warmup_iterations"), default=min(10_000, iterations))
+    try:
+        codec = load_native_schema_codec()
+    except NativeArtifactError as error:
+        return _skip_result(scenario_id, f"native schema codec unavailable: {error}")
+
+    schema = token_delta_schema_descriptor()
+    descriptor = token_delta_payload_descriptor(offset=8, length=13)
+
+    def operation() -> None:
+        decoded_schema = unpack_schema_descriptor(pack_schema_descriptor(schema, codec=codec), codec=codec)
+        decoded_descriptor = unpack_typed_payload_descriptor(
+            pack_typed_payload_descriptor(descriptor, codec=codec),
+            codec=codec,
+        )
+        validate_typed_payload_binding((decoded_schema,), decoded_descriptor, codec=codec)
+        if decoded_schema != schema or decoded_descriptor != descriptor:
+            raise RuntimeError("native schema descriptor benchmark roundtrip mismatch")
+
+    for _ in range(warmup_iterations):
+        operation()
+
+    samples = _measure_microseconds(operation, iterations)
+    return _measured_latency_result(scenario_id, samples)
+
+
+def _run_native_event_polling(scenario_id: str, workload: dict[str, Any]) -> dict[str, Any]:
+    iterations = _positive_int(workload.get("iterations"), default=100_000)
+    warmup_iterations = _non_negative_int(workload.get("warmup_iterations"), default=min(10_000, iterations))
+    max_events = _positive_int(workload.get("max_events"), default=8)
+    try:
+        connection = load_native_client().bootstrap_connection(
+            connection_id=1,
+            generation=1,
+            transport_id=2,
+        )
+    except NativeArtifactError as error:
+        return _skip_result(scenario_id, f"native client unavailable: {error}")
+
+    def operation() -> None:
+        connection.poll_events_batch(max_events=max_events)
+
+    for _ in range(warmup_iterations):
+        operation()
+
+    samples = _measure_microseconds(operation, iterations)
+    connection.close()
+    return _measured_latency_result(scenario_id, samples)
+
+
 def _run_session_lifecycle(scenario_id: str, workload: dict[str, Any]) -> dict[str, Any]:
     iterations = _positive_int(workload.get("iterations"), default=100_000)
     warmup_iterations = _non_negative_int(workload.get("warmup_iterations"), default=min(10_000, iterations))
@@ -506,11 +568,11 @@ def _percentile(samples: list[float], percentile: int) -> float:
     return float(sorted_samples[rank])
 
 
-def _skip_result(scenario_id: str) -> dict[str, Any]:
+def _skip_result(scenario_id: str, message: str = _DEFAULT_SKIP_MESSAGE) -> dict[str, Any]:
     return {
         "id": scenario_id,
         "outcome": "skip",
-        "message": _DEFAULT_SKIP_MESSAGE,
+        "message": message,
     }
 
 
@@ -572,6 +634,8 @@ _SCENARIO_RUNNERS: dict[str, Callable[[str, dict[str, Any]], dict[str, Any]]] = 
     "metadata_encode_decode": _run_metadata_encode_decode,
     "submit_result_metadata_encode_decode": _run_submit_result_metadata_encode_decode,
     "typed_payload_pack_unpack": _run_typed_payload_pack_unpack,
+    "native_schema_descriptor_roundtrip": _run_native_schema_descriptor_roundtrip,
+    "native_event_polling": _run_native_event_polling,
     "runtime_probe": _run_runtime_probe,
     "session_lifecycle": _run_session_lifecycle,
     "submit_result_loop": _run_submit_result_loop,

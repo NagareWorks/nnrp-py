@@ -294,14 +294,14 @@ class FakeRuntimeLibrary(FakeEntrypointLibrary):
         descriptor: _NnrpTypedPayloadDescriptor,
     ) -> _NnrpFfiStatus:
         if schema_count == 0:
-            return _NnrpFfiStatus(FFI_STATUS_PROTOCOL_ERROR, ERROR_FAMILY_SCHEMA, 0, 0)
+            return _NnrpFfiStatus(FFI_STATUS_PROTOCOL_ERROR, ERROR_FAMILY_SCHEMA, 0x3002, 0x42)
         schemas = ctypes.cast(schema_descriptors, ctypes.POINTER(_NnrpSchemaDescriptorHeader))
         typed = _typed_payload_descriptor_from_ffi(descriptor)
         for index in range(schema_count):
             schema = _schema_descriptor_from_ffi(schemas[index])
             if schema.schema_id == typed.schema_id and schema.schema_version == typed.schema_version:
                 return self.status
-        return _NnrpFfiStatus(FFI_STATUS_PROTOCOL_ERROR, ERROR_FAMILY_SCHEMA, 0, 0)
+        return _NnrpFfiStatus(FFI_STATUS_PROTOCOL_ERROR, ERROR_FAMILY_SCHEMA, 0x3001, 0x41)
 
     def _session_recovery_request_validate(self, session_open_metadata: _NnrpBufferView) -> _NnrpFfiStatus:
         if not _read_buffer_view(session_open_metadata):
@@ -732,8 +732,43 @@ def test_native_schema_codec_delegates_descriptor_parse_write_and_validation(tmp
     assert codec.write_typed_payload_descriptor(descriptor) == descriptor.pack()
     codec.validate_typed_payload_binding((schema,), descriptor)
 
-    with pytest.raises(NativeProtocolError):
+    with pytest.raises(NativeProtocolError) as mismatch:
         codec.validate_typed_payload_binding((), descriptor)
+
+    assert mismatch.value.status.error_family == ERROR_FAMILY_SCHEMA
+    assert mismatch.value.status.error_family_name == "schema"
+    assert mismatch.value.status.protocol_error_code == 0x3002
+    assert mismatch.value.status.detail_code == 0x42
+
+
+def test_native_schema_codec_preserves_schema_mismatch_status_fields(tmp_path: Path) -> None:
+    artifact = tmp_path / "nnrp_ffi.dll"
+    artifact.write_bytes(b"fake")
+    codec = load_native_schema_codec(artifact, library=FakeRuntimeLibrary())
+    schema = SchemaDescriptorHeader(
+        schema_id=0x1001,
+        schema_version=2,
+        profile_id=StandardProfile.TOKEN,
+        default_stream_semantics=StreamSemantics.APPEND,
+        schema_hash=0x1111,
+    )
+    descriptor = Preview3TypedPayloadDescriptor(
+        profile_id=StandardProfile.TOKEN,
+        descriptor_flags=TypedPayloadDescriptorFlags.PARTIAL,
+        schema_id=0x1001,
+        schema_version=3,
+        stream_semantics=StreamSemantics.APPEND,
+        offset=8,
+        length=13,
+    )
+
+    with pytest.raises(NativeProtocolError) as mismatch:
+        codec.validate_typed_payload_binding((schema,), descriptor)
+
+    assert mismatch.value.status.error_family == ERROR_FAMILY_SCHEMA
+    assert mismatch.value.status.error_family_name == "schema"
+    assert mismatch.value.status.protocol_error_code == 0x3001
+    assert mismatch.value.status.detail_code == 0x41
 
 
 def test_native_recovery_codec_delegates_resume_and_migration_validation(tmp_path: Path) -> None:

@@ -14,11 +14,11 @@
       - [x] Preserve pure-Python schema catalog as fixture/diagnostic fallback only.
       - [x] Add tests proving schema mismatch diagnostics come from native status fields.
       - [ ] Keep cache helpers on host models until Rust exposes cache lease FFI operations.
-    - [ ] Route recovery helper paths through native calls.
+    - [x] Route recovery helper paths through native calls.
       - [x] Bind native recovery request/ack and migration validation helpers.
-      - [ ] Add public recovery helper functions that call `NativeRecoveryCodec`.
-      - [ ] Add host-facing resume outcome reports without parsing opaque recovery data in Python.
-      - [ ] Add tests proving invalid recovery inputs preserve native status fields.
+      - [x] Add public recovery helper functions that call `NativeRecoveryCodec`.
+      - [x] Add host-facing resume outcome reports without parsing opaque recovery data in Python.
+      - [x] Add tests proving invalid recovery inputs preserve native status fields.
     - [ ] Route benchmark hot paths through native calls where the ABI already exists.
       - [ ] Replace header/metadata descriptor benchmark runners with native-backed descriptor helpers.
       - [ ] Add a native event polling benchmark runner.

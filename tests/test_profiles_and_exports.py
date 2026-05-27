@@ -4,10 +4,15 @@ from nnrp import (
     Preview3TypedPayloadDescriptor,
     SchemaDescriptorHeader,
     SchemaRegistryCatalog,
+    SessionRecoveryReport,
     StandardProfile,
     StreamSemantics,
+    should_replay_frame_after_migration,
     token_delta_payload_descriptor,
     token_delta_schema_descriptor,
+    validate_migration_recovery,
+    validate_session_recovery_ack,
+    validate_session_recovery_request,
 )
 from nnrp.client import (
     ClientControlBootstrapSession,
@@ -335,6 +340,11 @@ def test_connect_client_session_is_exported() -> None:
     assert callable(connect_native_client_connection)
     assert callable(connect_native_client_session)
     assert callable(select_client_native_backend)
+    assert SessionRecoveryReport.__name__ == "SessionRecoveryReport"
+    assert callable(validate_session_recovery_request)
+    assert callable(validate_session_recovery_ack)
+    assert callable(validate_migration_recovery)
+    assert callable(should_replay_frame_after_migration)
 
 
 def test_current_typed_models_are_exported() -> None:

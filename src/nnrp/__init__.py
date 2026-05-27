@@ -143,6 +143,14 @@ from nnrp.native import (
     resolve_native_artifact,
     select_native_runtime_backend,
 )
+from nnrp.recovery import (
+    RecoveryCodec,
+    SessionRecoveryReport,
+    should_replay_frame_after_migration,
+    validate_migration_recovery,
+    validate_session_recovery_ack,
+    validate_session_recovery_request,
+)
 from nnrp.schema import (
     DESCRIPTOR_FLAGS_KNOWN_MASK,
     SCHEMA_DESCRIPTOR_HEADER_LENGTH,
@@ -284,6 +292,8 @@ __all__ = [
     "NativeStatus",
     "NativeStructuredDiagnostic",
     "NativeWouldBlockError",
+    "RecoveryCodec",
+    "SessionRecoveryReport",
     "build_client_hello_loss_tolerance_extension",
     "build_client_hello_payload_capabilities_extension",
     "build_client_hello_transport_policy_extension",
@@ -329,6 +339,7 @@ __all__ = [
     "raise_for_native_status",
     "resolve_native_artifact",
     "select_native_runtime_backend",
+    "should_replay_frame_after_migration",
     "tensor_payload_descriptor",
     "token_delta_payload_descriptor",
     "token_delta_schema_descriptor",
@@ -336,6 +347,9 @@ __all__ = [
     "unspecified_payload_descriptor",
     "unpack_typed_payload_descriptor",
     "validate_typed_payload_binding",
+    "validate_migration_recovery",
+    "validate_session_recovery_ack",
+    "validate_session_recovery_request",
     "unpack_control_extension_block",
     "unpack_tensor_body",
     "unpack_tile_index_block",

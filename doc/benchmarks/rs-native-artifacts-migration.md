@@ -26,12 +26,12 @@ The existing Python SDK owns helper-level packet construction, transport-oriente
 
 ## Pinned Native Contract
 
-The current preview3 binding work consumes `nnrp-rs` native artifact version `1.0.0-preview.3.1`.
+The current preview3 binding work consumes `nnrp-rs` native artifact version `1.0.0-preview.3.2`.
 
 This version is the native artifact contract pin for the current migration branch and includes:
 
 1. The `nnrp_runtime_capabilities` export.
-2. ABI version `1.0.0`.
+2. ABI version `1.1.0`.
 3. Protocol version `1/0`.
 4. Runtime feature flags for protocol core, client/server APIs, event polling, callback dispatch, cache/schema, recovery, typed payloads, and transport slots.
 5. Transport slot bits for TCP and optional QUIC.
@@ -65,7 +65,7 @@ Rules:
 | Run | Date | SDK commit | nnrp-rs artifact | Python | OS/arch | CPU | Notes |
 | --- | --- | --- | --- | --- | --- | --- | --- |
 | Pre-migration baseline | 2026-05-25 | b83dadb | N/A | 3.13.5 | windows/amd64 | Intel(R) Core(TM)2 Duo CPU T7700 @ 2.40GHz | Conformance benchmark runner selected and measured 9 scenarios. |
-| Post-migration native | TBD | TBD | 1.0.0-preview.3.1 | TBD | TBD | TBD | TBD |
+| Post-migration native | TBD | TBD | 1.0.0-preview.3.2 | TBD | TBD | TBD | TBD |
 
 ### Latency Benchmarks
 

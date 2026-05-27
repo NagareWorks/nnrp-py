@@ -15,7 +15,7 @@ from typing import Any, Protocol, TypeVar, runtime_checkable
 EXPECTED_PROTOCOL_MAJOR = 1
 EXPECTED_PROTOCOL_WIRE_FORMAT = 0
 EXPECTED_ABI_MAJOR = 1
-MINIMUM_ABI_MINOR = 0
+MINIMUM_ABI_MINOR = 1
 TRANSPORT_SLOT_QUIC = 0x00000001
 TRANSPORT_SLOT_TCP = 0x00000002
 RUNTIME_FEATURE_PROTOCOL_CORE = 0x0000000000000001
@@ -27,6 +27,7 @@ RUNTIME_FEATURE_CACHE_SCHEMA = 0x0000000000000020
 RUNTIME_FEATURE_RECOVERY = 0x0000000000000040
 RUNTIME_FEATURE_TYPED_PAYLOAD = 0x0000000000000080
 RUNTIME_FEATURE_TRANSPORT_SLOTS = 0x0000000000000100
+RUNTIME_FEATURE_BATCH_POLLING = 0x0000000000000200
 REQUIRED_RUNTIME_FEATURES = (
     RUNTIME_FEATURE_PROTOCOL_CORE
     | RUNTIME_FEATURE_CLIENT_API
@@ -37,6 +38,7 @@ REQUIRED_RUNTIME_FEATURES = (
     | RUNTIME_FEATURE_RECOVERY
     | RUNTIME_FEATURE_TYPED_PAYLOAD
     | RUNTIME_FEATURE_TRANSPORT_SLOTS
+    | RUNTIME_FEATURE_BATCH_POLLING
 )
 REQUIRED_TRANSPORT_SLOTS = TRANSPORT_SLOT_TCP
 FFI_STATUS_OK = 0
@@ -597,6 +599,12 @@ class NativeRuntimeEntrypoints:
             _NnrpFfiStatus,
             [_NnrpHandle, ctypes.POINTER(_NnrpPollResult)],
         )
+        self.client_await_events = _bind_native_function(
+            library,
+            "nnrp_client_await_events",
+            _NnrpFfiStatus,
+            [_NnrpHandle, ctypes.POINTER(_NnrpEvent), ctypes.c_size_t, ctypes.POINTER(ctypes.c_size_t)],
+        )
         self.server_bind = _bind_native_function(
             library,
             "nnrp_server_bind",
@@ -1008,18 +1016,52 @@ class NativeRuntimeConnection:
         max_events: int | None = None,
         event_kind: int | None = None,
     ) -> tuple[NativeRuntimeEvent, ...]:
-        if max_events is not None and max_events < 0:
-            raise ValueError("max_events must be non-negative")
+        if max_events is not None:
+            return self.poll_events_batch(max_events=max_events, event_kind=event_kind)
+
         if event_kind is not None:
             _validate_u32("event_kind", event_kind)
 
         events: list[NativeRuntimeEvent] = []
-        polled = 0
-        while max_events is None or polled < max_events:
+        while True:
             event = self.poll_event()
             if event is None:
                 break
-            polled += 1
+            if event_kind is not None and event.kind != event_kind:
+                continue
+            events.append(event)
+        return tuple(events)
+
+    def poll_events_batch(
+        self,
+        *,
+        max_events: int,
+        event_kind: int | None = None,
+    ) -> tuple[NativeRuntimeEvent, ...]:
+        self._ensure_open()
+        if max_events is not None and max_events < 0:
+            raise ValueError("max_events must be non-negative")
+        if max_events == 0:
+            return ()
+        if event_kind is not None:
+            _validate_u32("event_kind", event_kind)
+
+        event_buffer = (_NnrpEvent * max_events)()
+        event_count = ctypes.c_size_t()
+        status = self.entrypoints.client_await_events(
+            self.handle.to_ffi(),
+            event_buffer,
+            max_events,
+            ctypes.byref(event_count),
+        )
+        native_status = NativeStatus.from_ffi(status)
+        if native_status.status_code == FFI_STATUS_WOULD_BLOCK:
+            return ()
+        raise_for_native_status(native_status)
+
+        events: list[NativeRuntimeEvent] = []
+        for index in range(int(event_count.value)):
+            event = NativeRuntimeEvent.from_ffi(event_buffer[index])
             if event_kind is not None and event.kind != event_kind:
                 continue
             events.append(event)

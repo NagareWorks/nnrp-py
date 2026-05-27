@@ -102,7 +102,7 @@ class FakeLibrary:
         self,
         *,
         abi_major: int = 1,
-        abi_minor: int = 0,
+        abi_minor: int = 1,
         abi_patch: int = 0,
         protocol_major: int = 1,
         wire_format: int = 0,
@@ -181,6 +181,7 @@ class FakeRuntimeLibrary(FakeEntrypointLibrary):
         self.nnrp_client_close_connection.handler = self._close_connection
         self.nnrp_client_cancel.handler = self._cancel
         self.nnrp_client_await_event.handler = self._await_event
+        self.nnrp_client_await_events.handler = self._await_events
         self.nnrp_control.handler = self._control
 
     def _client_connect(self, request: _NnrpClientConnectRequest, out_handle: object) -> _NnrpFfiStatus:
@@ -238,6 +239,39 @@ class FakeRuntimeLibrary(FakeEntrypointLibrary):
             target.event.diagnostic.status = NativeStatus.ok().to_ffi()
         return self.status
 
+    def _await_events(
+        self,
+        handle: _NnrpHandle,
+        out_events: object,
+        event_capacity: int,
+        out_event_count: object,
+    ) -> _NnrpFfiStatus:
+        if self.await_event_delay_seconds:
+            time.sleep(self.await_event_delay_seconds)
+        count_target = getattr(out_event_count, "_obj", None)
+        if count_target is None:
+            count_target = ctypes.cast(out_event_count, ctypes.POINTER(ctypes.c_size_t)).contents
+        count_target.value = 0
+        if self._event_payload_owner is None:
+            return _NnrpFfiStatus(FFI_STATUS_WOULD_BLOCK, 0, 0, 0)
+        if event_capacity <= 0:
+            return _NnrpFfiStatus(FFI_STATUS_INVALID_ARGUMENT, 0, 0, 0)
+
+        events = ctypes.cast(out_events, ctypes.POINTER(_NnrpEvent))
+        for index in range(event_capacity):
+            events[index].kind = self.event_kind
+            events[index].connection = handle
+            events[index].session = _NnrpHandle(HANDLE_KIND_SESSION, 41 + index, 3, 0)
+            events[index].operation = _NnrpHandle(HANDLE_KIND_OPERATION, 99 + index, 1, 0)
+            events[index].frame_id = 7 + index
+            events[index].payload = _NnrpBufferView(
+                ctypes.cast(self._event_payload_owner, ctypes.c_void_p),
+                len(self._event_payload_owner.raw),
+            )
+            events[index].diagnostic.status = NativeStatus.ok().to_ffi()
+        count_target.value = event_capacity
+        return self.status
+
 
 def _write_handle(out_handle: object, handle: _NnrpHandle) -> None:
     target = getattr(out_handle, "_obj", None)
@@ -290,6 +324,7 @@ RUNTIME_ENTRYPOINT_SYMBOLS = [
     "nnrp_client_close_connection",
     "nnrp_client_cancel",
     "nnrp_client_await_event",
+    "nnrp_client_await_events",
     "nnrp_server_bind",
     "nnrp_server_accept",
     "nnrp_server_receive_submit",
@@ -379,7 +414,7 @@ def test_probe_native_artifact_accepts_matching_protocol(tmp_path: Path) -> None
 
     assert result.artifact_path == artifact
     assert result.abi_major == 1
-    assert result.abi_minor == 0
+    assert result.abi_minor == 1
     assert result.abi_patch == 0
     assert result.protocol_major == 1
     assert result.protocol_wire_format == 0
@@ -808,12 +843,71 @@ def test_native_runtime_connection_polls_event_delivery_model(tmp_path: Path) ->
     assert event is not None
     assert event.payload == b"result"
     assert [polled.payload for polled in events] == [b"result"]
+    assert library.nnrp_client_await_events.calls[0][2] == 1
+    assert [polled.session.id for polled in connection.poll_events_batch(max_events=2)] == [41, 42]
+    assert connection.poll_events_batch(max_events=2, event_kind=EVENT_KIND_CONTROL) == ()
     assert async_event is not None
     assert async_event.payload == b"result"
     assert [polled.payload for polled in async_events] == [b"result"]
 
     with pytest.raises(ValueError, match="max_events"):
         connection.poll_events(max_events=-1)
+    with pytest.raises(ValueError, match="max_events"):
+        connection.poll_events_batch(max_events=-1)
+    assert connection.poll_events_batch(max_events=0) == ()
+
+
+def test_native_runtime_connection_batch_poll_maps_would_block_to_empty(tmp_path: Path) -> None:
+    artifact = tmp_path / "nnrp_ffi.dll"
+    artifact.write_bytes(b"fake")
+    library = FakeRuntimeLibrary()
+    connection = load_native_client(artifact, library=library).connect(
+        connection_id=12,
+        generation=2,
+        transport_id=TRANSPORT_SLOT_TCP,
+    )
+
+    assert connection.poll_events_batch(max_events=4) == ()
+    assert library.nnrp_client_await_events.calls[0][2] == 4
+
+
+def test_native_runtime_connection_poll_events_without_limit_filters_until_empty(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    artifact = tmp_path / "nnrp_ffi.dll"
+    artifact.write_bytes(b"fake")
+    connection = load_native_client(artifact, library=FakeRuntimeLibrary(event_payload=b"ignored")).connect(
+        connection_id=12,
+        generation=2,
+        transport_id=TRANSPORT_SLOT_TCP,
+    )
+    control_event = NativeRuntimeEvent(
+        kind=EVENT_KIND_CONTROL,
+        connection=NativeHandle(HANDLE_KIND_CONNECTION, 12, 2),
+        session=NativeHandle(HANDLE_KIND_SESSION, 41, 3),
+        operation=NativeHandle(HANDLE_KIND_OPERATION, 99, 1),
+        frame_id=7,
+        payload=b"control",
+        diagnostic=NativeRuntimeDiagnostic(NativeStatus.ok(), 12, 41, 99, 7),
+    )
+    result_event = NativeRuntimeEvent(
+        kind=EVENT_KIND_RESULT_PUSHED,
+        connection=NativeHandle(HANDLE_KIND_CONNECTION, 12, 2),
+        session=NativeHandle(HANDLE_KIND_SESSION, 42, 3),
+        operation=NativeHandle(HANDLE_KIND_OPERATION, 100, 1),
+        frame_id=8,
+        payload=b"result",
+        diagnostic=NativeRuntimeDiagnostic(NativeStatus.ok(), 12, 42, 100, 8),
+    )
+    queued_events: list[NativeRuntimeEvent | None] = [control_event, result_event, None]
+
+    def poll_event_once(self: NativeRuntimeConnection) -> NativeRuntimeEvent | None:
+        return queued_events.pop(0)
+
+    monkeypatch.setattr(NativeRuntimeConnection, "poll_event", poll_event_once)
+
+    assert connection.poll_events(event_kind=EVENT_KIND_RESULT_PUSHED) == (result_event,)
 
 
 def test_native_runtime_connection_filters_credit_update_events(tmp_path: Path) -> None:
@@ -1380,6 +1474,12 @@ def test_native_runtime_entrypoints_bind_frozen_symbol_table() -> None:
     assert library.nnrp_client_await_event.argtypes == [
         _NnrpHandle,
         ctypes.POINTER(_NnrpPollResult),
+    ]
+    assert library.nnrp_client_await_events.argtypes == [
+        _NnrpHandle,
+        ctypes.POINTER(_NnrpEvent),
+        ctypes.c_size_t,
+        ctypes.POINTER(ctypes.c_size_t),
     ]
     assert library.nnrp_server_bind.argtypes == [_NnrpServerBindRequest, ctypes.POINTER(_NnrpHandle)]
     assert library.nnrp_server_accept.argtypes == [

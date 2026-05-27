@@ -32,7 +32,7 @@
   - [x] Add registry assignment constants from `nnrp-doc`.
   - [x] Add tests for descriptor size/alignment pass-through.
 - [ ] Keep schema/profile interpretation Rust-owned; Python should expose stable descriptors and host-friendly wrappers only.
-  - [x] Avoid body-specific schema decoding in Python helpers.
+  - [x] Avoid body-specific schema decoding in Python helpers; native descriptor parse/write and binding validation delegate to Rust.
   - [x] Add tests for unknown schema/profile pass-through.
 
 ## Standard Profiles And Payload Families

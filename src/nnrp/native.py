@@ -15,7 +15,7 @@ from typing import Any, Protocol, TypeVar, runtime_checkable
 EXPECTED_PROTOCOL_MAJOR = 1
 EXPECTED_PROTOCOL_WIRE_FORMAT = 0
 EXPECTED_ABI_MAJOR = 1
-MINIMUM_ABI_MINOR = 1
+MINIMUM_ABI_MINOR = 2
 TRANSPORT_SLOT_QUIC = 0x00000001
 TRANSPORT_SLOT_TCP = 0x00000002
 RUNTIME_FEATURE_PROTOCOL_CORE = 0x0000000000000001
@@ -28,6 +28,18 @@ RUNTIME_FEATURE_RECOVERY = 0x0000000000000040
 RUNTIME_FEATURE_TYPED_PAYLOAD = 0x0000000000000080
 RUNTIME_FEATURE_TRANSPORT_SLOTS = 0x0000000000000100
 RUNTIME_FEATURE_BATCH_POLLING = 0x0000000000000200
+RUNTIME_FEATURE_CACHE_LEASE_OPS = 0x0000000000000400
+RUNTIME_FEATURE_SCHEMA_REGISTRY_HANDLES = 0x0000000000000800
+RUNTIME_FEATURE_BUFFER_HANDLES = 0x0000000000001000
+RUNTIME_FEATURE_EXECUTABLE_RESUME = 0x0000000000002000
+SCHEMA_REGISTRY_ACTION_INSTALLED = 0
+SCHEMA_REGISTRY_ACTION_ALREADY_INSTALLED = 1
+SCHEMA_REGISTRY_ACTION_UPDATED = 2
+SCHEMA_REGISTRY_ACTION_INVALIDATED = 3
+CACHE_LEASE_OUTCOME_VALID = 0
+CACHE_LEASE_OUTCOME_MISS = 1
+CACHE_LEASE_OUTCOME_EXPIRED = 2
+CACHE_LEASE_OUTCOME_RELEASED = 3
 SESSION_RECOVERY_OUTCOME_FRESH = 0
 SESSION_RECOVERY_OUTCOME_RESUME_ENABLED = 1
 SESSION_RECOVERY_OUTCOME_RESUMED = 2
@@ -43,6 +55,10 @@ REQUIRED_RUNTIME_FEATURES = (
     | RUNTIME_FEATURE_TYPED_PAYLOAD
     | RUNTIME_FEATURE_TRANSPORT_SLOTS
     | RUNTIME_FEATURE_BATCH_POLLING
+    | RUNTIME_FEATURE_CACHE_LEASE_OPS
+    | RUNTIME_FEATURE_SCHEMA_REGISTRY_HANDLES
+    | RUNTIME_FEATURE_BUFFER_HANDLES
+    | RUNTIME_FEATURE_EXECUTABLE_RESUME
 )
 REQUIRED_TRANSPORT_SLOTS = TRANSPORT_SLOT_TCP
 FFI_STATUS_OK = 0
@@ -67,6 +83,8 @@ HANDLE_KIND_SESSION = 2
 HANDLE_KIND_OPERATION = 3
 HANDLE_KIND_EVENT_PUMP = 4
 HANDLE_KIND_BUFFER = 5
+HANDLE_KIND_SCHEMA_REGISTRY = 6
+HANDLE_KIND_CACHE_LEASE = 7
 EVENT_KIND_NONE = 0
 EVENT_KIND_CONNECTION_OPENED = 1
 EVENT_KIND_SESSION_OPENED = 2
@@ -78,6 +96,7 @@ EVENT_KIND_RESULT_DROPPED = 7
 EVENT_KIND_FLOW_UPDATED = 8
 EVENT_KIND_CONTROL = 9
 EVENT_KIND_ERROR = 10
+EVENT_KIND_RESULT_HINT = 11
 DEFAULT_ARTIFACT_ROOT_ENV = "NNRP_NATIVE_ARTIFACT_ROOT"
 _CallbackEventT = TypeVar("_CallbackEventT")
 
@@ -307,6 +326,36 @@ class NativeBufferHandle:
 
     @classmethod
     def from_ffi(cls, handle: _NnrpHandle) -> NativeBufferHandle:
+        return cls(NativeHandle.from_ffi(handle))
+
+    def to_ffi(self) -> _NnrpHandle:
+        return self.handle.to_ffi()
+
+
+@dataclass(frozen=True)
+class NativeSchemaRegistryHandle:
+    handle: NativeHandle
+
+    def __post_init__(self) -> None:
+        self.handle.require_kind(HANDLE_KIND_SCHEMA_REGISTRY)
+
+    @classmethod
+    def from_ffi(cls, handle: _NnrpHandle) -> NativeSchemaRegistryHandle:
+        return cls(NativeHandle.from_ffi(handle))
+
+    def to_ffi(self) -> _NnrpHandle:
+        return self.handle.to_ffi()
+
+
+@dataclass(frozen=True)
+class NativeCacheLeaseHandle:
+    handle: NativeHandle
+
+    def __post_init__(self) -> None:
+        self.handle.require_kind(HANDLE_KIND_CACHE_LEASE)
+
+    @classmethod
+    def from_ffi(cls, handle: _NnrpHandle) -> NativeCacheLeaseHandle:
         return cls(NativeHandle.from_ffi(handle))
 
     def to_ffi(self) -> _NnrpHandle:
@@ -579,6 +628,48 @@ class _NnrpSessionRecoveryOutcome(ctypes.Structure):
     ]
 
 
+class _NnrpCacheObjectId(ctypes.Structure):
+    _fields_ = [
+        ("cache_namespace", ctypes.c_uint32),
+        ("cache_key_hi", ctypes.c_uint32),
+        ("cache_key_lo", ctypes.c_uint32),
+        ("object_kind", ctypes.c_uint32),
+    ]
+
+
+class _NnrpCacheLeaseRequest(ctypes.Structure):
+    _fields_ = [
+        ("owner", _NnrpHandle),
+        ("object_id", _NnrpCacheObjectId),
+        ("expected_version", ctypes.c_uint64),
+        ("now_ms", ctypes.c_uint64),
+        ("ttl_ms", ctypes.c_uint32),
+    ]
+
+
+class _NnrpCacheLeaseResult(ctypes.Structure):
+    _fields_ = [
+        ("outcome_code", ctypes.c_uint32),
+        ("lease_handle", _NnrpHandle),
+        ("object_id", _NnrpCacheObjectId),
+        ("object_version", ctypes.c_uint64),
+        ("lease_id", ctypes.c_uint64),
+        ("expires_at_ms", ctypes.c_uint64),
+    ]
+
+
+class _NnrpSessionResumeRequest(ctypes.Structure):
+    _fields_ = [
+        ("connection", _NnrpHandle),
+        ("requested_session_id", ctypes.c_uint32),
+        ("generation", ctypes.c_uint32),
+        ("profile_id", ctypes.c_uint16),
+        ("schema_id", ctypes.c_uint32),
+        ("schema_version", ctypes.c_uint32),
+        ("resume_token_bytes", ctypes.c_uint32),
+    ]
+
+
 class NativeRuntimeEntrypoints:
     """ctypes entrypoint table for the frozen Rust runtime ABI."""
 
@@ -612,6 +703,12 @@ class NativeRuntimeEntrypoints:
             "nnrp_client_open_session",
             _NnrpFfiStatus,
             [_NnrpSessionOpenRequest, ctypes.POINTER(_NnrpHandle)],
+        )
+        self.client_resume_session = _bind_native_function(
+            library,
+            "nnrp_client_resume_session",
+            _NnrpFfiStatus,
+            [_NnrpSessionResumeRequest, ctypes.POINTER(_NnrpHandle), ctypes.POINTER(_NnrpSessionRecoveryOutcome)],
         )
         self.submit = _bind_native_function(
             library,
@@ -707,6 +804,39 @@ class NativeRuntimeEntrypoints:
             _NnrpFfiStatus,
             [ctypes.POINTER(_NnrpSchemaDescriptorHeader), ctypes.c_size_t, _NnrpTypedPayloadDescriptor],
         )
+        self.schema_registry_create = _bind_native_function(
+            library,
+            "nnrp_schema_registry_create",
+            _NnrpFfiStatus,
+            [ctypes.POINTER(_NnrpHandle)],
+        )
+        self.schema_registry_install = _bind_native_function(
+            library,
+            "nnrp_schema_registry_install",
+            _NnrpFfiStatus,
+            [_NnrpHandle, _NnrpSchemaDescriptorHeader, ctypes.POINTER(ctypes.c_uint32)],
+        )
+        self.schema_registry_lookup = _bind_native_function(
+            library,
+            "nnrp_schema_registry_lookup",
+            _NnrpFfiStatus,
+            [_NnrpHandle, ctypes.c_uint32, ctypes.c_uint32, ctypes.POINTER(_NnrpSchemaDescriptorHeader)],
+        )
+        self.schema_registry_invalidate = _bind_native_function(
+            library,
+            "nnrp_schema_registry_invalidate",
+            _NnrpFfiStatus,
+            [_NnrpHandle, ctypes.c_uint32, ctypes.c_uint32, ctypes.POINTER(ctypes.c_uint32)],
+        )
+        self.schema_registry_validate_binding = _bind_native_function(
+            library,
+            "nnrp_schema_registry_validate_binding",
+            _NnrpFfiStatus,
+            [_NnrpHandle, _NnrpTypedPayloadDescriptor],
+        )
+        self.schema_registry_release = _bind_native_function(
+            library, "nnrp_schema_registry_release", _NnrpFfiStatus, [_NnrpHandle]
+        )
         self.session_recovery_request_validate = _bind_native_function(
             library,
             "nnrp_session_recovery_request_validate",
@@ -730,6 +860,50 @@ class NativeRuntimeEntrypoints:
             "nnrp_migration_should_replay_frame",
             _NnrpFfiStatus,
             [_NnrpBufferView, ctypes.c_uint64, ctypes.POINTER(ctypes.c_uint8)],
+        )
+        self.buffer_acquire_copy = _bind_native_function(
+            library,
+            "nnrp_buffer_acquire_copy",
+            _NnrpFfiStatus,
+            [_NnrpBufferView, ctypes.POINTER(_NnrpHandle), ctypes.POINTER(_NnrpBufferView)],
+        )
+        self.buffer_view = _bind_native_function(
+            library,
+            "nnrp_buffer_view",
+            _NnrpFfiStatus,
+            [_NnrpHandle, ctypes.POINTER(_NnrpBufferView)],
+        )
+        self.buffer_release = _bind_native_function(library, "nnrp_buffer_release", _NnrpFfiStatus, [_NnrpHandle])
+        self.cache_query = _bind_native_function(
+            library,
+            "nnrp_cache_query",
+            _NnrpFfiStatus,
+            [_NnrpCacheLeaseRequest, ctypes.POINTER(_NnrpCacheLeaseResult)],
+        )
+        self.cache_touch = _bind_native_function(
+            library,
+            "nnrp_cache_touch",
+            _NnrpFfiStatus,
+            [_NnrpCacheLeaseRequest, ctypes.POINTER(_NnrpCacheLeaseResult)],
+        )
+        self.cache_prefetch = _bind_native_function(
+            library,
+            "nnrp_cache_prefetch",
+            _NnrpFfiStatus,
+            [
+                _NnrpHandle,
+                ctypes.POINTER(_NnrpCacheObjectId),
+                ctypes.c_size_t,
+                ctypes.c_uint64,
+                ctypes.c_uint32,
+                ctypes.POINTER(_NnrpCacheLeaseResult),
+            ],
+        )
+        self.cache_release = _bind_native_function(
+            library,
+            "nnrp_cache_release",
+            _NnrpFfiStatus,
+            [_NnrpHandle, ctypes.POINTER(_NnrpCacheLeaseResult)],
         )
         self.poll_empty = _bind_native_function(
             library, "nnrp_poll_empty", _NnrpFfiStatus, [ctypes.POINTER(_NnrpPollResult)]
@@ -796,6 +970,122 @@ class NativeSchemaCodec:
             schema_pointer = ctypes.cast(schema_array, ctypes.POINTER(_NnrpSchemaDescriptorHeader))
         status = self.entrypoints.typed_payload_validate_binding(schema_pointer, schema_count, ffi_descriptor)
         raise_for_native_status(status)
+
+
+@dataclass
+class NativeSchemaRegistry:
+    entrypoints: NativeRuntimeEntrypoints
+    handle: NativeSchemaRegistryHandle
+    _released: bool = field(default=False, init=False, repr=False, compare=False)
+
+    @classmethod
+    def create(cls, entrypoints: NativeRuntimeEntrypoints) -> NativeSchemaRegistry:
+        out_registry = _NnrpHandle()
+        status = entrypoints.schema_registry_create(ctypes.byref(out_registry))
+        raise_for_native_status(status)
+        return cls(entrypoints, NativeSchemaRegistryHandle.from_ffi(out_registry))
+
+    def install(self, descriptor: Any) -> Any:
+        self._ensure_open()
+        out_action = ctypes.c_uint32()
+        status = self.entrypoints.schema_registry_install(
+            self.handle.to_ffi(),
+            _schema_descriptor_to_ffi(descriptor),
+            ctypes.byref(out_action),
+        )
+        raise_for_native_status(status)
+        return _schema_registry_action_from_ffi(int(out_action.value))
+
+    def lookup(self, schema_id: int, schema_version: int) -> Any:
+        self._ensure_open()
+        _validate_u32("schema_id", schema_id)
+        _validate_u32("schema_version", schema_version)
+        out_descriptor = _NnrpSchemaDescriptorHeader()
+        status = self.entrypoints.schema_registry_lookup(
+            self.handle.to_ffi(),
+            schema_id,
+            schema_version,
+            ctypes.byref(out_descriptor),
+        )
+        raise_for_native_status(status)
+        return _schema_descriptor_from_ffi(out_descriptor)
+
+    def invalidate(self, schema_id: int, schema_version: int) -> Any:
+        self._ensure_open()
+        _validate_u32("schema_id", schema_id)
+        _validate_u32("schema_version", schema_version)
+        out_action = ctypes.c_uint32()
+        status = self.entrypoints.schema_registry_invalidate(
+            self.handle.to_ffi(),
+            schema_id,
+            schema_version,
+            ctypes.byref(out_action),
+        )
+        raise_for_native_status(status)
+        return _schema_registry_action_from_ffi(int(out_action.value))
+
+    def validate_typed_payload_binding(self, descriptor: Any) -> None:
+        self._ensure_open()
+        status = self.entrypoints.schema_registry_validate_binding(
+            self.handle.to_ffi(),
+            _typed_payload_descriptor_to_ffi(descriptor),
+        )
+        raise_for_native_status(status)
+
+    def close(self) -> None:
+        self._ensure_open()
+        status = self.entrypoints.schema_registry_release(self.handle.to_ffi())
+        raise_for_native_status(status)
+        self._released = True
+
+    def _ensure_open(self) -> None:
+        if self._released:
+            raise NativeInvalidStateError(NativeStatus(FFI_STATUS_INVALID_STATE), "native schema registry is released")
+
+
+@dataclass
+class NativeOwnedBuffer:
+    entrypoints: NativeRuntimeEntrypoints
+    handle: NativeBufferHandle
+    view: NativeBufferView
+    _released: bool = field(default=False, init=False, repr=False, compare=False)
+
+    @classmethod
+    def acquire_copy(
+        cls, entrypoints: NativeRuntimeEntrypoints, payload: bytes | bytearray | memoryview
+    ) -> NativeOwnedBuffer:
+        source, _owner = _buffer_view_from_payload(payload)
+        out_buffer = _NnrpHandle()
+        out_view = _NnrpBufferView()
+        status = entrypoints.buffer_acquire_copy(source, ctypes.byref(out_buffer), ctypes.byref(out_view))
+        raise_for_native_status(status)
+        return cls(entrypoints, NativeBufferHandle.from_ffi(out_buffer), NativeBufferView.from_ffi(out_view))
+
+    def refresh_view(self) -> NativeBufferView:
+        self._ensure_open()
+        out_view = _NnrpBufferView()
+        status = self.entrypoints.buffer_view(self.handle.to_ffi(), ctypes.byref(out_view))
+        raise_for_native_status(status)
+        view = NativeBufferView.from_ffi(out_view)
+        self.view = view
+        return view
+
+    def to_bytes(self) -> bytes:
+        self._ensure_open()
+        out_view = _NnrpBufferView()
+        status = self.entrypoints.buffer_view(self.handle.to_ffi(), ctypes.byref(out_view))
+        raise_for_native_status(status)
+        return _copy_buffer_view(out_view)
+
+    def close(self) -> None:
+        self._ensure_open()
+        status = self.entrypoints.buffer_release(self.handle.to_ffi())
+        raise_for_native_status(status)
+        self._released = True
+
+    def _ensure_open(self) -> None:
+        if self._released:
+            raise NativeInvalidStateError(NativeStatus(FFI_STATUS_INVALID_STATE), "native buffer is released")
 
 
 @dataclass(frozen=True)
@@ -1160,11 +1450,111 @@ class NativeRuntimeOperation:
         status = self.entrypoints.client_cancel(request)
         raise_for_native_status(status)
 
+    def cache_backend(self, *, now_ms: int = 0, ttl_ms: int = 0, expected_version: int = 0) -> NativeCacheLeaseBackend:
+        return NativeCacheLeaseBackend(
+            self.entrypoints,
+            self.handle.handle,
+            now_ms=now_ms,
+            ttl_ms=ttl_ms,
+            expected_version=expected_version,
+        )
+
+
+@dataclass
+class NativeCacheLeaseBackend:
+    entrypoints: NativeRuntimeEntrypoints
+    owner: NativeHandle
+    now_ms: int = 0
+    ttl_ms: int = 0
+    expected_version: int = 0
+    _lease_handles: dict[tuple[int, int, int, int], NativeCacheLeaseHandle] = field(
+        default_factory=dict,
+        init=False,
+        repr=False,
+        compare=False,
+    )
+
+    def __post_init__(self) -> None:
+        _validate_u64("now_ms", self.now_ms)
+        _validate_u32("ttl_ms", self.ttl_ms)
+        _validate_u64("expected_version", self.expected_version)
+
+    def query_cache(self, identity: Any) -> Any:
+        request = self._request(identity, ttl_ms=0)
+        result = _NnrpCacheLeaseResult()
+        status = self.entrypoints.cache_query(request, ctypes.byref(result))
+        return self._finish_cache_status(status, result)
+
+    def touch_cache(self, identity: Any, *, ttl_ms: int | None = None) -> Any:
+        selected_ttl_ms = self.ttl_ms if ttl_ms is None else ttl_ms
+        _validate_u32("ttl_ms", selected_ttl_ms)
+        request = self._request(identity, ttl_ms=selected_ttl_ms)
+        result = _NnrpCacheLeaseResult()
+        status = self.entrypoints.cache_touch(request, ctypes.byref(result))
+        return self._finish_cache_status(status, result)
+
+    def prefetch_cache(self, identities: tuple[Any, ...]) -> tuple[Any, ...]:
+        object_count = len(identities)
+        if object_count == 0:
+            return ()
+        object_array = (_NnrpCacheObjectId * object_count)(
+            *(_cache_identity_to_ffi(identity) for identity in identities)
+        )
+        result_array = (_NnrpCacheLeaseResult * object_count)()
+        status = self.entrypoints.cache_prefetch(
+            self.owner.to_ffi(),
+            ctypes.cast(object_array, ctypes.POINTER(_NnrpCacheObjectId)),
+            object_count,
+            self.now_ms,
+            self.ttl_ms,
+            ctypes.cast(result_array, ctypes.POINTER(_NnrpCacheLeaseResult)),
+        )
+        raise_for_native_status(status)
+        return tuple(self._cache_result_from_ffi(result_array[index]) for index in range(object_count))
+
+    def release_cache(self, identity: Any) -> Any:
+        key = _cache_identity_key(identity)
+        lease = self._lease_handles.get(key)
+        if lease is None:
+            from nnrp.cache import CacheLeaseOutcome, CacheLeaseResult
+
+            return CacheLeaseResult(identity=identity, outcome=CacheLeaseOutcome.MISSING)
+        result = _NnrpCacheLeaseResult()
+        status = self.entrypoints.cache_release(lease.to_ffi(), ctypes.byref(result))
+        converted = self._finish_cache_status(status, result)
+        self._lease_handles.pop(key, None)
+        return converted
+
+    def _request(self, identity: Any, *, ttl_ms: int) -> _NnrpCacheLeaseRequest:
+        return _NnrpCacheLeaseRequest(
+            self.owner.to_ffi(),
+            _cache_identity_to_ffi(identity),
+            self.expected_version,
+            self.now_ms,
+            ttl_ms,
+        )
+
+    def _finish_cache_status(self, status: _NnrpFfiStatus, result: _NnrpCacheLeaseResult) -> Any:
+        try:
+            raise_for_native_status(status)
+        except NativeProtocolError:
+            if result.outcome_code in {CACHE_LEASE_OUTCOME_MISS, CACHE_LEASE_OUTCOME_EXPIRED}:
+                return self._cache_result_from_ffi(result)
+            raise
+        return self._cache_result_from_ffi(result)
+
+    def _cache_result_from_ffi(self, result: _NnrpCacheLeaseResult) -> Any:
+        converted = _cache_lease_result_from_ffi(result, owner_session_id=self.owner.id)
+        if result.lease_handle.kind == HANDLE_KIND_CACHE_LEASE:
+            self._lease_handles[_cache_identity_key(converted.identity)] = NativeCacheLeaseHandle.from_ffi(
+                result.lease_handle
+            )
+        return converted
+
 
 @runtime_checkable
 class NativeRuntimeBackend(Protocol):
-    def connect(self, *, connection_id: int, generation: int, transport_id: int) -> NativeRuntimeConnection:
-        ...
+    def connect(self, *, connection_id: int, generation: int, transport_id: int) -> NativeRuntimeConnection: ...
 
     def bootstrap_connection(
         self,
@@ -1172,8 +1562,7 @@ class NativeRuntimeBackend(Protocol):
         connection_id: int,
         generation: int,
         transport_id: int,
-    ) -> NativeRuntimeConnection:
-        ...
+    ) -> NativeRuntimeConnection: ...
 
 
 @dataclass(frozen=True)
@@ -1235,6 +1624,59 @@ class NativeRuntimeConnection:
             self.handle,
             NativeSessionHandle.from_ffi(out_session),
             selected_priority_class,
+        )
+
+    def resume_session(
+        self,
+        *,
+        requested_session_id: int,
+        generation: int,
+        profile_id: int,
+        schema_id: int,
+        schema_version: int,
+        resume_token_bytes: int,
+        priority_class: NativeSessionPriorityClass | str = NativeSessionPriorityClass.BALANCED,
+    ) -> tuple[NativeRuntimeSession, NativeSessionRecoveryOutcome]:
+        self._ensure_open()
+        selected_priority_class = NativeSessionPriorityClass(priority_class)
+        request = _NnrpSessionResumeRequest(
+            self.handle.to_ffi(),
+            requested_session_id,
+            generation,
+            profile_id,
+            schema_id,
+            schema_version,
+            resume_token_bytes,
+        )
+        out_session = _NnrpHandle()
+        out_outcome = _NnrpSessionRecoveryOutcome()
+        status = self.entrypoints.client_resume_session(request, ctypes.byref(out_session), ctypes.byref(out_outcome))
+        raise_for_native_status(status)
+        return (
+            NativeRuntimeSession(
+                self.entrypoints,
+                self.handle,
+                NativeSessionHandle.from_ffi(out_session),
+                selected_priority_class,
+            ),
+            NativeSessionRecoveryOutcome.from_ffi(out_outcome),
+        )
+
+    def schema_registry(self) -> NativeSchemaRegistry:
+        self._ensure_open()
+        return NativeSchemaRegistry.create(self.entrypoints)
+
+    def acquire_buffer_copy(self, payload: bytes | bytearray | memoryview) -> NativeOwnedBuffer:
+        self._ensure_open()
+        return NativeOwnedBuffer.acquire_copy(self.entrypoints, payload)
+
+    def cache_backend(self, *, now_ms: int = 0, ttl_ms: int = 0, expected_version: int = 0) -> NativeCacheLeaseBackend:
+        return NativeCacheLeaseBackend(
+            self.entrypoints,
+            self.handle.handle,
+            now_ms=now_ms,
+            ttl_ms=ttl_ms,
+            expected_version=expected_version,
         )
 
     def await_event(self) -> NativeRuntimePollResult:
@@ -1448,9 +1890,7 @@ class NativeRuntimeConnection:
 
     def _ensure_open(self) -> None:
         if self._closed:
-            raise NativeInvalidStateError(
-                NativeStatus(FFI_STATUS_INVALID_STATE), "native runtime connection is closed"
-            )
+            raise NativeInvalidStateError(NativeStatus(FFI_STATUS_INVALID_STATE), "native runtime connection is closed")
 
 
 @dataclass(frozen=True)
@@ -1501,6 +1941,16 @@ class NativeRuntimeSession:
             scheduling_hint=selected_scheduling_hint,
             parent_operation_id=selected_scheduling_hint.parent_operation_id,
             operation_group_id=selected_scheduling_hint.operation_group_id,
+        )
+
+    def cache_backend(self, *, now_ms: int = 0, ttl_ms: int = 0, expected_version: int = 0) -> NativeCacheLeaseBackend:
+        self._ensure_open()
+        return NativeCacheLeaseBackend(
+            self.entrypoints,
+            self.handle.handle,
+            now_ms=now_ms,
+            ttl_ms=ttl_ms,
+            expected_version=expected_version,
         )
 
     async def async_submit_operation(
@@ -1993,6 +2443,67 @@ def _typed_payload_descriptor_to_ffi(descriptor: Any) -> _NnrpTypedPayloadDescri
     )
 
 
+def _schema_registry_action_from_ffi(action_code: int) -> Any:
+    from nnrp.schema import SchemaRegistryAction
+
+    mapping = {
+        SCHEMA_REGISTRY_ACTION_INSTALLED: SchemaRegistryAction.INSTALLED,
+        SCHEMA_REGISTRY_ACTION_ALREADY_INSTALLED: SchemaRegistryAction.ALREADY_INSTALLED,
+        SCHEMA_REGISTRY_ACTION_UPDATED: SchemaRegistryAction.UPDATED,
+        SCHEMA_REGISTRY_ACTION_INVALIDATED: SchemaRegistryAction.INVALIDATED,
+    }
+    try:
+        return mapping[action_code]
+    except KeyError as error:
+        raise NativeHandleError(f"unknown native schema registry action {action_code}") from error
+
+
+def _cache_identity_to_ffi(identity: Any) -> _NnrpCacheObjectId:
+    return _NnrpCacheObjectId(
+        int(identity.namespace),
+        int(identity.key_hi),
+        int(identity.key_lo),
+        int(identity.object_kind),
+    )
+
+
+def _cache_identity_key(identity: Any) -> tuple[int, int, int, int]:
+    return (int(identity.namespace), int(identity.key_hi), int(identity.key_lo), int(identity.object_kind))
+
+
+def _cache_identity_from_ffi(object_id: _NnrpCacheObjectId) -> Any:
+    from nnrp.cache import CacheObjectIdentity
+
+    return CacheObjectIdentity(
+        namespace=int(object_id.cache_namespace),
+        object_kind=int(object_id.object_kind),
+        key_hi=int(object_id.cache_key_hi),
+        key_lo=int(object_id.cache_key_lo),
+    )
+
+
+def _cache_lease_result_from_ffi(result: _NnrpCacheLeaseResult, *, owner_session_id: int) -> Any:
+    from nnrp.cache import CacheLeaseDescriptor, CacheLeaseResult, CacheObjectVersion
+
+    identity = _cache_identity_from_ffi(result.object_id)
+    outcome = _CACHE_LEASE_OUTCOME_BY_CODE.get(int(result.outcome_code))
+    if outcome is None:
+        raise NativeHandleError(f"unknown native cache lease outcome {int(result.outcome_code)}")
+
+    lease = None
+    object_version = None
+    if result.lease_id != 0 or result.expires_at_ms != 0:
+        lease = CacheLeaseDescriptor(
+            identity=identity,
+            owner_session_id=int(owner_session_id),
+            lease_epoch=int(result.lease_id),
+            expires_at_ms=int(result.expires_at_ms),
+        )
+    if result.object_version != 0:
+        object_version = CacheObjectVersion(identity=identity, object_version=int(result.object_version))
+    return CacheLeaseResult(identity=identity, outcome=outcome, lease=lease, object_version=object_version)
+
+
 def _coerce_operation_scheduling_hint(
     scheduling_hint: NativeOperationSchedulingHint | None,
     *,
@@ -2073,6 +2584,7 @@ _EVENT_KIND_NAMES = {
     EVENT_KIND_FLOW_UPDATED: "flow_updated",
     EVENT_KIND_CONTROL: "control",
     EVENT_KIND_ERROR: "error",
+    EVENT_KIND_RESULT_HINT: "result_hint",
 }
 
 _PAYLOAD_FAMILY_NAMES = {"structured_event", "tool_delta", "workflow_state"}
@@ -2093,3 +2605,17 @@ _SESSION_RECOVERY_OUTCOME_NAMES = {
     SESSION_RECOVERY_OUTCOME_RESUMED: "resumed",
     SESSION_RECOVERY_OUTCOME_RESUME_REJECTED: "resume_rejected",
 }
+
+
+def _cache_lease_outcomes() -> dict[int, Any]:
+    from nnrp.cache import CacheLeaseOutcome
+
+    return {
+        CACHE_LEASE_OUTCOME_VALID: CacheLeaseOutcome.VALID,
+        CACHE_LEASE_OUTCOME_MISS: CacheLeaseOutcome.MISSING,
+        CACHE_LEASE_OUTCOME_EXPIRED: CacheLeaseOutcome.EXPIRED,
+        CACHE_LEASE_OUTCOME_RELEASED: CacheLeaseOutcome.RELEASED,
+    }
+
+
+_CACHE_LEASE_OUTCOME_BY_CODE = _cache_lease_outcomes()

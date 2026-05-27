@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 
+from nnrp.cache import CacheLeaseOutcome, CacheObjectIdentity
 from nnrp.core.messages.control import SessionMigrateAckMetadata
 from nnrp.native import (
     DEFAULT_ARTIFACT_ROOT_ENV,
@@ -24,9 +25,11 @@ from nnrp.native import (
     FFI_STATUS_PROTOCOL_ERROR,
     FFI_STATUS_WOULD_BLOCK,
     HANDLE_KIND_BUFFER,
+    HANDLE_KIND_CACHE_LEASE,
     HANDLE_KIND_CONNECTION,
     HANDLE_KIND_EVENT_PUMP,
     HANDLE_KIND_OPERATION,
+    HANDLE_KIND_SCHEMA_REGISTRY,
     HANDLE_KIND_SESSION,
     REQUIRED_RUNTIME_FEATURES,
     SESSION_RECOVERY_OUTCOME_RESUME_ENABLED,
@@ -35,6 +38,8 @@ from nnrp.native import (
     NativeArtifactError,
     NativeBufferHandle,
     NativeBufferView,
+    NativeCacheLeaseBackend,
+    NativeCacheLeaseHandle,
     NativeCallbackRejectedError,
     NativeConnectionHandle,
     NativeCreditUpdateEvent,
@@ -64,6 +69,8 @@ from nnrp.native import (
     NativeRuntimeResult,
     NativeRuntimeSession,
     NativeSchemaCodec,
+    NativeSchemaRegistry,
+    NativeSchemaRegistryHandle,
     NativeSessionHandle,
     NativeSessionPriorityClass,
     NativeSessionRecoveryOutcome,
@@ -72,6 +79,9 @@ from nnrp.native import (
     NativeWouldBlockError,
     _NnrpBufferView,
     _NnrpBufferViewMut,
+    _NnrpCacheLeaseRequest,
+    _NnrpCacheLeaseResult,
+    _NnrpCacheObjectId,
     _NnrpCallbackSink,
     _NnrpClientCancelRequest,
     _NnrpClientConnectRequest,
@@ -91,6 +101,7 @@ from nnrp.native import (
     _NnrpServerSendResultRequest,
     _NnrpSessionOpenRequest,
     _NnrpSessionRecoveryOutcome,
+    _NnrpSessionResumeRequest,
     _NnrpSubmitRequest,
     _NnrpTypedPayloadDescriptor,
     _normalize_arch,
@@ -110,6 +121,7 @@ from nnrp.native import (
 from nnrp.schema import (
     Preview3TypedPayloadDescriptor,
     SchemaDescriptorHeader,
+    SchemaRegistryAction,
     StandardProfile,
     StreamSemantics,
     TypedPayloadDescriptorFlags,
@@ -122,7 +134,7 @@ class FakeLibrary:
         self,
         *,
         abi_major: int = 1,
-        abi_minor: int = 1,
+        abi_minor: int = 2,
         abi_patch: int = 0,
         protocol_major: int = 1,
         wire_format: int = 0,
@@ -196,6 +208,7 @@ class FakeRuntimeLibrary(FakeEntrypointLibrary):
         self.nnrp_client_connect.handler = self._client_connect
         self.nnrp_connection_bootstrap.handler = self._connection_bootstrap
         self.nnrp_client_open_session.handler = self._open_session
+        self.nnrp_client_resume_session.handler = self._resume_session
         self.nnrp_client_submit.handler = self._submit
         self.nnrp_client_close.handler = self._close
         self.nnrp_client_close_connection.handler = self._close_connection
@@ -209,10 +222,26 @@ class FakeRuntimeLibrary(FakeEntrypointLibrary):
         self.nnrp_typed_payload_descriptor_parse.handler = self._typed_payload_descriptor_parse
         self.nnrp_typed_payload_descriptor_write.handler = self._typed_payload_descriptor_write
         self.nnrp_typed_payload_validate_binding.handler = self._typed_payload_validate_binding
+        self.nnrp_schema_registry_create.handler = self._schema_registry_create
+        self.nnrp_schema_registry_install.handler = self._schema_registry_install
+        self.nnrp_schema_registry_lookup.handler = self._schema_registry_lookup
+        self.nnrp_schema_registry_invalidate.handler = self._schema_registry_invalidate
+        self.nnrp_schema_registry_validate_binding.handler = self._schema_registry_validate_binding
+        self.nnrp_schema_registry_release.handler = self._schema_registry_release
         self.nnrp_session_recovery_request_validate.handler = self._session_recovery_request_validate
         self.nnrp_session_recovery_ack_validate.handler = self._session_recovery_ack_validate
         self.nnrp_migration_recovery_validate.handler = self._migration_recovery_validate
         self.nnrp_migration_should_replay_frame.handler = self._migration_should_replay_frame
+        self.nnrp_buffer_acquire_copy.handler = self._buffer_acquire_copy
+        self.nnrp_buffer_view.handler = self._buffer_view
+        self.nnrp_buffer_release.handler = self._buffer_release
+        self.nnrp_cache_query.handler = self._cache_query
+        self.nnrp_cache_touch.handler = self._cache_touch
+        self.nnrp_cache_prefetch.handler = self._cache_prefetch
+        self.nnrp_cache_release.handler = self._cache_release
+        self._schema_registry: dict[tuple[int, int], SchemaDescriptorHeader] = {}
+        self._buffers: dict[int, ctypes.Array[ctypes.c_char]] = {}
+        self._cache_leases: dict[tuple[int, int, int, int], _NnrpHandle] = {}
 
     def _client_connect(self, request: _NnrpClientConnectRequest, out_handle: object) -> _NnrpFfiStatus:
         _write_handle(out_handle, _NnrpHandle(HANDLE_KIND_CONNECTION, request.connection_id, request.generation, 0))
@@ -226,6 +255,20 @@ class FakeRuntimeLibrary(FakeEntrypointLibrary):
         _write_handle(out_handle, _NnrpHandle(HANDLE_KIND_SESSION, request.requested_session_id, request.generation, 0))
         return self.status
 
+    def _resume_session(
+        self,
+        request: _NnrpSessionResumeRequest,
+        out_handle: object,
+        out_outcome: object,
+    ) -> _NnrpFfiStatus:
+        _write_handle(out_handle, _NnrpHandle(HANDLE_KIND_SESSION, request.requested_session_id, request.generation, 0))
+        target = getattr(out_outcome, "_obj", None)
+        if target is None:
+            target = ctypes.cast(out_outcome, ctypes.POINTER(_NnrpSessionRecoveryOutcome)).contents
+        target.outcome_code = SESSION_RECOVERY_OUTCOME_RESUMED
+        target.resume_window_ms = request.resume_token_bytes * 10
+        return self.status
+
     def _submit(self, request: _NnrpSubmitRequest, out_handle: object) -> _NnrpFfiStatus:
         _write_handle(out_handle, _NnrpHandle(HANDLE_KIND_OPERATION, request.operation_id, 1, 0))
         return self.status
@@ -235,9 +278,7 @@ class FakeRuntimeLibrary(FakeEntrypointLibrary):
 
     def _close_connection(self, handle: _NnrpHandle) -> _NnrpFfiStatus:
         return (
-            self.status
-            if handle.kind == HANDLE_KIND_CONNECTION
-            else _NnrpFfiStatus(FFI_STATUS_INVALID_HANDLE, 0, 0, 0)
+            self.status if handle.kind == HANDLE_KIND_CONNECTION else _NnrpFfiStatus(FFI_STATUS_INVALID_HANDLE, 0, 0, 0)
         )
 
     def _cancel(self, request: _NnrpClientCancelRequest) -> _NnrpFfiStatus:
@@ -302,6 +343,181 @@ class FakeRuntimeLibrary(FakeEntrypointLibrary):
             if schema.schema_id == typed.schema_id and schema.schema_version == typed.schema_version:
                 return self.status
         return _NnrpFfiStatus(FFI_STATUS_PROTOCOL_ERROR, ERROR_FAMILY_SCHEMA, 0x3001, 0x41)
+
+    def _schema_registry_create(self, out_handle: object) -> _NnrpFfiStatus:
+        _write_handle(out_handle, _NnrpHandle(HANDLE_KIND_SCHEMA_REGISTRY, 700, 1, 0))
+        token = token_delta_schema_descriptor()
+        self._schema_registry = {(token.schema_id, token.schema_version): token}
+        return self.status
+
+    def _schema_registry_install(
+        self,
+        registry: _NnrpHandle,
+        descriptor: _NnrpSchemaDescriptorHeader,
+        out_action: object,
+    ) -> _NnrpFfiStatus:
+        if registry.kind != HANDLE_KIND_SCHEMA_REGISTRY:
+            return _NnrpFfiStatus(FFI_STATUS_INVALID_HANDLE, 0, 0, 0)
+        schema = _schema_descriptor_from_ffi(descriptor)
+        key = (schema.schema_id, schema.schema_version)
+        action = 1 if self._schema_registry.get(key) == schema else 0
+        self._schema_registry[key] = schema
+        target = getattr(out_action, "_obj", None)
+        if target is None:
+            target = ctypes.cast(out_action, ctypes.POINTER(ctypes.c_uint32)).contents
+        target.value = action
+        return self.status
+
+    def _schema_registry_lookup(
+        self,
+        registry: _NnrpHandle,
+        schema_id: int,
+        schema_version: int,
+        out_descriptor: object,
+    ) -> _NnrpFfiStatus:
+        if registry.kind != HANDLE_KIND_SCHEMA_REGISTRY:
+            return _NnrpFfiStatus(FFI_STATUS_INVALID_HANDLE, 0, 0, 0)
+        descriptor = self._schema_registry.get((schema_id, schema_version))
+        if descriptor is None:
+            return _NnrpFfiStatus(FFI_STATUS_PROTOCOL_ERROR, ERROR_FAMILY_SCHEMA, 0x3001, 0)
+        _write_schema_descriptor(out_descriptor, descriptor)
+        return self.status
+
+    def _schema_registry_invalidate(
+        self,
+        registry: _NnrpHandle,
+        schema_id: int,
+        schema_version: int,
+        out_action: object,
+    ) -> _NnrpFfiStatus:
+        if registry.kind != HANDLE_KIND_SCHEMA_REGISTRY:
+            return _NnrpFfiStatus(FFI_STATUS_INVALID_HANDLE, 0, 0, 0)
+        self._schema_registry.pop((schema_id, schema_version), None)
+        target = getattr(out_action, "_obj", None)
+        if target is None:
+            target = ctypes.cast(out_action, ctypes.POINTER(ctypes.c_uint32)).contents
+        target.value = 3
+        return self.status
+
+    def _schema_registry_validate_binding(
+        self,
+        registry: _NnrpHandle,
+        descriptor: _NnrpTypedPayloadDescriptor,
+    ) -> _NnrpFfiStatus:
+        if registry.kind != HANDLE_KIND_SCHEMA_REGISTRY:
+            return _NnrpFfiStatus(FFI_STATUS_INVALID_HANDLE, 0, 0, 0)
+        typed = _typed_payload_descriptor_from_ffi(descriptor)
+        if (typed.schema_id, typed.schema_version) not in self._schema_registry:
+            return _NnrpFfiStatus(FFI_STATUS_PROTOCOL_ERROR, ERROR_FAMILY_SCHEMA, 0x3001, 0)
+        return self.status
+
+    def _schema_registry_release(self, registry: _NnrpHandle) -> _NnrpFfiStatus:
+        return (
+            self.status
+            if registry.kind == HANDLE_KIND_SCHEMA_REGISTRY
+            else _NnrpFfiStatus(FFI_STATUS_INVALID_HANDLE, 0, 0, 0)
+        )
+
+    def _buffer_acquire_copy(
+        self,
+        source: _NnrpBufferView,
+        out_buffer: object,
+        out_view: object,
+    ) -> _NnrpFfiStatus:
+        payload = _read_buffer_view(source)
+        buffer_id = len(self._buffers) + 900
+        owner = ctypes.create_string_buffer(payload, len(payload))
+        self._buffers[buffer_id] = owner
+        _write_handle(out_buffer, _NnrpHandle(HANDLE_KIND_BUFFER, buffer_id, 1, 0))
+        _write_buffer_view(out_view, owner)
+        return self.status
+
+    def _buffer_view(self, buffer: _NnrpHandle, out_view: object) -> _NnrpFfiStatus:
+        owner = self._buffers.get(buffer.id)
+        if buffer.kind != HANDLE_KIND_BUFFER or owner is None:
+            return _NnrpFfiStatus(FFI_STATUS_INVALID_HANDLE, 0, 0, 0)
+        _write_buffer_view(out_view, owner)
+        return self.status
+
+    def _buffer_release(self, buffer: _NnrpHandle) -> _NnrpFfiStatus:
+        if buffer.kind != HANDLE_KIND_BUFFER:
+            return _NnrpFfiStatus(FFI_STATUS_INVALID_HANDLE, 0, 0, 0)
+        self._buffers.pop(buffer.id, None)
+        return self.status
+
+    def _cache_query(self, request: _NnrpCacheLeaseRequest, out_result: object) -> _NnrpFfiStatus:
+        return self._write_cache_result(request, out_result, outcome=0)
+
+    def _cache_touch(self, request: _NnrpCacheLeaseRequest, out_result: object) -> _NnrpFfiStatus:
+        return self._write_cache_result(request, out_result, outcome=0)
+
+    def _cache_prefetch(
+        self,
+        owner: _NnrpHandle,
+        objects: object,
+        object_count: int,
+        now_ms: int,
+        ttl_ms: int,
+        out_results: object,
+    ) -> _NnrpFfiStatus:
+        object_items = ctypes.cast(objects, ctypes.POINTER(_NnrpCacheObjectId))
+        result_items = ctypes.cast(out_results, ctypes.POINTER(_NnrpCacheLeaseResult))
+        for index in range(object_count):
+            request = _NnrpCacheLeaseRequest(owner, object_items[index], 1, now_ms, ttl_ms)
+            self._populate_cache_result(result_items[index], request, outcome=0)
+        return self.status
+
+    def _cache_release(self, lease_handle: _NnrpHandle, out_result: object) -> _NnrpFfiStatus:
+        if lease_handle.kind != HANDLE_KIND_CACHE_LEASE:
+            return _NnrpFfiStatus(FFI_STATUS_INVALID_HANDLE, 0, 0, 0)
+        for key, handle in list(self._cache_leases.items()):
+            if handle.id == lease_handle.id:
+                namespace, key_hi, key_lo, object_kind = key
+                result = _cache_result_target(out_result)
+                result.outcome_code = 3
+                result.lease_handle = lease_handle
+                result.object_id = _NnrpCacheObjectId(namespace, key_hi, key_lo, object_kind)
+                result.object_version = 1
+                result.lease_id = lease_handle.id
+                result.expires_at_ms = 0
+                self._cache_leases.pop(key, None)
+                return self.status
+        return _NnrpFfiStatus(FFI_STATUS_INVALID_HANDLE, 0, 0, 0)
+
+    def _write_cache_result(
+        self,
+        request: _NnrpCacheLeaseRequest,
+        out_result: object,
+        *,
+        outcome: int,
+    ) -> _NnrpFfiStatus:
+        result = _cache_result_target(out_result)
+        self._populate_cache_result(result, request, outcome=outcome)
+        return self.status
+
+    def _populate_cache_result(
+        self,
+        result: _NnrpCacheLeaseResult,
+        request: _NnrpCacheLeaseRequest,
+        *,
+        outcome: int,
+    ) -> None:
+        key = (
+            request.object_id.cache_namespace,
+            request.object_id.cache_key_hi,
+            request.object_id.cache_key_lo,
+            request.object_id.object_kind,
+        )
+        lease = self._cache_leases.get(key)
+        if lease is None:
+            lease = _NnrpHandle(HANDLE_KIND_CACHE_LEASE, len(self._cache_leases) + 800, 1, 0)
+            self._cache_leases[key] = lease
+        result.outcome_code = outcome
+        result.lease_handle = lease
+        result.object_id = request.object_id
+        result.object_version = request.expected_version or 1
+        result.lease_id = lease.id
+        result.expires_at_ms = request.now_ms + (request.ttl_ms or 30_000)
 
     def _session_recovery_request_validate(self, session_open_metadata: _NnrpBufferView) -> _NnrpFfiStatus:
         if not _read_buffer_view(session_open_metadata):
@@ -419,6 +635,21 @@ def _read_buffer_view(view: _NnrpBufferView) -> bytes:
     return ctypes.string_at(view.ptr, view.len)
 
 
+def _write_buffer_view(out_view: object, owner: ctypes.Array[ctypes.c_char]) -> None:
+    target = getattr(out_view, "_obj", None)
+    if target is None:
+        target = ctypes.cast(out_view, ctypes.POINTER(_NnrpBufferView)).contents
+    target.ptr = ctypes.cast(owner, ctypes.c_void_p)
+    target.len = len(owner.raw)
+
+
+def _cache_result_target(out_result: object) -> _NnrpCacheLeaseResult:
+    target = getattr(out_result, "_obj", None)
+    if target is None:
+        target = ctypes.cast(out_result, ctypes.POINTER(_NnrpCacheLeaseResult)).contents
+    return target
+
+
 def _schema_descriptor_from_ffi(descriptor: _NnrpSchemaDescriptorHeader) -> SchemaDescriptorHeader:
     return SchemaDescriptorHeader(
         schema_id=descriptor.schema_id,
@@ -509,6 +740,7 @@ RUNTIME_ENTRYPOINT_SYMBOLS = [
     "nnrp_client_connect",
     "nnrp_session_open",
     "nnrp_client_open_session",
+    "nnrp_client_resume_session",
     "nnrp_submit",
     "nnrp_client_submit",
     "nnrp_session_close",
@@ -530,10 +762,23 @@ RUNTIME_ENTRYPOINT_SYMBOLS = [
     "nnrp_typed_payload_descriptor_parse",
     "nnrp_typed_payload_descriptor_write",
     "nnrp_typed_payload_validate_binding",
+    "nnrp_schema_registry_create",
+    "nnrp_schema_registry_install",
+    "nnrp_schema_registry_lookup",
+    "nnrp_schema_registry_invalidate",
+    "nnrp_schema_registry_validate_binding",
+    "nnrp_schema_registry_release",
     "nnrp_session_recovery_request_validate",
     "nnrp_session_recovery_ack_validate",
     "nnrp_migration_recovery_validate",
     "nnrp_migration_should_replay_frame",
+    "nnrp_buffer_acquire_copy",
+    "nnrp_buffer_view",
+    "nnrp_buffer_release",
+    "nnrp_cache_query",
+    "nnrp_cache_touch",
+    "nnrp_cache_prefetch",
+    "nnrp_cache_release",
     "nnrp_poll_empty",
     "nnrp_dispatch_event",
 ]
@@ -616,7 +861,7 @@ def test_probe_native_artifact_accepts_matching_protocol(tmp_path: Path) -> None
 
     assert result.artifact_path == artifact
     assert result.abi_major == 1
-    assert result.abi_minor == 1
+    assert result.abi_minor == 2
     assert result.abi_patch == 0
     assert result.protocol_major == 1
     assert result.protocol_wire_format == 0
@@ -771,6 +1016,61 @@ def test_native_schema_codec_preserves_schema_mismatch_status_fields(tmp_path: P
     assert mismatch.value.status.detail_code == 0x41
 
 
+def test_native_schema_registry_delegates_handle_lifecycle_and_binding_validation(tmp_path: Path) -> None:
+    artifact = tmp_path / "nnrp_ffi.dll"
+    artifact.write_bytes(b"fake")
+    library = FakeRuntimeLibrary()
+    entrypoints = load_native_runtime(artifact, library=library)
+    registry = NativeSchemaRegistry.create(entrypoints)
+    schema = SchemaDescriptorHeader(
+        schema_id=0x1001,
+        schema_version=3,
+        profile_id=StandardProfile.TOKEN,
+        default_stream_semantics=StreamSemantics.APPEND,
+        schema_hash=0x1234,
+    )
+    descriptor = Preview3TypedPayloadDescriptor(
+        profile_id=StandardProfile.TOKEN,
+        descriptor_flags=TypedPayloadDescriptorFlags.PARTIAL,
+        schema_id=schema.schema_id,
+        schema_version=schema.schema_version,
+        stream_semantics=StreamSemantics.APPEND,
+        offset=0,
+        length=8,
+    )
+
+    assert isinstance(registry.handle, NativeSchemaRegistryHandle)
+    assert registry.install(schema) is SchemaRegistryAction.INSTALLED
+    assert registry.install(schema) is SchemaRegistryAction.ALREADY_INSTALLED
+    assert registry.lookup(schema.schema_id, schema.schema_version) == schema
+    registry.validate_typed_payload_binding(descriptor)
+    assert registry.invalidate(schema.schema_id, schema.schema_version) is SchemaRegistryAction.INVALIDATED
+
+    with pytest.raises(NativeProtocolError):
+        registry.lookup(schema.schema_id, schema.schema_version)
+
+    registry.close()
+    with pytest.raises(NativeInvalidStateError):
+        registry.install(schema)
+
+
+def test_native_owned_buffer_acquires_views_and_releases_handle(tmp_path: Path) -> None:
+    artifact = tmp_path / "nnrp_ffi.dll"
+    artifact.write_bytes(b"fake")
+    client = load_native_client(artifact, library=FakeRuntimeLibrary())
+    connection = client.connect(connection_id=11, generation=2, transport_id=TRANSPORT_SLOT_TCP)
+    buffer = connection.acquire_buffer_copy(b"native-copy")
+
+    assert isinstance(buffer.handle, NativeBufferHandle)
+    assert buffer.view.length == len(b"native-copy")
+    assert buffer.to_bytes() == b"native-copy"
+    assert buffer.refresh_view().length == len(b"native-copy")
+
+    buffer.close()
+    with pytest.raises(NativeInvalidStateError):
+        buffer.to_bytes()
+
+
 def test_native_recovery_codec_delegates_resume_and_migration_validation(tmp_path: Path) -> None:
     artifact = tmp_path / "nnrp_ffi.dll"
     artifact.write_bytes(b"fake")
@@ -911,6 +1211,78 @@ def test_native_runtime_client_runs_connection_session_submit_close_roundtrip(tm
     assert library.nnrp_control.calls[1][0].payload.len == len(b"session-control")
 
 
+def test_native_connection_resumes_session_through_executable_resume_abi(tmp_path: Path) -> None:
+    artifact = tmp_path / "nnrp_ffi.dll"
+    artifact.write_bytes(b"fake")
+    library = FakeRuntimeLibrary()
+    connection = load_native_client(artifact, library=library).connect(
+        connection_id=11,
+        generation=2,
+        transport_id=TRANSPORT_SLOT_TCP,
+    )
+
+    session, outcome = connection.resume_session(
+        requested_session_id=41,
+        generation=3,
+        profile_id=4,
+        schema_id=5,
+        schema_version=6,
+        resume_token_bytes=24,
+    )
+
+    assert isinstance(session, NativeRuntimeSession)
+    assert session.handle.handle.id == 41
+    assert outcome.outcome_code == SESSION_RECOVERY_OUTCOME_RESUMED
+    assert outcome.resume_window_ms == 240
+    resume_request = library.nnrp_client_resume_session.calls[0][0]
+    assert resume_request.connection.id == 11
+    assert resume_request.resume_token_bytes == 24
+
+
+def test_native_cache_backend_routes_lease_ops_through_ffi(tmp_path: Path) -> None:
+    artifact = tmp_path / "nnrp_ffi.dll"
+    artifact.write_bytes(b"fake")
+    library = FakeRuntimeLibrary()
+    session = (
+        load_native_client(artifact, library=library)
+        .connect(
+            connection_id=11,
+            generation=2,
+            transport_id=TRANSPORT_SLOT_TCP,
+        )
+        .open_session(
+            requested_session_id=41,
+            generation=3,
+            profile_id=4,
+            schema_id=5,
+            schema_version=6,
+        )
+    )
+    backend = session.cache_backend(now_ms=1000, ttl_ms=500, expected_version=9)
+    identity = CacheObjectIdentity(namespace=1, object_kind=2, key_hi=3, key_lo=4)
+
+    query = backend.query_cache(identity)
+    touch = backend.touch_cache(identity, ttl_ms=750)
+    prefetched = backend.prefetch_cache((identity,))
+    released = backend.release_cache(identity)
+    missing = backend.release_cache(identity)
+
+    assert isinstance(backend, NativeCacheLeaseBackend)
+    assert query.outcome is CacheLeaseOutcome.VALID
+    assert query.lease is not None
+    assert query.object_version is not None
+    assert query.object_version.object_version == 9
+    assert touch.lease is not None
+    assert prefetched[0].identity == identity
+    assert released.outcome is CacheLeaseOutcome.RELEASED
+    assert missing.outcome is CacheLeaseOutcome.MISSING
+    cache_request = library.nnrp_cache_query.calls[0][0]
+    assert cache_request.owner.id == 41
+    assert cache_request.object_id.cache_namespace == 1
+    assert cache_request.object_id.object_kind == 2
+    assert library.nnrp_cache_touch.calls[0][0].ttl_ms == 750
+
+
 def test_native_scheduling_models_validate_frozen_value_ranges() -> None:
     assert NativeSessionPriorityClass.from_code(0) is NativeSessionPriorityClass.INTERACTIVE
     assert NativeSessionPriorityClass.from_code(1) is NativeSessionPriorityClass.BALANCED
@@ -934,16 +1306,20 @@ def test_native_submit_rejects_conflicting_scheduling_hint_scope(tmp_path: Path)
     artifact = tmp_path / "nnrp_ffi.dll"
     artifact.write_bytes(b"fake")
     library = FakeRuntimeLibrary()
-    session = load_native_client(artifact, library=library).connect(
-        connection_id=11,
-        generation=2,
-        transport_id=TRANSPORT_SLOT_TCP,
-    ).open_session(
-        requested_session_id=41,
-        generation=3,
-        profile_id=4,
-        schema_id=5,
-        schema_version=6,
+    session = (
+        load_native_client(artifact, library=library)
+        .connect(
+            connection_id=11,
+            generation=2,
+            transport_id=TRANSPORT_SLOT_TCP,
+        )
+        .open_session(
+            requested_session_id=41,
+            generation=3,
+            profile_id=4,
+            schema_id=5,
+            schema_version=6,
+        )
     )
 
     with pytest.raises(NativeHandleError, match="parent_operation_id conflicts"):
@@ -1641,6 +2017,8 @@ def test_native_handle_requires_valid_kind_id_and_generation() -> None:
         (NativeOperationHandle, HANDLE_KIND_OPERATION),
         (NativeEventPumpHandle, HANDLE_KIND_EVENT_PUMP),
         (NativeBufferHandle, HANDLE_KIND_BUFFER),
+        (NativeSchemaRegistryHandle, HANDLE_KIND_SCHEMA_REGISTRY),
+        (NativeCacheLeaseHandle, HANDLE_KIND_CACHE_LEASE),
     ],
 )
 def test_typed_native_handles_accept_only_matching_kind(wrapper_type: type, kind: int) -> None:
@@ -1786,6 +2164,11 @@ def test_native_runtime_entrypoints_bind_frozen_symbol_table() -> None:
         _NnrpSessionOpenRequest,
         ctypes.POINTER(_NnrpHandle),
     ]
+    assert library.nnrp_client_resume_session.argtypes == [
+        _NnrpSessionResumeRequest,
+        ctypes.POINTER(_NnrpHandle),
+        ctypes.POINTER(_NnrpSessionRecoveryOutcome),
+    ]
     assert library.nnrp_submit.argtypes == [_NnrpSubmitRequest, ctypes.POINTER(_NnrpHandle)]
     assert library.nnrp_client_submit.argtypes == [_NnrpSubmitRequest, ctypes.POINTER(_NnrpHandle)]
     assert library.nnrp_session_close.argtypes == [_NnrpHandle]
@@ -1836,6 +2219,26 @@ def test_native_runtime_entrypoints_bind_frozen_symbol_table() -> None:
         ctypes.c_size_t,
         _NnrpTypedPayloadDescriptor,
     ]
+    assert library.nnrp_schema_registry_create.argtypes == [ctypes.POINTER(_NnrpHandle)]
+    assert library.nnrp_schema_registry_install.argtypes == [
+        _NnrpHandle,
+        _NnrpSchemaDescriptorHeader,
+        ctypes.POINTER(ctypes.c_uint32),
+    ]
+    assert library.nnrp_schema_registry_lookup.argtypes == [
+        _NnrpHandle,
+        ctypes.c_uint32,
+        ctypes.c_uint32,
+        ctypes.POINTER(_NnrpSchemaDescriptorHeader),
+    ]
+    assert library.nnrp_schema_registry_invalidate.argtypes == [
+        _NnrpHandle,
+        ctypes.c_uint32,
+        ctypes.c_uint32,
+        ctypes.POINTER(ctypes.c_uint32),
+    ]
+    assert library.nnrp_schema_registry_validate_binding.argtypes == [_NnrpHandle, _NnrpTypedPayloadDescriptor]
+    assert library.nnrp_schema_registry_release.argtypes == [_NnrpHandle]
     assert library.nnrp_session_recovery_request_validate.argtypes == [_NnrpBufferView]
     assert library.nnrp_session_recovery_ack_validate.argtypes == [
         _NnrpBufferView,
@@ -1848,6 +2251,24 @@ def test_native_runtime_entrypoints_bind_frozen_symbol_table() -> None:
         ctypes.c_uint64,
         ctypes.POINTER(ctypes.c_uint8),
     ]
+    assert library.nnrp_buffer_acquire_copy.argtypes == [
+        _NnrpBufferView,
+        ctypes.POINTER(_NnrpHandle),
+        ctypes.POINTER(_NnrpBufferView),
+    ]
+    assert library.nnrp_buffer_view.argtypes == [_NnrpHandle, ctypes.POINTER(_NnrpBufferView)]
+    assert library.nnrp_buffer_release.argtypes == [_NnrpHandle]
+    assert library.nnrp_cache_query.argtypes == [_NnrpCacheLeaseRequest, ctypes.POINTER(_NnrpCacheLeaseResult)]
+    assert library.nnrp_cache_touch.argtypes == [_NnrpCacheLeaseRequest, ctypes.POINTER(_NnrpCacheLeaseResult)]
+    assert library.nnrp_cache_prefetch.argtypes == [
+        _NnrpHandle,
+        ctypes.POINTER(_NnrpCacheObjectId),
+        ctypes.c_size_t,
+        ctypes.c_uint64,
+        ctypes.c_uint32,
+        ctypes.POINTER(_NnrpCacheLeaseResult),
+    ]
+    assert library.nnrp_cache_release.argtypes == [_NnrpHandle, ctypes.POINTER(_NnrpCacheLeaseResult)]
     assert library.nnrp_poll_empty.argtypes == [ctypes.POINTER(_NnrpPollResult)]
     assert library.nnrp_dispatch_event.argtypes == [_NnrpCallbackSink, ctypes.POINTER(_NnrpEvent)]
 

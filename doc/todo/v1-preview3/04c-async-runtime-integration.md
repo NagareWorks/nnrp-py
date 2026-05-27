@@ -5,7 +5,7 @@
 - [x] Keep backend selection behind an internal interface so tests can run against pure-Python fixtures and native artifacts.
 - [ ] Avoid per-frame Python object churn on the hot submit/result path; batch or borrow native buffers where the ABI allows it.
   - [ ] Measure object allocation count for native submit/result loop.
-  - [ ] Add batch poll helper once Rust exposes batched event polling.
+  - [x] Add batch poll helper once Rust exposes batched event polling.
   - [ ] Add borrowed result payload helper once Rust exposes stable borrowed views.
   - [ ] Add regression test that hot-path payloads are not copied more than the documented boundary.
 - [x] Define cancellation behavior when a Python task is cancelled while a native operation is active.

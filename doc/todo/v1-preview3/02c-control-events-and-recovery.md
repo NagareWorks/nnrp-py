@@ -9,9 +9,9 @@
 - [x] Keep Python event delivery aligned with Rust-native semantics rather than inventing a second Python session-pump contract.
 - [ ] Add resume/recovery helpers only after the recovery object boundary freezes upstream.
   - [ ] Add opaque recovery-token wrapper.
-  - [ ] Add resume-window wrapper.
+  - [x] Add resume-window wrapper.
   - [ ] Add connection/session resume helper once Rust exposes the operation.
-  - [ ] Add tests for invalid/expired recovery token diagnostics.
+  - [x] Add tests for invalid/expired recovery diagnostics.
 - [ ] Keep resume tokens and windows opaque Rust-owned data on the Python host surface.
   - [ ] Ensure token/window wrappers expose identity and diagnostic metadata only.
   - [ ] Add tests preventing Python-side token parsing.

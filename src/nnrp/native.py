@@ -28,6 +28,10 @@ RUNTIME_FEATURE_RECOVERY = 0x0000000000000040
 RUNTIME_FEATURE_TYPED_PAYLOAD = 0x0000000000000080
 RUNTIME_FEATURE_TRANSPORT_SLOTS = 0x0000000000000100
 RUNTIME_FEATURE_BATCH_POLLING = 0x0000000000000200
+SESSION_RECOVERY_OUTCOME_FRESH = 0
+SESSION_RECOVERY_OUTCOME_RESUME_ENABLED = 1
+SESSION_RECOVERY_OUTCOME_RESUMED = 2
+SESSION_RECOVERY_OUTCOME_RESUME_REJECTED = 3
 REQUIRED_RUNTIME_FEATURES = (
     RUNTIME_FEATURE_PROTOCOL_CORE
     | RUNTIME_FEATURE_CLIENT_API
@@ -568,6 +572,13 @@ class _NnrpTypedPayloadDescriptor(ctypes.Structure):
     ]
 
 
+class _NnrpSessionRecoveryOutcome(ctypes.Structure):
+    _fields_ = [
+        ("outcome_code", ctypes.c_uint32),
+        ("resume_window_ms", ctypes.c_uint32),
+    ]
+
+
 class NativeRuntimeEntrypoints:
     """ctypes entrypoint table for the frozen Rust runtime ABI."""
 
@@ -696,6 +707,30 @@ class NativeRuntimeEntrypoints:
             _NnrpFfiStatus,
             [ctypes.POINTER(_NnrpSchemaDescriptorHeader), ctypes.c_size_t, _NnrpTypedPayloadDescriptor],
         )
+        self.session_recovery_request_validate = _bind_native_function(
+            library,
+            "nnrp_session_recovery_request_validate",
+            _NnrpFfiStatus,
+            [_NnrpBufferView],
+        )
+        self.session_recovery_ack_validate = _bind_native_function(
+            library,
+            "nnrp_session_recovery_ack_validate",
+            _NnrpFfiStatus,
+            [_NnrpBufferView, _NnrpBufferView, ctypes.POINTER(_NnrpSessionRecoveryOutcome)],
+        )
+        self.migration_recovery_validate = _bind_native_function(
+            library,
+            "nnrp_migration_recovery_validate",
+            _NnrpFfiStatus,
+            [_NnrpBufferView, _NnrpBufferView],
+        )
+        self.migration_should_replay_frame = _bind_native_function(
+            library,
+            "nnrp_migration_should_replay_frame",
+            _NnrpFfiStatus,
+            [_NnrpBufferView, ctypes.c_uint64, ctypes.POINTER(ctypes.c_uint8)],
+        )
         self.poll_empty = _bind_native_function(
             library, "nnrp_poll_empty", _NnrpFfiStatus, [ctypes.POINTER(_NnrpPollResult)]
         )
@@ -761,6 +796,88 @@ class NativeSchemaCodec:
             schema_pointer = ctypes.cast(schema_array, ctypes.POINTER(_NnrpSchemaDescriptorHeader))
         status = self.entrypoints.typed_payload_validate_binding(schema_pointer, schema_count, ffi_descriptor)
         raise_for_native_status(status)
+
+
+@dataclass(frozen=True)
+class NativeSessionRecoveryOutcome:
+    outcome_code: int
+    resume_window_ms: int = 0
+
+    def __post_init__(self) -> None:
+        _validate_u32("outcome_code", self.outcome_code)
+        _validate_u32("resume_window_ms", self.resume_window_ms)
+
+    @classmethod
+    def from_ffi(cls, outcome: _NnrpSessionRecoveryOutcome) -> NativeSessionRecoveryOutcome:
+        return cls(int(outcome.outcome_code), int(outcome.resume_window_ms))
+
+    @property
+    def outcome_name(self) -> str:
+        return _SESSION_RECOVERY_OUTCOME_NAMES.get(self.outcome_code, "unknown")
+
+    @property
+    def is_fresh(self) -> bool:
+        return self.outcome_code == SESSION_RECOVERY_OUTCOME_FRESH
+
+    @property
+    def resume_enabled(self) -> bool:
+        return self.outcome_code == SESSION_RECOVERY_OUTCOME_RESUME_ENABLED
+
+    @property
+    def resumed(self) -> bool:
+        return self.outcome_code == SESSION_RECOVERY_OUTCOME_RESUMED
+
+    @property
+    def resume_rejected(self) -> bool:
+        return self.outcome_code == SESSION_RECOVERY_OUTCOME_RESUME_REJECTED
+
+
+@dataclass(frozen=True)
+class NativeRecoveryCodec:
+    entrypoints: NativeRuntimeEntrypoints
+
+    def validate_session_recovery_request(self, session_open_metadata: bytes | bytearray | memoryview) -> None:
+        source, _owner = _buffer_view_from_payload(session_open_metadata)
+        status = self.entrypoints.session_recovery_request_validate(source)
+        raise_for_native_status(status)
+
+    def validate_session_recovery_ack(
+        self,
+        session_open_metadata: bytes | bytearray | memoryview,
+        session_open_ack_metadata: bytes | bytearray | memoryview,
+    ) -> NativeSessionRecoveryOutcome:
+        open_source, _open_owner = _buffer_view_from_payload(session_open_metadata)
+        ack_source, _ack_owner = _buffer_view_from_payload(session_open_ack_metadata)
+        outcome = _NnrpSessionRecoveryOutcome()
+        status = self.entrypoints.session_recovery_ack_validate(open_source, ack_source, ctypes.byref(outcome))
+        raise_for_native_status(status)
+        return NativeSessionRecoveryOutcome.from_ffi(outcome)
+
+    def validate_migration_recovery(
+        self,
+        session_migrate_metadata: bytes | bytearray | memoryview,
+        session_migrate_ack_metadata: bytes | bytearray | memoryview,
+    ) -> None:
+        migrate_source, _migrate_owner = _buffer_view_from_payload(session_migrate_metadata)
+        ack_source, _ack_owner = _buffer_view_from_payload(session_migrate_ack_metadata)
+        status = self.entrypoints.migration_recovery_validate(migrate_source, ack_source)
+        raise_for_native_status(status)
+
+    def should_replay_frame_after_migration(
+        self,
+        session_migrate_ack_metadata: bytes | bytearray | memoryview,
+        frame_id: int,
+    ) -> bool:
+        _validate_u64("frame_id", frame_id)
+        ack_source, _ack_owner = _buffer_view_from_payload(session_migrate_ack_metadata)
+        out_should_replay = ctypes.c_uint8()
+        status = self.entrypoints.migration_should_replay_frame(
+            ack_source,
+            frame_id,
+            ctypes.byref(out_should_replay),
+        )
+        raise_for_native_status(status)
+        return bool(out_should_replay.value)
 
 
 @dataclass(frozen=True)
@@ -1613,6 +1730,18 @@ def load_native_schema_codec(
     )
 
 
+def load_native_recovery_codec(
+    artifact_path: Path | str | None = None,
+    *,
+    root: Path | str | None = None,
+    native_platform: NativePlatform | None = None,
+    library: Any | None = None,
+) -> NativeRecoveryCodec:
+    return NativeRecoveryCodec(
+        load_native_runtime(artifact_path, root=root, native_platform=native_platform, library=library)
+    )
+
+
 def select_native_runtime_backend(
     artifact_path: Path | str | None = None,
     *,
@@ -1956,4 +2085,11 @@ _SESSION_PRIORITY_CLASS_CODES = {
 
 _SESSION_PRIORITY_CLASS_BY_CODE = {
     code: priority_class for priority_class, code in _SESSION_PRIORITY_CLASS_CODES.items()
+}
+
+_SESSION_RECOVERY_OUTCOME_NAMES = {
+    SESSION_RECOVERY_OUTCOME_FRESH: "fresh",
+    SESSION_RECOVERY_OUTCOME_RESUME_ENABLED: "resume_enabled",
+    SESSION_RECOVERY_OUTCOME_RESUMED: "resumed",
+    SESSION_RECOVERY_OUTCOME_RESUME_REJECTED: "resume_rejected",
 }

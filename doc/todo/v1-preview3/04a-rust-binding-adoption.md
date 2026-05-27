@@ -2,7 +2,7 @@
 
 - [ ] Consume the frozen Rust FFI surface from `nnrp-rs`.
   - [x] Bind and load the frozen preview3 runtime entrypoint table and request/event structs behind the native backend module.
-  - [x] Add a native-backed facade for connect, bootstrap, open-session, submit, cancel, control, event polling, close, schema descriptors, and typed payload binding validation.
+  - [x] Add a native-backed facade for connect, bootstrap, open-session, submit, cancel, control, event polling, close, schema descriptors, typed payload binding validation, and recovery validation.
   - [ ] Replace SDK runtime calls with the bound native entrypoints.
     - [x] Route adapter conformance smoke execution through the native backend selector.
     - [x] Route new client connection/session helpers through native backend handles.

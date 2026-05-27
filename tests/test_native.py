@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 
+from nnrp.core.messages.control import SessionMigrateAckMetadata
 from nnrp.native import (
     DEFAULT_ARTIFACT_ROOT_ENV,
     ERROR_FAMILY_CACHE,
@@ -28,6 +29,8 @@ from nnrp.native import (
     HANDLE_KIND_OPERATION,
     HANDLE_KIND_SESSION,
     REQUIRED_RUNTIME_FEATURES,
+    SESSION_RECOVERY_OUTCOME_RESUME_ENABLED,
+    SESSION_RECOVERY_OUTCOME_RESUMED,
     TRANSPORT_SLOT_TCP,
     NativeArtifactError,
     NativeBufferHandle,
@@ -49,6 +52,7 @@ from nnrp.native import (
     NativePayloadFamilyEvent,
     NativePlatform,
     NativeProtocolError,
+    NativeRecoveryCodec,
     NativeRuntimeBackend,
     NativeRuntimeClient,
     NativeRuntimeConnection,
@@ -62,6 +66,7 @@ from nnrp.native import (
     NativeSchemaCodec,
     NativeSessionHandle,
     NativeSessionPriorityClass,
+    NativeSessionRecoveryOutcome,
     NativeStatus,
     NativeStructuredDiagnostic,
     NativeWouldBlockError,
@@ -85,6 +90,7 @@ from nnrp.native import (
     _NnrpServerReceiveSubmitRequest,
     _NnrpServerSendResultRequest,
     _NnrpSessionOpenRequest,
+    _NnrpSessionRecoveryOutcome,
     _NnrpSubmitRequest,
     _NnrpTypedPayloadDescriptor,
     _normalize_arch,
@@ -92,6 +98,7 @@ from nnrp.native import (
     default_artifact_root,
     load_native_client,
     load_native_library,
+    load_native_recovery_codec,
     load_native_runtime,
     load_native_schema_codec,
     native_library_name,
@@ -202,6 +209,10 @@ class FakeRuntimeLibrary(FakeEntrypointLibrary):
         self.nnrp_typed_payload_descriptor_parse.handler = self._typed_payload_descriptor_parse
         self.nnrp_typed_payload_descriptor_write.handler = self._typed_payload_descriptor_write
         self.nnrp_typed_payload_validate_binding.handler = self._typed_payload_validate_binding
+        self.nnrp_session_recovery_request_validate.handler = self._session_recovery_request_validate
+        self.nnrp_session_recovery_ack_validate.handler = self._session_recovery_ack_validate
+        self.nnrp_migration_recovery_validate.handler = self._migration_recovery_validate
+        self.nnrp_migration_should_replay_frame.handler = self._migration_should_replay_frame
 
     def _client_connect(self, request: _NnrpClientConnectRequest, out_handle: object) -> _NnrpFfiStatus:
         _write_handle(out_handle, _NnrpHandle(HANDLE_KIND_CONNECTION, request.connection_id, request.generation, 0))
@@ -291,6 +302,49 @@ class FakeRuntimeLibrary(FakeEntrypointLibrary):
             if schema.schema_id == typed.schema_id and schema.schema_version == typed.schema_version:
                 return self.status
         return _NnrpFfiStatus(FFI_STATUS_PROTOCOL_ERROR, ERROR_FAMILY_SCHEMA, 0, 0)
+
+    def _session_recovery_request_validate(self, session_open_metadata: _NnrpBufferView) -> _NnrpFfiStatus:
+        if not _read_buffer_view(session_open_metadata):
+            return _NnrpFfiStatus(FFI_STATUS_INVALID_ARGUMENT, 0, 0, 0)
+        return self.status
+
+    def _session_recovery_ack_validate(
+        self,
+        session_open_metadata: _NnrpBufferView,
+        session_open_ack_metadata: _NnrpBufferView,
+        out_outcome: object,
+    ) -> _NnrpFfiStatus:
+        if not _read_buffer_view(session_open_metadata) or not _read_buffer_view(session_open_ack_metadata):
+            return _NnrpFfiStatus(FFI_STATUS_INVALID_ARGUMENT, 0, 0, 0)
+        target = getattr(out_outcome, "_obj", None)
+        if target is None:
+            target = ctypes.cast(out_outcome, ctypes.POINTER(_NnrpSessionRecoveryOutcome)).contents
+        target.outcome_code = SESSION_RECOVERY_OUTCOME_RESUMED
+        target.resume_window_ms = 250
+        return self.status
+
+    def _migration_recovery_validate(
+        self,
+        session_migrate_metadata: _NnrpBufferView,
+        session_migrate_ack_metadata: _NnrpBufferView,
+    ) -> _NnrpFfiStatus:
+        if not _read_buffer_view(session_migrate_metadata) or not _read_buffer_view(session_migrate_ack_metadata):
+            return _NnrpFfiStatus(FFI_STATUS_INVALID_ARGUMENT, 0, 0, 0)
+        return self.status
+
+    def _migration_should_replay_frame(
+        self,
+        session_migrate_ack_metadata: _NnrpBufferView,
+        frame_id: int,
+        out_should_replay: object,
+    ) -> _NnrpFfiStatus:
+        if not _read_buffer_view(session_migrate_ack_metadata):
+            return _NnrpFfiStatus(FFI_STATUS_INVALID_ARGUMENT, 0, 0, 0)
+        target = getattr(out_should_replay, "_obj", None)
+        if target is None:
+            target = ctypes.cast(out_should_replay, ctypes.POINTER(ctypes.c_uint8)).contents
+        target.value = 1 if frame_id >= 45 else 0
+        return self.status
 
     def _await_event(self, handle: _NnrpHandle, out_result: object) -> _NnrpFfiStatus:
         if self.await_event_delay_seconds:
@@ -476,6 +530,10 @@ RUNTIME_ENTRYPOINT_SYMBOLS = [
     "nnrp_typed_payload_descriptor_parse",
     "nnrp_typed_payload_descriptor_write",
     "nnrp_typed_payload_validate_binding",
+    "nnrp_session_recovery_request_validate",
+    "nnrp_session_recovery_ack_validate",
+    "nnrp_migration_recovery_validate",
+    "nnrp_migration_should_replay_frame",
     "nnrp_poll_empty",
     "nnrp_dispatch_event",
 ]
@@ -676,6 +734,53 @@ def test_native_schema_codec_delegates_descriptor_parse_write_and_validation(tmp
 
     with pytest.raises(NativeProtocolError):
         codec.validate_typed_payload_binding((), descriptor)
+
+
+def test_native_recovery_codec_delegates_resume_and_migration_validation(tmp_path: Path) -> None:
+    artifact = tmp_path / "nnrp_ffi.dll"
+    artifact.write_bytes(b"fake")
+    library = FakeRuntimeLibrary()
+    codec = load_native_recovery_codec(artifact, library=library)
+    session_open_metadata = b"session-open"
+    session_open_ack_metadata = b"session-open-ack"
+    migrate_metadata = b"session-migrate"
+    migrate_ack = SessionMigrateAckMetadata(
+        accept_code=0,
+        resume_from_frame_id=45,
+        grace_window_ms=250,
+        server_migrate_ts_us=4000,
+    ).pack()
+
+    codec.validate_session_recovery_request(session_open_metadata)
+    outcome = codec.validate_session_recovery_ack(session_open_metadata, session_open_ack_metadata)
+    codec.validate_migration_recovery(migrate_metadata, migrate_ack)
+
+    assert isinstance(codec, NativeRecoveryCodec)
+    assert isinstance(outcome, NativeSessionRecoveryOutcome)
+    assert outcome.outcome_code == SESSION_RECOVERY_OUTCOME_RESUMED
+    assert outcome.resume_window_ms == 250
+    assert outcome.outcome_name == "resumed"
+    assert outcome.resumed is True
+    assert outcome.resume_enabled is False
+    assert codec.should_replay_frame_after_migration(migrate_ack, 45) is True
+    assert codec.should_replay_frame_after_migration(migrate_ack, 44) is False
+    assert library.nnrp_session_recovery_request_validate.calls[0][0].len == len(session_open_metadata)
+    assert library.nnrp_migration_should_replay_frame.calls[0][1] == 45
+
+    with pytest.raises(ValueError, match="frame_id"):
+        codec.should_replay_frame_after_migration(migrate_ack, -1)
+    with pytest.raises(NativeInvalidArgumentError):
+        codec.validate_session_recovery_request(b"")
+
+
+def test_native_session_recovery_outcome_exposes_known_state_names() -> None:
+    outcome = NativeSessionRecoveryOutcome(SESSION_RECOVERY_OUTCOME_RESUME_ENABLED, 500)
+
+    assert outcome.outcome_name == "resume_enabled"
+    assert outcome.resume_enabled is True
+    assert outcome.is_fresh is False
+    assert outcome.resume_rejected is False
+    assert NativeSessionRecoveryOutcome(0xFFFF).outcome_name == "unknown"
 
 
 def test_load_native_runtime_rejects_probe_mismatch_before_binding_entrypoints(tmp_path: Path) -> None:
@@ -1695,6 +1800,18 @@ def test_native_runtime_entrypoints_bind_frozen_symbol_table() -> None:
         ctypes.POINTER(_NnrpSchemaDescriptorHeader),
         ctypes.c_size_t,
         _NnrpTypedPayloadDescriptor,
+    ]
+    assert library.nnrp_session_recovery_request_validate.argtypes == [_NnrpBufferView]
+    assert library.nnrp_session_recovery_ack_validate.argtypes == [
+        _NnrpBufferView,
+        _NnrpBufferView,
+        ctypes.POINTER(_NnrpSessionRecoveryOutcome),
+    ]
+    assert library.nnrp_migration_recovery_validate.argtypes == [_NnrpBufferView, _NnrpBufferView]
+    assert library.nnrp_migration_should_replay_frame.argtypes == [
+        _NnrpBufferView,
+        ctypes.c_uint64,
+        ctypes.POINTER(ctypes.c_uint8),
     ]
     assert library.nnrp_poll_empty.argtypes == [ctypes.POINTER(_NnrpPollResult)]
     assert library.nnrp_dispatch_event.argtypes == [_NnrpCallbackSink, ctypes.POINTER(_NnrpEvent)]

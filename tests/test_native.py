@@ -10,6 +10,7 @@ import pytest
 from nnrp.native import (
     DEFAULT_ARTIFACT_ROOT_ENV,
     ERROR_FAMILY_CACHE,
+    ERROR_FAMILY_SCHEMA,
     EVENT_KIND_CONTROL,
     EVENT_KIND_FLOW_UPDATED,
     EVENT_KIND_RESULT_PUSHED,
@@ -58,6 +59,7 @@ from nnrp.native import (
     NativeRuntimePollResult,
     NativeRuntimeResult,
     NativeRuntimeSession,
+    NativeSchemaCodec,
     NativeSessionHandle,
     NativeSessionPriorityClass,
     NativeStatus,
@@ -76,6 +78,7 @@ from nnrp.native import (
     _NnrpPollResult,
     _NnrpProtocolVersion,
     _NnrpRuntimeCapabilities,
+    _NnrpSchemaDescriptorHeader,
     _NnrpServerAcceptRequest,
     _NnrpServerBindRequest,
     _NnrpServerFlowUpdateRequest,
@@ -83,17 +86,27 @@ from nnrp.native import (
     _NnrpServerSendResultRequest,
     _NnrpSessionOpenRequest,
     _NnrpSubmitRequest,
+    _NnrpTypedPayloadDescriptor,
     _normalize_arch,
     current_native_platform,
     default_artifact_root,
     load_native_client,
     load_native_library,
     load_native_runtime,
+    load_native_schema_codec,
     native_library_name,
     probe_native_artifact,
     raise_for_native_status,
     resolve_native_artifact,
     select_native_runtime_backend,
+)
+from nnrp.schema import (
+    Preview3TypedPayloadDescriptor,
+    SchemaDescriptorHeader,
+    StandardProfile,
+    StreamSemantics,
+    TypedPayloadDescriptorFlags,
+    token_delta_schema_descriptor,
 )
 
 
@@ -183,6 +196,12 @@ class FakeRuntimeLibrary(FakeEntrypointLibrary):
         self.nnrp_client_await_event.handler = self._await_event
         self.nnrp_client_await_events.handler = self._await_events
         self.nnrp_control.handler = self._control
+        self.nnrp_schema_descriptor_parse.handler = self._schema_descriptor_parse
+        self.nnrp_schema_descriptor_write.handler = self._schema_descriptor_write
+        self.nnrp_token_delta_schema_descriptor.handler = self._token_delta_schema_descriptor
+        self.nnrp_typed_payload_descriptor_parse.handler = self._typed_payload_descriptor_parse
+        self.nnrp_typed_payload_descriptor_write.handler = self._typed_payload_descriptor_write
+        self.nnrp_typed_payload_validate_binding.handler = self._typed_payload_validate_binding
 
     def _client_connect(self, request: _NnrpClientConnectRequest, out_handle: object) -> _NnrpFfiStatus:
         _write_handle(out_handle, _NnrpHandle(HANDLE_KIND_CONNECTION, request.connection_id, request.generation, 0))
@@ -217,6 +236,61 @@ class FakeRuntimeLibrary(FakeEntrypointLibrary):
 
     def _control(self, request: _NnrpControlRequest) -> _NnrpFfiStatus:
         return self.status if request.handle.kind != 0 else _NnrpFfiStatus(FFI_STATUS_INVALID_HANDLE, 0, 0, 0)
+
+    def _schema_descriptor_parse(
+        self,
+        source: _NnrpBufferView,
+        out_descriptor: object,
+    ) -> _NnrpFfiStatus:
+        _write_schema_descriptor(out_descriptor, SchemaDescriptorHeader.unpack(_read_buffer_view(source)))
+        return self.status
+
+    def _schema_descriptor_write(
+        self,
+        descriptor: _NnrpSchemaDescriptorHeader,
+        destination: _NnrpBufferViewMut,
+    ) -> _NnrpFfiStatus:
+        payload = _schema_descriptor_from_ffi(descriptor).pack()
+        ctypes.memmove(destination.ptr, payload, len(payload))
+        return self.status
+
+    def _token_delta_schema_descriptor(self, out_descriptor: object) -> _NnrpFfiStatus:
+        _write_schema_descriptor(out_descriptor, token_delta_schema_descriptor())
+        return self.status
+
+    def _typed_payload_descriptor_parse(
+        self,
+        source: _NnrpBufferView,
+        out_descriptor: object,
+    ) -> _NnrpFfiStatus:
+        descriptor = Preview3TypedPayloadDescriptor.unpack(_read_buffer_view(source))
+        _write_typed_payload_descriptor(out_descriptor, descriptor)
+        return self.status
+
+    def _typed_payload_descriptor_write(
+        self,
+        descriptor: _NnrpTypedPayloadDescriptor,
+        destination: _NnrpBufferViewMut,
+    ) -> _NnrpFfiStatus:
+        payload = _typed_payload_descriptor_from_ffi(descriptor).pack()
+        ctypes.memmove(destination.ptr, payload, len(payload))
+        return self.status
+
+    def _typed_payload_validate_binding(
+        self,
+        schema_descriptors: object,
+        schema_count: int,
+        descriptor: _NnrpTypedPayloadDescriptor,
+    ) -> _NnrpFfiStatus:
+        if schema_count == 0:
+            return _NnrpFfiStatus(FFI_STATUS_PROTOCOL_ERROR, ERROR_FAMILY_SCHEMA, 0, 0)
+        schemas = ctypes.cast(schema_descriptors, ctypes.POINTER(_NnrpSchemaDescriptorHeader))
+        typed = _typed_payload_descriptor_from_ffi(descriptor)
+        for index in range(schema_count):
+            schema = _schema_descriptor_from_ffi(schemas[index])
+            if schema.schema_id == typed.schema_id and schema.schema_version == typed.schema_version:
+                return self.status
+        return _NnrpFfiStatus(FFI_STATUS_PROTOCOL_ERROR, ERROR_FAMILY_SCHEMA, 0, 0)
 
     def _await_event(self, handle: _NnrpHandle, out_result: object) -> _NnrpFfiStatus:
         if self.await_event_delay_seconds:
@@ -285,6 +359,70 @@ def _write_handle(out_handle: object, handle: _NnrpHandle) -> None:
     ctypes.cast(out_handle, ctypes.POINTER(_NnrpHandle)).contents = handle
 
 
+def _read_buffer_view(view: _NnrpBufferView) -> bytes:
+    if view.len == 0:
+        return b""
+    return ctypes.string_at(view.ptr, view.len)
+
+
+def _schema_descriptor_from_ffi(descriptor: _NnrpSchemaDescriptorHeader) -> SchemaDescriptorHeader:
+    return SchemaDescriptorHeader(
+        schema_id=descriptor.schema_id,
+        schema_version=descriptor.schema_version,
+        profile_id=descriptor.profile_id,
+        schema_flags=descriptor.schema_flags,
+        min_version_major=descriptor.min_version_major,
+        max_version_major=descriptor.max_version_major,
+        body_bytes=descriptor.body_bytes,
+        dependency_count=descriptor.dependency_count,
+        default_stream_semantics=descriptor.default_stream_semantics,
+        schema_hash=descriptor.schema_hash,
+    )
+
+
+def _write_schema_descriptor(out_descriptor: object, descriptor: SchemaDescriptorHeader) -> None:
+    target = getattr(out_descriptor, "_obj", None)
+    if target is None:
+        target = ctypes.cast(out_descriptor, ctypes.POINTER(_NnrpSchemaDescriptorHeader)).contents
+    target.schema_id = descriptor.schema_id
+    target.schema_version = descriptor.schema_version
+    target.profile_id = int(descriptor.profile_id)
+    target.schema_flags = int(descriptor.schema_flags)
+    target.min_version_major = descriptor.min_version_major
+    target.max_version_major = descriptor.max_version_major
+    target.reserved0 = 0
+    target.body_bytes = descriptor.body_bytes
+    target.dependency_count = descriptor.dependency_count
+    target.default_stream_semantics = int(descriptor.default_stream_semantics)
+    target.schema_hash = descriptor.schema_hash
+
+
+def _typed_payload_descriptor_from_ffi(descriptor: _NnrpTypedPayloadDescriptor) -> Preview3TypedPayloadDescriptor:
+    return Preview3TypedPayloadDescriptor(
+        profile_id=descriptor.profile_id,
+        descriptor_flags=descriptor.descriptor_flags,
+        schema_id=descriptor.schema_id,
+        schema_version=descriptor.schema_version,
+        stream_semantics=descriptor.stream_semantics,
+        offset=descriptor.offset,
+        length=descriptor.length,
+    )
+
+
+def _write_typed_payload_descriptor(out_descriptor: object, descriptor: Preview3TypedPayloadDescriptor) -> None:
+    target = getattr(out_descriptor, "_obj", None)
+    if target is None:
+        target = ctypes.cast(out_descriptor, ctypes.POINTER(_NnrpTypedPayloadDescriptor)).contents
+    target.profile_id = int(descriptor.profile_id)
+    target.descriptor_flags = int(descriptor.descriptor_flags)
+    target.schema_id = descriptor.schema_id
+    target.schema_version = descriptor.schema_version
+    target.stream_semantics = int(descriptor.stream_semantics)
+    target.reserved0 = 0
+    target.offset = descriptor.offset
+    target.length = descriptor.length
+
+
 class SlowSubmitRuntimeLibrary(FakeRuntimeLibrary):
     def _submit(self, request: _NnrpSubmitRequest, out_handle: object) -> _NnrpFfiStatus:
         time.sleep(0.2)
@@ -332,6 +470,12 @@ RUNTIME_ENTRYPOINT_SYMBOLS = [
     "nnrp_server_send_flow_update",
     "nnrp_server_close",
     "nnrp_control",
+    "nnrp_schema_descriptor_parse",
+    "nnrp_schema_descriptor_write",
+    "nnrp_token_delta_schema_descriptor",
+    "nnrp_typed_payload_descriptor_parse",
+    "nnrp_typed_payload_descriptor_write",
+    "nnrp_typed_payload_validate_binding",
     "nnrp_poll_empty",
     "nnrp_dispatch_event",
 ]
@@ -496,6 +640,42 @@ def test_load_native_runtime_validates_probe_before_binding_entrypoints(tmp_path
     runtime = load_native_runtime(artifact, library=library)
 
     assert runtime.submit is library.nnrp_submit
+
+
+def test_native_schema_codec_delegates_descriptor_parse_write_and_validation(tmp_path: Path) -> None:
+    artifact = tmp_path / "nnrp_ffi.dll"
+    artifact.write_bytes(b"fake")
+    library = FakeRuntimeLibrary()
+    codec = load_native_schema_codec(artifact, library=library)
+    schema = SchemaDescriptorHeader(
+        schema_id=0x1001,
+        schema_version=3,
+        profile_id=StandardProfile.TOKEN,
+        min_version_major=1,
+        max_version_major=1,
+        default_stream_semantics=StreamSemantics.APPEND,
+        schema_hash=0x6E6E_7270_746F_6B33,
+    )
+    descriptor = Preview3TypedPayloadDescriptor(
+        profile_id=StandardProfile.TOKEN,
+        descriptor_flags=TypedPayloadDescriptorFlags.PARTIAL,
+        schema_id=schema.schema_id,
+        schema_version=schema.schema_version,
+        stream_semantics=StreamSemantics.APPEND,
+        offset=8,
+        length=13,
+    )
+
+    assert isinstance(codec, NativeSchemaCodec)
+    assert codec.parse_schema_descriptor(schema.pack()) == schema
+    assert codec.write_schema_descriptor(schema) == schema.pack()
+    assert codec.token_delta_schema_descriptor() == token_delta_schema_descriptor()
+    assert codec.parse_typed_payload_descriptor(descriptor.pack()) == descriptor
+    assert codec.write_typed_payload_descriptor(descriptor) == descriptor.pack()
+    codec.validate_typed_payload_binding((schema,), descriptor)
+
+    with pytest.raises(NativeProtocolError):
+        codec.validate_typed_payload_binding((), descriptor)
 
 
 def test_load_native_runtime_rejects_probe_mismatch_before_binding_entrypoints(tmp_path: Path) -> None:
@@ -1494,6 +1674,28 @@ def test_native_runtime_entrypoints_bind_frozen_symbol_table() -> None:
     assert library.nnrp_server_send_flow_update.argtypes == [_NnrpServerFlowUpdateRequest]
     assert library.nnrp_server_close.argtypes == [_NnrpHandle]
     assert library.nnrp_control.argtypes == [_NnrpControlRequest]
+    assert library.nnrp_schema_descriptor_parse.argtypes == [
+        _NnrpBufferView,
+        ctypes.POINTER(_NnrpSchemaDescriptorHeader),
+    ]
+    assert library.nnrp_schema_descriptor_write.argtypes == [
+        _NnrpSchemaDescriptorHeader,
+        _NnrpBufferViewMut,
+    ]
+    assert library.nnrp_token_delta_schema_descriptor.argtypes == [ctypes.POINTER(_NnrpSchemaDescriptorHeader)]
+    assert library.nnrp_typed_payload_descriptor_parse.argtypes == [
+        _NnrpBufferView,
+        ctypes.POINTER(_NnrpTypedPayloadDescriptor),
+    ]
+    assert library.nnrp_typed_payload_descriptor_write.argtypes == [
+        _NnrpTypedPayloadDescriptor,
+        _NnrpBufferViewMut,
+    ]
+    assert library.nnrp_typed_payload_validate_binding.argtypes == [
+        ctypes.POINTER(_NnrpSchemaDescriptorHeader),
+        ctypes.c_size_t,
+        _NnrpTypedPayloadDescriptor,
+    ]
     assert library.nnrp_poll_empty.argtypes == [ctypes.POINTER(_NnrpPollResult)]
     assert library.nnrp_dispatch_event.argtypes == [_NnrpCallbackSink, ctypes.POINTER(_NnrpEvent)]
 

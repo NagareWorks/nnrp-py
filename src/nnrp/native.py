@@ -539,6 +539,35 @@ class _NnrpControlRequest(ctypes.Structure):
     ]
 
 
+class _NnrpSchemaDescriptorHeader(ctypes.Structure):
+    _fields_ = [
+        ("schema_id", ctypes.c_uint32),
+        ("schema_version", ctypes.c_uint32),
+        ("profile_id", ctypes.c_uint16),
+        ("schema_flags", ctypes.c_uint16),
+        ("min_version_major", ctypes.c_uint8),
+        ("max_version_major", ctypes.c_uint8),
+        ("reserved0", ctypes.c_uint16),
+        ("body_bytes", ctypes.c_uint32),
+        ("dependency_count", ctypes.c_uint16),
+        ("default_stream_semantics", ctypes.c_uint16),
+        ("schema_hash", ctypes.c_uint64),
+    ]
+
+
+class _NnrpTypedPayloadDescriptor(ctypes.Structure):
+    _fields_ = [
+        ("profile_id", ctypes.c_uint16),
+        ("descriptor_flags", ctypes.c_uint16),
+        ("schema_id", ctypes.c_uint32),
+        ("schema_version", ctypes.c_uint32),
+        ("stream_semantics", ctypes.c_uint16),
+        ("reserved0", ctypes.c_uint16),
+        ("offset", ctypes.c_uint32),
+        ("length", ctypes.c_uint32),
+    ]
+
+
 class NativeRuntimeEntrypoints:
     """ctypes entrypoint table for the frozen Rust runtime ABI."""
 
@@ -631,6 +660,42 @@ class NativeRuntimeEntrypoints:
         )
         self.server_close = _bind_native_function(library, "nnrp_server_close", _NnrpFfiStatus, [_NnrpHandle])
         self.control = _bind_native_function(library, "nnrp_control", _NnrpFfiStatus, [_NnrpControlRequest])
+        self.schema_descriptor_parse = _bind_native_function(
+            library,
+            "nnrp_schema_descriptor_parse",
+            _NnrpFfiStatus,
+            [_NnrpBufferView, ctypes.POINTER(_NnrpSchemaDescriptorHeader)],
+        )
+        self.schema_descriptor_write = _bind_native_function(
+            library,
+            "nnrp_schema_descriptor_write",
+            _NnrpFfiStatus,
+            [_NnrpSchemaDescriptorHeader, _NnrpBufferViewMut],
+        )
+        self.token_delta_schema_descriptor = _bind_native_function(
+            library,
+            "nnrp_token_delta_schema_descriptor",
+            _NnrpFfiStatus,
+            [ctypes.POINTER(_NnrpSchemaDescriptorHeader)],
+        )
+        self.typed_payload_descriptor_parse = _bind_native_function(
+            library,
+            "nnrp_typed_payload_descriptor_parse",
+            _NnrpFfiStatus,
+            [_NnrpBufferView, ctypes.POINTER(_NnrpTypedPayloadDescriptor)],
+        )
+        self.typed_payload_descriptor_write = _bind_native_function(
+            library,
+            "nnrp_typed_payload_descriptor_write",
+            _NnrpFfiStatus,
+            [_NnrpTypedPayloadDescriptor, _NnrpBufferViewMut],
+        )
+        self.typed_payload_validate_binding = _bind_native_function(
+            library,
+            "nnrp_typed_payload_validate_binding",
+            _NnrpFfiStatus,
+            [ctypes.POINTER(_NnrpSchemaDescriptorHeader), ctypes.c_size_t, _NnrpTypedPayloadDescriptor],
+        )
         self.poll_empty = _bind_native_function(
             library, "nnrp_poll_empty", _NnrpFfiStatus, [ctypes.POINTER(_NnrpPollResult)]
         )
@@ -640,6 +705,62 @@ class NativeRuntimeEntrypoints:
             _NnrpFfiStatus,
             [_NnrpCallbackSink, ctypes.POINTER(_NnrpEvent)],
         )
+
+
+@dataclass(frozen=True)
+class NativeSchemaCodec:
+    entrypoints: NativeRuntimeEntrypoints
+
+    def parse_schema_descriptor(self, payload: bytes | bytearray | memoryview) -> Any:
+        source, _owner = _buffer_view_from_payload(payload)
+        descriptor = _NnrpSchemaDescriptorHeader()
+        status = self.entrypoints.schema_descriptor_parse(source, ctypes.byref(descriptor))
+        raise_for_native_status(status)
+        return _schema_descriptor_from_ffi(descriptor)
+
+    def write_schema_descriptor(self, descriptor: Any) -> bytes:
+        destination = ctypes.create_string_buffer(ctypes.sizeof(_NnrpSchemaDescriptorHeader))
+        status = self.entrypoints.schema_descriptor_write(
+            _schema_descriptor_to_ffi(descriptor),
+            _NnrpBufferViewMut(ctypes.cast(destination, ctypes.c_void_p), len(destination.raw)),
+        )
+        raise_for_native_status(status)
+        return destination.raw
+
+    def token_delta_schema_descriptor(self) -> Any:
+        descriptor = _NnrpSchemaDescriptorHeader()
+        status = self.entrypoints.token_delta_schema_descriptor(ctypes.byref(descriptor))
+        raise_for_native_status(status)
+        return _schema_descriptor_from_ffi(descriptor)
+
+    def parse_typed_payload_descriptor(self, payload: bytes | bytearray | memoryview) -> Any:
+        source, _owner = _buffer_view_from_payload(payload)
+        descriptor = _NnrpTypedPayloadDescriptor()
+        status = self.entrypoints.typed_payload_descriptor_parse(source, ctypes.byref(descriptor))
+        raise_for_native_status(status)
+        return _typed_payload_descriptor_from_ffi(descriptor)
+
+    def write_typed_payload_descriptor(self, descriptor: Any) -> bytes:
+        destination = ctypes.create_string_buffer(ctypes.sizeof(_NnrpTypedPayloadDescriptor))
+        status = self.entrypoints.typed_payload_descriptor_write(
+            _typed_payload_descriptor_to_ffi(descriptor),
+            _NnrpBufferViewMut(ctypes.cast(destination, ctypes.c_void_p), len(destination.raw)),
+        )
+        raise_for_native_status(status)
+        return destination.raw
+
+    def validate_typed_payload_binding(self, schemas: tuple[Any, ...], descriptor: Any) -> None:
+        schema_count = len(schemas)
+        ffi_descriptor = _typed_payload_descriptor_to_ffi(descriptor)
+        if schema_count == 0:
+            schema_pointer = ctypes.POINTER(_NnrpSchemaDescriptorHeader)()
+        else:
+            schema_array = (_NnrpSchemaDescriptorHeader * schema_count)(
+                *(_schema_descriptor_to_ffi(schema) for schema in schemas)
+            )
+            schema_pointer = ctypes.cast(schema_array, ctypes.POINTER(_NnrpSchemaDescriptorHeader))
+        status = self.entrypoints.typed_payload_validate_binding(schema_pointer, schema_count, ffi_descriptor)
+        raise_for_native_status(status)
 
 
 @dataclass(frozen=True)
@@ -1480,6 +1601,18 @@ def load_native_client(
     )
 
 
+def load_native_schema_codec(
+    artifact_path: Path | str | None = None,
+    *,
+    root: Path | str | None = None,
+    native_platform: NativePlatform | None = None,
+    library: Any | None = None,
+) -> NativeSchemaCodec:
+    return NativeSchemaCodec(
+        load_native_runtime(artifact_path, root=root, native_platform=native_platform, library=library)
+    )
+
+
 def select_native_runtime_backend(
     artifact_path: Path | str | None = None,
     *,
@@ -1669,6 +1802,66 @@ def _copy_buffer_view(view: _NnrpBufferView) -> bytes:
     if not view.ptr:
         raise NativeHandleError("native event payload has non-empty null pointer")
     return ctypes.string_at(view.ptr, length)
+
+
+def _schema_descriptor_from_ffi(descriptor: _NnrpSchemaDescriptorHeader) -> Any:
+    from nnrp.schema import SchemaDescriptorHeader
+
+    return SchemaDescriptorHeader(
+        schema_id=int(descriptor.schema_id),
+        schema_version=int(descriptor.schema_version),
+        profile_id=int(descriptor.profile_id),
+        schema_flags=int(descriptor.schema_flags),
+        min_version_major=int(descriptor.min_version_major),
+        max_version_major=int(descriptor.max_version_major),
+        body_bytes=int(descriptor.body_bytes),
+        dependency_count=int(descriptor.dependency_count),
+        default_stream_semantics=int(descriptor.default_stream_semantics),
+        schema_hash=int(descriptor.schema_hash),
+    )
+
+
+def _schema_descriptor_to_ffi(descriptor: Any) -> _NnrpSchemaDescriptorHeader:
+    return _NnrpSchemaDescriptorHeader(
+        int(descriptor.schema_id),
+        int(descriptor.schema_version),
+        int(descriptor.profile_id),
+        int(descriptor.schema_flags),
+        int(descriptor.min_version_major),
+        int(descriptor.max_version_major),
+        0,
+        int(descriptor.body_bytes),
+        int(descriptor.dependency_count),
+        int(descriptor.default_stream_semantics),
+        int(descriptor.schema_hash),
+    )
+
+
+def _typed_payload_descriptor_from_ffi(descriptor: _NnrpTypedPayloadDescriptor) -> Any:
+    from nnrp.schema import Preview3TypedPayloadDescriptor
+
+    return Preview3TypedPayloadDescriptor(
+        profile_id=int(descriptor.profile_id),
+        descriptor_flags=int(descriptor.descriptor_flags),
+        schema_id=int(descriptor.schema_id),
+        schema_version=int(descriptor.schema_version),
+        stream_semantics=int(descriptor.stream_semantics),
+        offset=int(descriptor.offset),
+        length=int(descriptor.length),
+    )
+
+
+def _typed_payload_descriptor_to_ffi(descriptor: Any) -> _NnrpTypedPayloadDescriptor:
+    return _NnrpTypedPayloadDescriptor(
+        int(descriptor.profile_id),
+        int(descriptor.descriptor_flags),
+        int(descriptor.schema_id),
+        int(descriptor.schema_version),
+        int(descriptor.stream_semantics),
+        0,
+        int(descriptor.offset),
+        int(descriptor.length),
+    )
 
 
 def _coerce_operation_scheduling_hint(

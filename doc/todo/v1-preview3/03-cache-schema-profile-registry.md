@@ -33,6 +33,11 @@
   - [x] Add tests for descriptor size/alignment pass-through.
 - [ ] Keep schema/profile interpretation Rust-owned; Python should expose stable descriptors and host-friendly wrappers only.
   - [x] Avoid body-specific schema decoding in Python helpers; native descriptor parse/write and binding validation delegate to Rust.
+  - [ ] Route `SchemaDescriptorHeader.pack/unpack` through native codec when a native runtime is selected.
+  - [ ] Route `Preview3TypedPayloadDescriptor.pack/unpack` through native codec when a native runtime is selected.
+  - [ ] Add public helper for native typed payload binding validation.
+  - [ ] Keep pure-Python descriptor struct packing available for tests and offline fixture inspection.
+  - [ ] Add tests for native schema mismatch status mapping.
   - [x] Add tests for unknown schema/profile pass-through.
 
 ## Standard Profiles And Payload Families
@@ -44,6 +49,10 @@
 - [ ] Treat `profile_id = 0` as `unspecified` on the Python public surface rather than an implicit tensor default.
   - [x] Add unspecified profile constant/wrapper.
   - [ ] Audit public APIs for implicit tensor default behavior.
+    - [ ] Audit native session open defaults.
+    - [ ] Audit typed payload descriptor helper defaults.
+    - [ ] Audit benchmark scenario defaults.
+    - [ ] Audit README/API examples.
   - [x] Add tests for profile id 0 pass-through.
 - [x] Add token-profile wrappers against the frozen token minimum semantics and first-round registry assignments from `nnrp-doc`.
   - [x] Add token stream profile wrapper.
@@ -54,3 +63,6 @@
   - [x] Add tool-delta payload family wrapper.
   - [ ] Add async delivery tests for structured-event payloads.
   - [ ] Add async delivery tests for tool-delta payloads.
+  - [ ] Add callback dispatch tests for structured-event payload family filtering.
+  - [ ] Add callback dispatch tests for tool-delta payload family filtering.
+  - [ ] Document these as payload families rather than schema/profile aliases.

@@ -18,14 +18,20 @@
 - [ ] Add Python integration tests for cache lease expiry, schema mismatch, operation cancellation, priority-aware flow updates, and resume paths.
   - [ ] Add cache lease expiry integration test once Rust exposes cache lease operations.
   - [ ] Add schema mismatch integration test once Rust exposes schema registry operations.
+    - [ ] Add native typed payload binding mismatch test through `NativeSchemaCodec`.
+    - [ ] Add public schema helper mismatch test once helper routing is native-backed.
   - [x] Add operation cancellation integration test through native session/operation helpers.
   - [ ] Add priority-aware flow update integration test once Rust exposes priority/credit events.
   - [ ] Add resume-path integration test once Rust exposes recovery/resume operations.
+    - [ ] Add recovery validation integration test through `NativeRecoveryCodec`.
+    - [ ] Add full resume operation integration test after Rust exposes executable resume/open helper.
 - [x] Keep the active Python preview regression suite green while preview3 Rust-backed helpers replace the prior preview surface.
 - [ ] Add performance smoke checks that verify Python preview3 hot paths do not regress into full payload copies by default.
   - [ ] Add submit/result allocation-count smoke.
   - [ ] Add payload-copy boundary smoke.
   - [ ] Add native artifact load/probe latency smoke.
+  - [ ] Add native batch event polling latency smoke.
+  - [ ] Add schema descriptor native parse/write latency smoke.
   - [ ] Gate smoke thresholds with stable local baselines before enabling CI failure.
 - [x] Add release packaging validation for installing `nnrp-rs` native artifacts into the Python wheel source tree.
 
@@ -38,6 +44,7 @@
   - [x] Add fallback/require-native behavior section.
 - [ ] Keep `doc/benchmarks/rs-native-artifacts-migration.md` updated with the native artifact plan, supported platform matrix, and pre/post migration benchmark results.
   - [x] Update pinned `nnrp-rs` tag/commit before release.
+  - [ ] Update benchmark scenario list after native-backed schema/recovery helpers land.
   - [ ] Fill post-migration benchmark environment row.
   - [ ] Fill post-migration latency table.
   - [ ] Fill post-migration throughput table.
@@ -59,5 +66,7 @@
   - [x] Remove obsolete SDK-owned vector-generation wording.
 - [ ] Document PR merge gates for freeze-dependent work so GitHub reviewers can reject Python-side protocol invention.
   - [ ] List required upstream Rust/doc freeze references for cache/schema/recovery work.
+  - [ ] List required native ABI tag or artifact version for each native helper PR.
   - [ ] List required conformance adapter coverage for public API changes.
   - [ ] List required coverage/benchmark gates for hot-path changes.
+  - [ ] List release-wheel checks required before publishing native artifacts to PyPI.

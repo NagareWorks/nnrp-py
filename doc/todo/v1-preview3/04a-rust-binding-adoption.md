@@ -9,9 +9,30 @@
     - [x] Route public submit/result helper paths through native session operations.
     - [x] Route public cancellation/control helper paths through native session/operation control calls.
     - [ ] Route cache/schema/profile helper paths through native calls once exposed.
+      - [x] Bind native schema descriptor parse/write and typed payload binding validation.
+      - [ ] Add native schema codec selection to schema/profile helper entry points.
+      - [ ] Preserve pure-Python schema catalog as fixture/diagnostic fallback only.
+      - [ ] Add tests proving schema mismatch diagnostics come from native status fields.
+      - [ ] Keep cache helpers on host models until Rust exposes cache lease FFI operations.
+    - [ ] Route recovery helper paths through native calls.
+      - [x] Bind native recovery request/ack and migration validation helpers.
+      - [ ] Add public recovery helper functions that call `NativeRecoveryCodec`.
+      - [ ] Add host-facing resume outcome reports without parsing opaque recovery data in Python.
+      - [ ] Add tests proving invalid recovery inputs preserve native status fields.
+    - [ ] Route benchmark hot paths through native calls where the ABI already exists.
+      - [ ] Replace header/metadata descriptor benchmark runners with native-backed descriptor helpers.
+      - [ ] Add a native event polling benchmark runner.
+      - [ ] Keep packet-level benchmarks labeled as fixture/diagnostic baselines.
 - [x] Pin the exact `nnrp-rs` commit, tag, or artifact version used by the Python package.
 - [x] Define the packaged native artifact layout for Windows, macOS, Linux, Android, and iOS.
-- [x] Add release packaging glue that normalizes `nnrp-rs` native artifact zips into the Python package layout before wheel build.
+- [ ] Add release packaging glue that normalizes `nnrp-rs` native artifact zips into platform wheel contents before publish.
+  - [x] Add native artifact normalization script for release zips.
+  - [x] Add wheel inspection script that rejects missing native payloads.
+  - [ ] Build platform-specific wheels instead of a `py3-none-any` wheel when native artifacts are required.
+  - [ ] Ensure each wheel contains only the native artifact for its platform tag.
+  - [ ] Verify wheel tags match the embedded native artifact OS/architecture.
+  - [ ] Keep sdist free of prebuilt native libraries unless release policy explicitly changes.
+  - [ ] Add CI/release checks that fail if a native release publishes a universal wheel.
 - [x] Add a platform and architecture resolver for x86, x86_64, arm, and arm64 variants.
 - [x] Load the native artifact through one internal backend module before exposing any host-facing API.
 - [x] Probe ABI version, protocol version, enabled transport slots, and feature flags before accepting the native artifact.
@@ -40,7 +61,14 @@
 - [x] Map stable Rust error codes into Python exception hierarchies.
 - [ ] Keep pure-Python codec helpers limited to fixture inspection, diagnostics, and explicitly unsupported runtime combinations.
   - [ ] Inventory pure-Python helpers used by runtime-facing public APIs.
+    - [ ] Inventory `nnrp.client.transport` connection/session helpers.
+    - [ ] Inventory `nnrp.tools.smoke` packet transport examples.
+    - [ ] Inventory README and package-level public imports that still lead with packet builders.
+    - [ ] Inventory benchmark runners that still measure Python-owned packet construction as runtime behavior.
   - [ ] Move fixture-only helpers under test/tooling documentation.
+    - [ ] Mark packet builders as protocol fixture/diagnostic helpers in API docs.
+    - [ ] Keep raw packet examples out of default runtime quick-start paths.
+    - [ ] Keep smoke-only transport helpers outside the primary host API narrative.
   - [x] Add explicit runtime fallback selection instead of implicit pure-Python execution.
   - [x] Add tests that default host runtime uses native artifacts when available.
 - [x] Add loader and probe tests for every supported platform tag using fake or fixture native artifacts where real artifacts are unavailable.

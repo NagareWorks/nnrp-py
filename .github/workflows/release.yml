@@ -142,11 +142,27 @@ jobs:
       - name: Test
         run: pytest -q
 
-      - name: Build distribution
-        run: python -m build
+      - name: Build source distribution without native payloads
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          rm -rf src/nnrp/native_artifacts
+          python -m build --sdist --outdir dist
+          python scripts/prepare_native_artifacts.py --clean artifacts/native-downloads/*.zip
+
+      - name: Build staged wheel with native payloads
+        run: python -m build --wheel --outdir artifacts/staged-wheel
+
+      - name: Build platform wheels
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          python scripts/build_native_wheels.py --wheel artifacts/staged-wheel/*.whl --dist dist
 
       - name: Verify packaged native artifacts
-        run: python scripts/verify_native_wheel.py --dist dist --require-native
+        run: python scripts/verify_native_wheel.py --dist dist --require-native --reject-universal-native --require-single-platform --verify-platform-tag
 
       - name: Bundle release artifacts
         run: |

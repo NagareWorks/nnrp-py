@@ -22,13 +22,15 @@
 
 - [ ] Consume the frozen handle families for connection, session, operation, schema, and buffer views.
   - [x] Wrap connection, session, operation, event pump, and buffer value handles.
-  - [ ] Wrap schema handles once exported by the ABI.
-  - [ ] Wrap borrowed buffer-view handles once exported by the ABI.
+  - [ ] Wrap schema registry handles once exported by the ABI.
+  - [x] Wrap current immutable/mutable buffer-view value structs.
+  - [ ] Wrap borrowed buffer handles once exported by the ABI.
 - [ ] Implement callback/polling adapters and async runtime glue according to the frozen Rust binding contract.
   - [x] Add explicit polling, bounded polling, async polling, and async event iteration.
   - [x] Add structured event, tool delta, and workflow-state async iterators over Rust result pumps.
   - [x] Add callback dispatch wrappers over Rust result pump events.
-  - [ ] Add batch polling or borrowed-buffer delivery once the ABI exposes it.
+  - [x] Add batch polling once the ABI exposes it.
+  - [ ] Add borrowed-buffer delivery once the ABI exposes stable borrowed handles.
 - [ ] Map stable preview3 error families into Python exception/result surfaces without collapsing family/code information.
   - [x] Map stable FFI status codes to Python exception classes while preserving status/family/detail fields.
   - [ ] Add public diagnostic helpers for structured downgrade, retry, cache, and schema errors.
@@ -43,17 +45,19 @@
   - [x] Expose explicit open-session and close-session helpers through native handles.
   - [x] Support multiple sessions on one native connection facade.
   - [x] Add connection-level host helper that opens and closes multiple native sessions.
-  - [ ] Add recovery/resume helpers after the Rust recovery object boundary freezes.
+  - [x] Add recovery validation helpers after the Rust recovery object boundary freezes.
+  - [ ] Add executable resume/open-with-token helpers once Rust exposes the FFI operation.
 - [ ] Implement session priority classes, operation lifecycle states, cancellation scopes, and `FLOW_UPDATE` semantics from frozen protocol enums and metadata tables.
   - [x] Preserve operation lifecycle states on Python result wrappers.
   - [x] Add operation cancellation helpers on native sessions and operations.
   - [x] Add priority and scheduling hint wrappers.
   - [x] Add `FLOW_UPDATE`/credit wrappers over Rust control/event delivery.
 - [ ] Implement cache lease, schema registry, and typed payload descriptor wrappers against the frozen 32B / 24B layouts and standard error behavior.
-  - [ ] Add cache lease descriptor wrappers.
-  - [ ] Add schema/profile descriptor wrappers.
-  - [ ] Add typed payload descriptor view wrappers.
-  - [ ] Add standard cache/schema/profile error mapping tests.
+  - [x] Add cache lease descriptor wrappers.
+  - [x] Add schema/profile descriptor wrappers.
+  - [x] Add typed payload descriptor view wrappers.
+  - [x] Add standard schema/profile error mapping tests.
+  - [ ] Add standard cache runtime error mapping tests once Rust exposes cache lease FFI operations.
 - [ ] Consume Rust-generated conformance fixtures as the only canonical preview3 protocol baseline.
   - [x] Remove SDK-local vector exporters.
   - [x] Use adapter execution plans instead of SDK-owned vector manifests.

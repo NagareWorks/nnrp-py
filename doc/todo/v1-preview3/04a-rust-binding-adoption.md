@@ -8,12 +8,12 @@
     - [x] Route new client connection/session helpers through native backend handles.
     - [x] Route public submit/result helper paths through native session operations.
     - [x] Route public cancellation/control helper paths through native session/operation control calls.
-    - [ ] Route cache/schema/profile helper paths through native calls once exposed.
+    - [ ] Route cache/schema/profile helper paths through native calls where the ABI exposes execution helpers.
       - [x] Bind native schema descriptor parse/write and typed payload binding validation.
       - [x] Add native schema codec selection to schema/profile helper entry points.
       - [x] Preserve pure-Python schema catalog as fixture/diagnostic fallback only.
       - [x] Add tests proving schema mismatch diagnostics come from native status fields.
-      - [ ] Keep cache helpers on host models until Rust exposes cache lease FFI operations.
+      - [ ] Route cache lease query/touch/prefetch/release through native calls once Rust exposes cache lease FFI operations.
     - [x] Route recovery helper paths through native calls.
       - [x] Bind native recovery request/ack and migration validation helpers.
       - [x] Add public recovery helper functions that call `NativeRecoveryCodec`.
@@ -38,18 +38,19 @@
 - [x] Probe ABI version, protocol version, enabled transport slots, and feature flags before accepting the native artifact.
 - [x] Reject ABI/protocol mismatches with a deterministic Python exception and actionable diagnostic text.
 - [x] Map connection, session, operation, event pump, and buffer value handles into Python-owned wrapper types.
-- [ ] Map schema and stable borrowed buffer-view handles into Python-owned wrapper types once those handles are exposed by the frozen ABI.
-  - [ ] Add schema handle wrapper.
-  - [ ] Add borrowed immutable buffer-view handle wrapper.
-  - [ ] Add borrowed mutable buffer-view handle wrapper.
+- [ ] Map schema registry handles and stable borrowed buffer handles into Python-owned wrapper types once those handles are exposed by the frozen ABI.
+  - [ ] Add schema registry handle wrapper once Rust exposes a `NNRP_HANDLE_SCHEMA`-style handle.
+  - [ ] Add borrowed immutable buffer handle wrapper once Rust exposes acquire/release ownership.
+  - [ ] Add borrowed mutable buffer handle wrapper once Rust exposes acquire/release ownership.
   - [ ] Add lifetime guard tests for borrowed views.
 - [x] Define ownership and lifetime rules for native buffers returned to Python.
   - [x] Snapshot polled native event payloads into Python-owned bytes before returning them to callers.
   - [x] Document event/result snapshot behavior in the native client API docs.
   - [x] Add tests for payload snapshot independence after native poll buffer reuse.
 - [ ] Define borrowed-buffer rules for future zero-copy result/body views.
-  - [ ] Define when borrowed views may be exposed from sync polling.
-  - [ ] Define when borrowed views may be exposed from async polling.
+  - [x] Confirm current ABI exposes value `NnrpBufferView` structs but not stable borrowed buffer handles.
+  - [ ] Define when borrowed handles may be exposed from sync polling after Rust adds acquire/release APIs.
+  - [ ] Define when borrowed handles may be exposed from async polling after Rust adds acquire/release APIs.
   - [ ] Define copy fallback behavior when borrowed view lifetime cannot be guaranteed.
 - [x] Ensure callbacks or poll results never outlive the native connection/session handle that owns them.
   - [x] Return SDK-owned poll/event snapshots from the native connection facade instead of raw FFI structs.

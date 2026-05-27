@@ -9,8 +9,8 @@
     - [ ] Capture baseline allocation count before changing payload ownership behavior.
   - [x] Add batch poll helper once Rust exposes batched event polling.
   - [ ] Add borrowed result payload helper once Rust exposes stable borrowed views.
-    - [ ] Confirm borrowed immutable view ABI shape upstream.
-    - [ ] Confirm borrowed view lifetime owner and release semantics upstream.
+    - [x] Confirm current Rust ABI exposes borrowed-view-shaped value structs but no stable acquire/release ownership.
+    - [ ] Confirm borrowed buffer handle lifetime owner and release semantics upstream.
     - [ ] Add Python lifetime guard wrapper before exposing any borrowed view.
   - [ ] Add regression test that hot-path payloads are not copied more than the documented boundary.
     - [ ] Add submit payload copy-boundary test.

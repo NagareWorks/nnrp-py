@@ -9,9 +9,17 @@
 - [x] Keep Python event delivery aligned with Rust-native semantics rather than inventing a second Python session-pump contract.
 - [ ] Add resume/recovery helpers only after the recovery object boundary freezes upstream.
   - [ ] Add opaque recovery-token wrapper.
+    - [ ] Confirm whether the current Rust ABI exposes an opaque token handle or only metadata validation.
+    - [ ] If only metadata validation is exposed, keep token wrapper blocked and document the upstream dependency.
   - [x] Add resume-window wrapper.
   - [ ] Add connection/session resume helper once Rust exposes the operation.
+    - [ ] Define public helper inputs around existing session-open/session-open-ack metadata bytes.
+    - [ ] Route helper validation through `NativeRecoveryCodec`.
+    - [ ] Keep actual resume operation blocked until Rust exposes session resume/open-with-token execution.
   - [x] Add tests for invalid/expired recovery diagnostics.
 - [ ] Keep resume tokens and windows opaque Rust-owned data on the Python host surface.
   - [ ] Ensure token/window wrappers expose identity and diagnostic metadata only.
+    - [ ] Ensure resume outcome wrapper exposes only outcome code/name and resume window.
+    - [ ] Ensure migration replay helper exposes boolean replay decision without parsing migration policy.
   - [ ] Add tests preventing Python-side token parsing.
+  - [ ] Add docs that recovery validation is native-owned and Python does not infer policy locally.

@@ -5,9 +5,17 @@
 - [x] Keep backend selection behind an internal interface so tests can run against pure-Python fixtures and native artifacts.
 - [ ] Avoid per-frame Python object churn on the hot submit/result path; batch or borrow native buffers where the ABI allows it.
   - [ ] Measure object allocation count for native submit/result loop.
+    - [ ] Add a local benchmark mode that records allocated Python objects per submit/result iteration.
+    - [ ] Capture baseline allocation count before changing payload ownership behavior.
   - [x] Add batch poll helper once Rust exposes batched event polling.
   - [ ] Add borrowed result payload helper once Rust exposes stable borrowed views.
+    - [ ] Confirm borrowed immutable view ABI shape upstream.
+    - [ ] Confirm borrowed view lifetime owner and release semantics upstream.
+    - [ ] Add Python lifetime guard wrapper before exposing any borrowed view.
   - [ ] Add regression test that hot-path payloads are not copied more than the documented boundary.
+    - [ ] Add submit payload copy-boundary test.
+    - [ ] Add result payload copy-boundary test.
+    - [ ] Add callback payload copy-boundary test.
 - [x] Define cancellation behavior when a Python task is cancelled while a native operation is active.
 - [x] Expose structured event, tool delta, and workflow-state updates through Python-native async iterators or callbacks backed by Rust result pumps.
   - [x] Add structured-event async iterator over native result pump events.
@@ -24,6 +32,10 @@
 - [x] Run the pre-migration benchmark suite and record the baseline in `doc/benchmarks/rs-native-artifacts-migration.md`.
 - [ ] Run the same benchmark suite after native migration and record the deltas in `doc/benchmarks/rs-native-artifacts-migration.md`.
   - [ ] Build/download matching `nnrp-rs` native artifacts for the benchmark host.
+  - [ ] Install artifacts into `src/nnrp/native_artifacts` using `scripts/prepare_native_artifacts.py`.
+  - [ ] Verify the installed artifact is accepted by `probe_native_artifact`.
   - [ ] Run conformance benchmark plan against native-backed Python helpers.
+  - [ ] Run SDK-local benchmark plan against native-backed Python helpers.
   - [ ] Record p50/p95/p99 latency deltas.
   - [ ] Record throughput/CPU/memory deltas.
+  - [ ] Record artifact version, Python version, OS/arch, and CPU in the post-migration environment row.

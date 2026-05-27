@@ -1,16 +1,16 @@
 # Python Preview3 Control Events And Recovery
 
 - [x] Add async-friendly wrappers for result/event pump delivery.
-- [ ] Add async-friendly wrappers for `FLOW_UPDATE` and `RESULT_HINT`.
+- [ ] Add async-friendly wrappers for `FLOW_UPDATE` and current control-event result hints.
   - [x] Add `FLOW_UPDATE` event wrapper over Rust poll results.
-  - [ ] Add `RESULT_HINT` event wrapper over Rust poll results.
+  - [ ] Keep `RESULT_HINT` blocked until Rust exposes a distinct event kind rather than generic control events.
   - [x] Add async iterator helpers for control-event filtering.
   - [x] Add cancellation behavior tests for control-event iterators.
 - [x] Keep Python event delivery aligned with Rust-native semantics rather than inventing a second Python session-pump contract.
 - [ ] Add resume/recovery helpers only after the recovery object boundary freezes upstream.
   - [ ] Add opaque recovery-token wrapper.
-    - [ ] Confirm whether the current Rust ABI exposes an opaque token handle or only metadata validation.
-    - [ ] If only metadata validation is exposed, keep token wrapper blocked and document the upstream dependency.
+    - [x] Confirm the current Rust ABI exposes metadata validation and replay decisions but no opaque token handle.
+    - [ ] Keep token wrapper blocked until Rust exposes an opaque token handle or executable resume operation.
   - [x] Add resume-window wrapper.
   - [ ] Add connection/session resume helper once Rust exposes the operation.
     - [x] Define public helper inputs around existing session-open/session-open-ack metadata bytes.

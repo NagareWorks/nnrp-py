@@ -13,10 +13,15 @@ from nnrp import (
     StandardProfile,
     StreamSemantics,
     TypedPayloadDescriptorFlags,
+    pack_schema_descriptor,
+    pack_typed_payload_descriptor,
     tensor_payload_descriptor,
     token_delta_payload_descriptor,
     token_delta_schema_descriptor,
+    unpack_schema_descriptor,
+    unpack_typed_payload_descriptor,
     unspecified_payload_descriptor,
+    validate_typed_payload_binding,
 )
 
 
@@ -103,6 +108,39 @@ def test_typed_payload_descriptor_rejects_unknown_flags_reserved_bytes_and_short
         Preview3TypedPayloadDescriptor.unpack(encoded[:-1])
 
 
+def test_schema_codec_helpers_delegate_to_selected_native_codec() -> None:
+    schema = token_delta_schema_descriptor()
+    descriptor = token_delta_payload_descriptor(offset=8, length=13)
+    codec = FakeSchemaCodec(schema=schema, descriptor=descriptor)
+
+    assert pack_schema_descriptor(schema, codec=codec) == b"native-schema"
+    assert unpack_schema_descriptor(b"native-schema", codec=codec) == schema
+    assert pack_typed_payload_descriptor(descriptor, codec=codec) == b"native-typed"
+    assert unpack_typed_payload_descriptor(b"native-typed", codec=codec) == descriptor
+    validate_typed_payload_binding((schema,), descriptor, codec=codec)
+
+    assert codec.calls == [
+        ("write_schema", schema),
+        ("parse_schema", b"native-schema"),
+        ("write_typed", descriptor),
+        ("parse_typed", b"native-typed"),
+        ("validate_binding", ((schema,), descriptor)),
+    ]
+
+
+def test_schema_codec_helpers_keep_python_fixture_fallback() -> None:
+    schema = token_delta_schema_descriptor()
+    descriptor = token_delta_payload_descriptor(offset=8, length=13)
+
+    assert unpack_schema_descriptor(pack_schema_descriptor(schema)) == schema
+    assert unpack_typed_payload_descriptor(pack_typed_payload_descriptor(descriptor)) == descriptor
+    validate_typed_payload_binding((schema,), descriptor)
+    validate_typed_payload_binding((), unspecified_payload_descriptor(offset=0, length=1))
+
+    with pytest.raises(ValueError, match="does not match"):
+        validate_typed_payload_binding((), descriptor)
+
+
 def test_standard_profile_helpers_keep_unspecified_tensor_and_token_distinct() -> None:
     unspecified = unspecified_payload_descriptor(offset=0, length=5)
     tensor = tensor_payload_descriptor(offset=5, length=7)
@@ -124,4 +162,37 @@ def test_structured_event_and_tool_delta_remain_payload_families_not_standard_pr
     assert int(PayloadKind.TOOL_DELTA) == 0x00000020
     assert int(PayloadKind.STRUCTURED_EVENT) not in standard_profile_values
     assert int(PayloadKind.TOOL_DELTA) not in standard_profile_values
+
+
+class FakeSchemaCodec:
+    def __init__(self, *, schema: SchemaDescriptorHeader, descriptor: Preview3TypedPayloadDescriptor) -> None:
+        self.schema = schema
+        self.descriptor = descriptor
+        self.calls: list[tuple[str, object]] = []
+
+    def parse_schema_descriptor(self, payload: bytes | bytearray | memoryview) -> SchemaDescriptorHeader:
+        self.calls.append(("parse_schema", bytes(payload)))
+        return self.schema
+
+    def write_schema_descriptor(self, descriptor: SchemaDescriptorHeader) -> bytes:
+        self.calls.append(("write_schema", descriptor))
+        return b"native-schema"
+
+    def parse_typed_payload_descriptor(
+        self,
+        payload: bytes | bytearray | memoryview,
+    ) -> Preview3TypedPayloadDescriptor:
+        self.calls.append(("parse_typed", bytes(payload)))
+        return self.descriptor
+
+    def write_typed_payload_descriptor(self, descriptor: Preview3TypedPayloadDescriptor) -> bytes:
+        self.calls.append(("write_typed", descriptor))
+        return b"native-typed"
+
+    def validate_typed_payload_binding(
+        self,
+        schemas: tuple[SchemaDescriptorHeader, ...],
+        descriptor: Preview3TypedPayloadDescriptor,
+    ) -> None:
+        self.calls.append(("validate_binding", (schemas, descriptor)))
 

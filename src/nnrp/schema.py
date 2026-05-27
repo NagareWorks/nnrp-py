@@ -10,6 +10,7 @@ from __future__ import annotations
 import struct
 from dataclasses import dataclass
 from enum import IntEnum, IntFlag
+from typing import Protocol
 
 SCHEMA_DESCRIPTOR_HEADER_LENGTH = 32
 TYPED_PAYLOAD_DESCRIPTOR_V3_LENGTH = 24
@@ -64,6 +65,30 @@ class SchemaRegistryFailure(IntEnum):
     HASH_CONFLICT = 3
     INCOMPATIBLE = 4
     UPDATE_REJECTED = 5
+
+
+class SchemaCodec(Protocol):
+    def parse_schema_descriptor(self, payload: bytes | bytearray | memoryview) -> SchemaDescriptorHeader:
+        ...
+
+    def write_schema_descriptor(self, descriptor: SchemaDescriptorHeader) -> bytes:
+        ...
+
+    def parse_typed_payload_descriptor(
+        self,
+        payload: bytes | bytearray | memoryview,
+    ) -> Preview3TypedPayloadDescriptor:
+        ...
+
+    def write_typed_payload_descriptor(self, descriptor: Preview3TypedPayloadDescriptor) -> bytes:
+        ...
+
+    def validate_typed_payload_binding(
+        self,
+        schemas: tuple[SchemaDescriptorHeader, ...],
+        descriptor: Preview3TypedPayloadDescriptor,
+    ) -> None:
+        ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -364,6 +389,68 @@ def unspecified_payload_descriptor(
     )
 
 
+def pack_schema_descriptor(
+    descriptor: SchemaDescriptorHeader,
+    *,
+    codec: SchemaCodec | None = None,
+) -> bytes:
+    if codec is not None:
+        return codec.write_schema_descriptor(descriptor)
+    return descriptor.pack()
+
+
+def unpack_schema_descriptor(
+    payload: bytes | bytearray | memoryview,
+    *,
+    codec: SchemaCodec | None = None,
+) -> SchemaDescriptorHeader:
+    if codec is not None:
+        return codec.parse_schema_descriptor(payload)
+    return SchemaDescriptorHeader.unpack(payload)
+
+
+def pack_typed_payload_descriptor(
+    descriptor: Preview3TypedPayloadDescriptor,
+    *,
+    codec: SchemaCodec | None = None,
+) -> bytes:
+    if codec is not None:
+        return codec.write_typed_payload_descriptor(descriptor)
+    return descriptor.pack()
+
+
+def unpack_typed_payload_descriptor(
+    payload: bytes | bytearray | memoryview,
+    *,
+    codec: SchemaCodec | None = None,
+) -> Preview3TypedPayloadDescriptor:
+    if codec is not None:
+        return codec.parse_typed_payload_descriptor(payload)
+    return Preview3TypedPayloadDescriptor.unpack(payload)
+
+
+def validate_typed_payload_binding(
+    schemas: tuple[SchemaDescriptorHeader, ...],
+    descriptor: Preview3TypedPayloadDescriptor,
+    *,
+    codec: SchemaCodec | None = None,
+) -> None:
+    if codec is not None:
+        codec.validate_typed_payload_binding(schemas, descriptor)
+        return
+
+    if descriptor.profile_id == StandardProfile.UNSPECIFIED:
+        return
+    if any(
+        schema.schema_id == descriptor.schema_id
+        and schema.schema_version == descriptor.schema_version
+        and schema.profile_id == descriptor.profile_id
+        for schema in schemas
+    ):
+        return
+    raise ValueError("typed payload descriptor does not match an installed schema descriptor")
+
+
 def _validate_mask(name: str, value: int, known_mask: int) -> None:
     if value < 0:
         raise ValueError(f"{name} must be non-negative")
@@ -403,6 +490,7 @@ __all__ = [
     "Preview3TypedPayloadDescriptor",
     "SchemaDescriptorFlags",
     "SchemaDescriptorHeader",
+    "SchemaCodec",
     "SchemaRegistryAction",
     "SchemaRegistryCatalog",
     "SchemaRegistryFailure",
@@ -410,8 +498,13 @@ __all__ = [
     "StandardProfile",
     "StreamSemantics",
     "TypedPayloadDescriptorFlags",
+    "pack_schema_descriptor",
+    "pack_typed_payload_descriptor",
     "tensor_payload_descriptor",
     "token_delta_payload_descriptor",
     "token_delta_schema_descriptor",
+    "unpack_schema_descriptor",
+    "unpack_typed_payload_descriptor",
     "unspecified_payload_descriptor",
+    "validate_typed_payload_binding",
 ]

@@ -10,8 +10,8 @@
     - [x] Route public cancellation/control helper paths through native session/operation control calls.
     - [ ] Route cache/schema/profile helper paths through native calls once exposed.
       - [x] Bind native schema descriptor parse/write and typed payload binding validation.
-      - [ ] Add native schema codec selection to schema/profile helper entry points.
-      - [ ] Preserve pure-Python schema catalog as fixture/diagnostic fallback only.
+      - [x] Add native schema codec selection to schema/profile helper entry points.
+      - [x] Preserve pure-Python schema catalog as fixture/diagnostic fallback only.
       - [ ] Add tests proving schema mismatch diagnostics come from native status fields.
       - [ ] Keep cache helpers on host models until Rust exposes cache lease FFI operations.
     - [ ] Route recovery helper paths through native calls.

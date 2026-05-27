@@ -33,10 +33,10 @@
   - [x] Add tests for descriptor size/alignment pass-through.
 - [ ] Keep schema/profile interpretation Rust-owned; Python should expose stable descriptors and host-friendly wrappers only.
   - [x] Avoid body-specific schema decoding in Python helpers; native descriptor parse/write and binding validation delegate to Rust.
-  - [ ] Route `SchemaDescriptorHeader.pack/unpack` through native codec when a native runtime is selected.
-  - [ ] Route `Preview3TypedPayloadDescriptor.pack/unpack` through native codec when a native runtime is selected.
-  - [ ] Add public helper for native typed payload binding validation.
-  - [ ] Keep pure-Python descriptor struct packing available for tests and offline fixture inspection.
+  - [x] Route `SchemaDescriptorHeader.pack/unpack` through native codec when a native runtime is selected.
+  - [x] Route `Preview3TypedPayloadDescriptor.pack/unpack` through native codec when a native runtime is selected.
+  - [x] Add public helper for native typed payload binding validation.
+  - [x] Keep pure-Python descriptor struct packing available for tests and offline fixture inspection.
   - [ ] Add tests for native schema mismatch status mapping.
   - [x] Add tests for unknown schema/profile pass-through.
 

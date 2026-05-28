@@ -192,6 +192,25 @@ class FakeSession:
             max_events=max_events,
         )
 
+    def submit_result(
+        self,
+        *,
+        operation_id: int,
+        frame_id: int,
+        payload: bytes | bytearray | memoryview = b"",
+        result_payload: bytes | bytearray | memoryview | None = None,
+        max_events: int | None = None,
+    ) -> FakeResult:
+        operation = self.submit_operation(operation_id=operation_id, frame_id=frame_id, payload=bytes(payload))
+        selected_payload = payload if result_payload is None else result_payload
+        return FakeResult(
+            session_id=self.requested_session_id,
+            operation_id=operation.operation_id,
+            frame_id=operation.frame_id,
+            payload=bytes(selected_payload),
+            max_events=max_events,
+        )
+
     def cancel(self, *, frame_id: int) -> None:
         self.cancelled_frames.append(frame_id)
 
@@ -437,6 +456,28 @@ def test_native_client_connection_submits_and_polls_result() -> None:
         assert result.max_events == 4
         assert session.operations[0].parent_operation_id == 99
         assert session.operations[0].operation_group_id == 1234
+
+
+def test_native_client_connection_submits_and_polls_result_through_coarse_runtime_call() -> None:
+    backend = FakeBackend()
+    with connect_native_client_connection(backend=backend) as connection:
+        session = connection.open_session()
+
+        result = connection.submit_and_poll_result(
+            session,
+            operation_id=100,
+            frame_id=7,
+            payload=b"payload",
+            result_payload=b"result",
+            max_events=4,
+        )
+
+        assert result.session_id == 1
+        assert result.operation_id == 100
+        assert result.frame_id == 7
+        assert result.payload == b"result"
+        assert result.max_events == 4
+        assert len(session.operations) == 1
 
 
 def test_native_client_connection_sends_control_to_connection_and_session() -> None:

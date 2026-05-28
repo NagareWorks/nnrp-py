@@ -364,10 +364,11 @@ def test_build_benchmark_results_report_measures_native_scenarios_when_artifacts
     assert native_submit_result["outcome"] == "measured"
     assert native_submit_result["metrics"]["throughput_ops_per_sec"] > 0
     assert native_submit_result["metrics"]["completed_operations"] > 0
-    assert native_submit_result["metrics"]["native_ffi_calls_per_op"] == 3
-    assert native_submit_result["metrics"]["native_ffi_client_submit_calls_per_op"] == 1
-    assert native_submit_result["metrics"]["native_ffi_client_complete_operation_calls_per_op"] == 1
-    assert native_submit_result["metrics"]["native_ffi_client_await_events_calls_per_op"] == 1
+    assert native_submit_result["metrics"]["native_ffi_calls_per_op"] == 1
+    assert native_submit_result["metrics"]["native_ffi_client_submit_result_calls_per_op"] == 1
+    assert native_submit_result["metrics"]["native_ffi_client_submit_calls_per_op"] == 0
+    assert native_submit_result["metrics"]["native_ffi_client_complete_operation_calls_per_op"] == 0
+    assert native_submit_result["metrics"]["native_ffi_client_await_events_calls_per_op"] == 0
     allocation_result = results["l4.native.submit_result.allocations"]
     assert allocation_result["outcome"] == "measured"
     assert allocation_result["metrics"]["allocated_blocks_delta_per_op"] >= 0
@@ -691,6 +692,24 @@ class FakeNativeSession:
         assert max_events == 2
         return object()
 
+    def submit_result(
+        self,
+        *,
+        operation_id: int,
+        frame_id: int,
+        payload: bytes | bytearray | memoryview = b"",
+        result_payload: bytes | bytearray | memoryview | None = None,
+        max_events: int | None = None,
+    ):
+        assert operation_id == frame_id
+        assert max_events == 2
+        self.entrypoints.client_submit_result(
+            payload,
+            payload if result_payload is None else result_payload,
+            max_events,
+        )
+        return object()
+
 
 class FakeNativeEntrypoints:
     def __init__(self, session: FakeNativeSession) -> None:
@@ -701,6 +720,19 @@ class FakeNativeEntrypoints:
 
     def client_complete_operation(self, payload: bytes | bytearray | memoryview) -> None:
         self.session.connection.completed_payloads.append(bytes(payload))
+
+    def client_submit_result(
+        self,
+        payload: bytes | bytearray | memoryview,
+        result_payload: bytes | bytearray | memoryview,
+        max_events: int | None,
+    ) -> None:
+        self.session.connection.submitted_payloads.append(bytes(payload))
+        self.session.connection.completed_payloads.append(bytes(result_payload))
+        self.session.connection.polled_results.append(max_events)
+
+    def client_await_event(self, max_events: int | None) -> None:
+        self.session.connection.polled_results.append(max_events)
 
     def client_await_events(self, max_events: int | None) -> None:
         self.session.connection.polled_results.append(max_events)
@@ -732,6 +764,8 @@ class WouldBlockNativeConnection(FakeNativeConnection):
 
 
 class WouldBlockNativeSession:
+    entrypoints = None
+
     def submit_operation(
         self,
         *,
@@ -749,6 +783,17 @@ class WouldBlockNativeSession:
         return None
 
     def poll_result(self, operation: FakeNativeOperation, *, max_events: int | None = None):
+        raise NativeWouldBlockError(NativeStatus(FFI_STATUS_WOULD_BLOCK))
+
+    def submit_result(
+        self,
+        *,
+        operation_id: int,
+        frame_id: int,
+        payload: bytes | bytearray | memoryview = b"",
+        result_payload: bytes | bytearray | memoryview | None = None,
+        max_events: int | None = None,
+    ):
         raise NativeWouldBlockError(NativeStatus(FFI_STATUS_WOULD_BLOCK))
 
 

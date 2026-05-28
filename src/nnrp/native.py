@@ -15,7 +15,7 @@ from typing import Any, Protocol, TypeVar, runtime_checkable
 EXPECTED_PROTOCOL_MAJOR = 1
 EXPECTED_PROTOCOL_WIRE_FORMAT = 0
 EXPECTED_ABI_MAJOR = 1
-MINIMUM_ABI_MINOR = 3
+MINIMUM_ABI_MINOR = 4
 TRANSPORT_SLOT_QUIC = 0x00000001
 TRANSPORT_SLOT_TCP = 0x00000002
 RUNTIME_FEATURE_PROTOCOL_CORE = 0x0000000000000001
@@ -33,6 +33,7 @@ RUNTIME_FEATURE_SCHEMA_REGISTRY_HANDLES = 0x0000000000000800
 RUNTIME_FEATURE_BUFFER_HANDLES = 0x0000000000001000
 RUNTIME_FEATURE_EXECUTABLE_RESUME = 0x0000000000002000
 RUNTIME_FEATURE_CLIENT_COMPLETION_HELPERS = 0x0000000000004000
+RUNTIME_FEATURE_CLIENT_COARSE_RESULT_HELPERS = 0x0000000000008000
 SCHEMA_REGISTRY_ACTION_INSTALLED = 0
 SCHEMA_REGISTRY_ACTION_ALREADY_INSTALLED = 1
 SCHEMA_REGISTRY_ACTION_UPDATED = 2
@@ -61,6 +62,7 @@ REQUIRED_RUNTIME_FEATURES = (
     | RUNTIME_FEATURE_BUFFER_HANDLES
     | RUNTIME_FEATURE_EXECUTABLE_RESUME
     | RUNTIME_FEATURE_CLIENT_COMPLETION_HELPERS
+    | RUNTIME_FEATURE_CLIENT_COARSE_RESULT_HELPERS
 )
 REQUIRED_TRANSPORT_SLOTS = TRANSPORT_SLOT_TCP
 FFI_STATUS_OK = 0
@@ -611,6 +613,17 @@ class _NnrpClientDropOperationRequest(ctypes.Structure):
     ]
 
 
+class _NnrpClientSubmitResultRequest(ctypes.Structure):
+    _fields_ = [
+        ("session", _NnrpHandle),
+        ("operation_id", ctypes.c_uint64),
+        ("frame_id", ctypes.c_uint32),
+        ("submit_payload", _NnrpBufferView),
+        ("result_payload", _NnrpBufferView),
+        ("max_events", ctypes.c_size_t),
+    ]
+
+
 class _NnrpServerAcceptRequest(ctypes.Structure):
     _fields_ = [
         ("server", _NnrpHandle),
@@ -802,6 +815,12 @@ class NativeRuntimeEntrypoints:
             "nnrp_client_drop_operation",
             _NnrpFfiStatus,
             [_NnrpClientDropOperationRequest],
+        )
+        self.client_submit_result = _bind_native_function(
+            library,
+            "nnrp_client_submit_result",
+            _NnrpFfiStatus,
+            [_NnrpClientSubmitResultRequest, ctypes.POINTER(_NnrpHandle), ctypes.POINTER(_NnrpPollResult)],
         )
         self.client_send_flow_update = _bind_native_function(
             library, "nnrp_client_send_flow_update", _NnrpFfiStatus, [_NnrpServerFlowUpdateRequest]
@@ -2232,18 +2251,62 @@ class NativeRuntimeSession:
         self._ensure_open()
         operation.drop()
 
+    def submit_result(
+        self,
+        *,
+        operation_id: int,
+        frame_id: int,
+        payload: bytes | bytearray | memoryview = b"",
+        result_payload: bytes | bytearray | memoryview | None = None,
+        state: NativeOperationLifecycle | str | None = None,
+        max_events: int | None = None,
+    ) -> NativeRuntimeResult:
+        self._ensure_open()
+        if max_events is not None and max_events < 0:
+            raise ValueError("max_events must be non-negative")
+        submit_payload_view, _submit_payload_owner = _buffer_view_from_payload(payload)
+        selected_result_payload = payload if result_payload is None else result_payload
+        result_payload_view, _result_payload_owner = _buffer_view_from_payload(selected_result_payload)
+        request = _NnrpClientSubmitResultRequest(
+            self.handle.to_ffi(),
+            operation_id,
+            frame_id,
+            submit_payload_view,
+            result_payload_view,
+            0 if max_events is None else max_events,
+        )
+        out_operation = _NnrpHandle()
+        poll_result = _NnrpPollResult()
+        status = self.entrypoints.client_submit_result(request, ctypes.byref(out_operation), ctypes.byref(poll_result))
+        raise_for_native_status(status)
+        raise_for_native_status(poll_result.status)
+        native_poll_result = NativeRuntimePollResult.from_ffi(poll_result)
+        if native_poll_result.event is None:
+            raise NativeWouldBlockError(NativeStatus(FFI_STATUS_WOULD_BLOCK))
+        return NativeRuntimeResult.from_event(native_poll_result.event, state=state)
+
     def submit_and_poll_result(
         self,
         *,
         operation_id: int,
         frame_id: int,
         payload: bytes | bytearray | memoryview = b"",
+        result_payload: bytes | bytearray | memoryview | None = None,
         parent_operation_id: int | None = None,
         operation_group_id: int | None = None,
         scheduling_hint: NativeOperationSchedulingHint | None = None,
         state: NativeOperationLifecycle | str | None = None,
         max_events: int | None = None,
     ) -> NativeRuntimeResult:
+        if parent_operation_id is None and operation_group_id is None and scheduling_hint is None:
+            return self.submit_result(
+                operation_id=operation_id,
+                frame_id=frame_id,
+                payload=payload,
+                result_payload=result_payload,
+                state=state,
+                max_events=max_events,
+            )
         operation = self.submit_operation(
             operation_id=operation_id,
             frame_id=frame_id,
@@ -2260,6 +2323,7 @@ class NativeRuntimeSession:
         operation_id: int,
         frame_id: int,
         payload: bytes | bytearray | memoryview = b"",
+        result_payload: bytes | bytearray | memoryview | None = None,
         parent_operation_id: int | None = None,
         operation_group_id: int | None = None,
         scheduling_hint: NativeOperationSchedulingHint | None = None,
@@ -2271,6 +2335,7 @@ class NativeRuntimeSession:
             operation_id=operation_id,
             frame_id=frame_id,
             payload=payload,
+            result_payload=result_payload,
             parent_operation_id=parent_operation_id,
             operation_group_id=operation_group_id,
             scheduling_hint=scheduling_hint,

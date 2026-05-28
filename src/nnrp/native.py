@@ -2117,6 +2117,13 @@ class NativeRuntimeSession:
     _submit_result_poll_result: Any = field(default=None, init=False, repr=False, compare=False)
     _submit_result_out_operation_ref: Any = field(default=None, init=False, repr=False, compare=False)
     _submit_result_poll_result_ref: Any = field(default=None, init=False, repr=False, compare=False)
+    _submit_result_session_handle: Any = field(default=None, init=False, repr=False, compare=False)
+    _submit_result_payload_cache: Any = field(default=None, init=False, repr=False, compare=False)
+    _submit_result_payload_view: Any = field(default=None, init=False, repr=False, compare=False)
+    _submit_result_payload_owner: Any = field(default=None, init=False, repr=False, compare=False)
+    _submit_result_result_payload_cache: Any = field(default=None, init=False, repr=False, compare=False)
+    _submit_result_result_payload_view: Any = field(default=None, init=False, repr=False, compare=False)
+    _submit_result_result_payload_owner: Any = field(default=None, init=False, repr=False, compare=False)
 
     def submit(
         self,
@@ -2292,9 +2299,19 @@ class NativeRuntimeSession:
         self._ensure_open()
         if max_events is not None and max_events < 0:
             raise ValueError("max_events must be non-negative")
-        submit_payload_view, _submit_payload_owner = _buffer_view_from_payload(payload)
+        submit_payload_view, _submit_payload_owner = self._submit_result_buffer_view(
+            payload,
+            "_submit_result_payload_cache",
+            "_submit_result_payload_view",
+            "_submit_result_payload_owner",
+        )
         selected_result_payload = payload if result_payload is None else result_payload
-        result_payload_view, _result_payload_owner = _buffer_view_from_payload(selected_result_payload)
+        result_payload_view, _result_payload_owner = self._submit_result_buffer_view(
+            selected_result_payload,
+            "_submit_result_result_payload_cache",
+            "_submit_result_result_payload_view",
+            "_submit_result_result_payload_owner",
+        )
         request = self._submit_result_request
         if request is None:
             request = _NnrpClientSubmitResultRequest()
@@ -2305,7 +2322,8 @@ class NativeRuntimeSession:
             object.__setattr__(self, "_submit_result_poll_result", poll_result)
             object.__setattr__(self, "_submit_result_out_operation_ref", ctypes.byref(out_operation))
             object.__setattr__(self, "_submit_result_poll_result_ref", ctypes.byref(poll_result))
-        request.session = self.handle.to_ffi()
+            object.__setattr__(self, "_submit_result_session_handle", self.handle.to_ffi())
+        request.session = self._submit_result_session_handle
         request.operation_id = operation_id
         request.frame_id = frame_id
         request.submit_payload = submit_payload_view
@@ -2322,6 +2340,22 @@ class NativeRuntimeSession:
         if not poll_result.has_event:
             raise NativeWouldBlockError(NativeStatus(FFI_STATUS_WOULD_BLOCK))
         return NativeRuntimeResult.from_event(NativeRuntimeEvent.from_ffi(poll_result.event), state=state)
+
+    def _submit_result_buffer_view(
+        self,
+        payload: bytes | bytearray | memoryview,
+        cache_field: str,
+        view_field: str,
+        owner_field: str,
+    ) -> tuple[_NnrpBufferView, object | None]:
+        if isinstance(payload, bytes) and payload is getattr(self, cache_field):
+            return getattr(self, view_field), getattr(self, owner_field)
+        view, owner = _buffer_view_from_payload(payload)
+        if isinstance(payload, bytes):
+            object.__setattr__(self, cache_field, payload)
+            object.__setattr__(self, view_field, view)
+            object.__setattr__(self, owner_field, owner)
+        return view, owner
 
     def submit_and_poll_result(
         self,

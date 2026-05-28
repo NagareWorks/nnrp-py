@@ -28,6 +28,8 @@ def _write_staging_wheel(path: Path) -> Path:
         archive.writestr("nnrp/native_artifacts/linux-x86_64/libnnrp_ffi.so", b"linux")
         archive.writestr("nnrp/native_artifacts/windows-x86_64/manifest.json", b"{}")
         archive.writestr("nnrp/native_artifacts/windows-x86_64/nnrp_ffi.dll", b"windows")
+        archive.writestr("nnrp/native_artifacts/ios-arm64-sim/manifest.json", b"{}")
+        archive.writestr("nnrp/native_artifacts/ios-arm64-sim/libnnrp_ffi.a", b"ios-sim")
         archive.writestr(
             "nnrp_py-1.0.0rc3.dist-info/WHEEL",
             b"Wheel-Version: 1.0\nGenerator: test\nRoot-Is-Purelib: true\nTag: py3-none-any\n",
@@ -44,11 +46,12 @@ def test_build_native_wheels_splits_artifacts_and_retags_platforms(tmp_path: Pat
     built = build_native_wheels(source, output)
 
     assert [wheel.name for wheel in built] == [
+        "nnrp_py-1.0.0rc3-py3-none-ios_13_0_arm64_iphonesimulator.whl",
         "nnrp_py-1.0.0rc3-py3-none-manylinux_2_28_x86_64.whl",
         "nnrp_py-1.0.0rc3-py3-none-win_amd64.whl",
     ]
 
-    linux_wheel = built[0]
+    linux_wheel = built[1]
     with zipfile.ZipFile(linux_wheel) as archive:
         names = set(archive.namelist())
         wheel_metadata = archive.read("nnrp_py-1.0.0rc3.dist-info/WHEEL").decode("utf-8")
@@ -58,6 +61,15 @@ def test_build_native_wheels_splits_artifacts_and_retags_platforms(tmp_path: Pat
     assert "Root-Is-Purelib: false" in wheel_metadata
     assert "Tag: py3-none-manylinux_2_28_x86_64" in wheel_metadata
     assert "nnrp_py-1.0.0rc3.dist-info/RECORD" in names
+
+    ios_wheel = built[0]
+    with zipfile.ZipFile(ios_wheel) as archive:
+        ios_names = set(archive.namelist())
+        ios_metadata = archive.read("nnrp_py-1.0.0rc3.dist-info/WHEEL").decode("utf-8")
+
+    assert "nnrp/native_artifacts/ios-arm64-sim/libnnrp_ffi.a" in ios_names
+    assert "nnrp/native_artifacts/linux-x86_64/libnnrp_ffi.so" not in ios_names
+    assert "Tag: py3-none-ios_13_0_arm64_iphonesimulator" in ios_metadata
 
 
 def test_build_native_wheels_injects_matching_cffi_api_artifacts(tmp_path: Path) -> None:
@@ -74,18 +86,22 @@ def test_build_native_wheels_injects_matching_cffi_api_artifacts(tmp_path: Path)
     built = build_native_wheels(source, output, cffi_dir=cffi_dir)
 
     assert [wheel.name for wheel in built] == [
+        "nnrp_py-1.0.0rc3-py3-none-ios_13_0_arm64_iphonesimulator.whl",
         "nnrp_py-1.0.0rc3-cp311-cp311-manylinux_2_28_x86_64.whl",
         "nnrp_py-1.0.0rc3-cp312-cp312-win_amd64.whl",
     ]
-    with zipfile.ZipFile(built[0]) as archive:
+    with zipfile.ZipFile(built[1]) as archive:
         linux_names = set(archive.namelist())
         linux_metadata = archive.read("nnrp_py-1.0.0rc3.dist-info/WHEEL").decode("utf-8")
         linux_cffi_payload = archive.read("nnrp/_nnrp_cffi_api_submit_result.cpython-311-x86_64-linux-gnu.so")
-    with zipfile.ZipFile(built[1]) as archive:
+    with zipfile.ZipFile(built[2]) as archive:
         windows_names = set(archive.namelist())
         windows_metadata = archive.read("nnrp_py-1.0.0rc3.dist-info/WHEEL").decode("utf-8")
         windows_cffi_payload = archive.read("nnrp/_nnrp_cffi_api_submit_result.cp312-win_amd64.pyd")
+    with zipfile.ZipFile(built[0]) as archive:
+        ios_metadata = archive.read("nnrp_py-1.0.0rc3.dist-info/WHEEL").decode("utf-8")
 
+    assert "Tag: py3-none-ios_13_0_arm64_iphonesimulator" in ios_metadata
     assert "nnrp/_nnrp_cffi_api_submit_result.cpython-311-x86_64-linux-gnu.so" in linux_names
     assert "nnrp/_nnrp_cffi_api_submit_result.cp312-win_amd64.pyd" not in linux_names
     assert linux_cffi_payload == b"linux-cffi"

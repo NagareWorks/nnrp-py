@@ -52,6 +52,21 @@ def test_prepare_native_artifacts_installs_directory_packages(tmp_path: Path) ->
     ]
 
 
+def test_prepare_native_artifacts_normalizes_ios_simulator_arch(tmp_path: Path) -> None:
+    package_dir = _write_package(
+        tmp_path,
+        "ios-aarch64-sim",
+        os_name="ios",
+        arch="aarch64-sim",
+        library="libnnrp_ffi.a",
+    )
+    output = tmp_path / "out"
+
+    prepare_native_artifacts([package_dir], output)
+
+    assert output.joinpath("ios-arm64-sim", "libnnrp_ffi.a").read_bytes() == b"native"
+
+
 def test_prepare_native_artifacts_installs_release_zip_packages(tmp_path: Path) -> None:
     package_dir = _write_package(
         tmp_path / "packages",

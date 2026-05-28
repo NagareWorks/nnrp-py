@@ -17,6 +17,7 @@ _ARCH_ALIASES = {
     "amd64": "x86_64",
     "x64": "x86_64",
     "aarch64": "arm64",
+    "aarch64-sim": "arm64-sim",
     "armv7": "arm",
     "armv7l": "arm",
     "i386": "x86",

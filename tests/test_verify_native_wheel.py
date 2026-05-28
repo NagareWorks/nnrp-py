@@ -104,6 +104,32 @@ def test_verify_native_wheels_rejects_platform_tag_mismatch(tmp_path: Path) -> N
         verify_native_wheels([summary], require_native=True, verify_platform_tag=True)
 
 
+@pytest.mark.parametrize(
+    ("artifact_tag", "wheel_tag", "library"),
+    [
+        ("ios-arm64-sim", "ios_13_0_arm64_iphonesimulator", "libnnrp_ffi.a"),
+        ("ios-aarch64-sim", "ios_13_0_arm64_iphonesimulator", "libnnrp_ffi.a"),
+        ("ios-x86_64-sim", "ios_13_0_x86_64_iphonesimulator", "libnnrp_ffi.a"),
+    ],
+)
+def test_verify_native_wheels_accepts_ios_simulator_tags(
+    tmp_path: Path,
+    artifact_tag: str,
+    wheel_tag: str,
+    library: str,
+) -> None:
+    wheel = _write_wheel(
+        tmp_path / f"nnrp_py-1.0.0rc3-py3-none-{wheel_tag}.whl",
+        [
+            f"nnrp/native_artifacts/{artifact_tag}/manifest.json",
+            f"nnrp/native_artifacts/{artifact_tag}/{library}",
+        ],
+    )
+    summary = inspect_wheel(wheel)
+
+    verify_native_wheels([summary], require_native=True, require_single_platform=True, verify_platform_tag=True)
+
+
 def test_inspect_wheel_rejects_invalid_wheel_filenames(tmp_path: Path) -> None:
     not_wheel = tmp_path / "artifact.zip"
     not_wheel.write_bytes(b"")

@@ -165,7 +165,7 @@ jobs:
           python scripts/build_native_wheels.py --wheel artifacts/staged-wheel/*.whl --dist dist --cffi-dir artifacts/cffi-api
 
       - name: Verify packaged native artifacts
-        run: python scripts/verify_native_wheel.py --dist dist --require-native --reject-universal-native --require-single-platform --verify-platform-tag
+        run: python scripts/verify_native_wheel.py --dist dist --require-native --reject-universal-native --require-single-platform --verify-platform-tag --require-cffi-api
 
       - name: Bundle release artifacts
         run: |

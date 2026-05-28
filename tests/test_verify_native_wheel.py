@@ -33,6 +33,7 @@ def test_inspect_wheel_finds_packaged_native_artifacts(tmp_path: Path) -> None:
         [
             "nnrp/native_artifacts/windows-x86_64/manifest.json",
             "nnrp/native_artifacts/windows-x86_64/nnrp_ffi.dll",
+            "nnrp/_nnrp_cffi_api_submit_result.py",
         ],
     )
 
@@ -43,6 +44,7 @@ def test_inspect_wheel_finds_packaged_native_artifacts(tmp_path: Path) -> None:
     assert summary.libraries == ("nnrp/native_artifacts/windows-x86_64/nnrp_ffi.dll",)
     assert summary.artifact_tags == ("windows-x86_64",)
     assert summary.platform_tag == "win_amd64"
+    assert summary.cffi_api_entries == ("nnrp/_nnrp_cffi_api_submit_result.py",)
 
 
 def test_verify_native_wheels_rejects_empty_native_payload(tmp_path: Path) -> None:
@@ -102,6 +104,20 @@ def test_verify_native_wheels_rejects_platform_tag_mismatch(tmp_path: Path) -> N
 
     with pytest.raises(ValueError, match="platform tag does not match"):
         verify_native_wheels([summary], require_native=True, verify_platform_tag=True)
+
+
+def test_verify_native_wheels_rejects_missing_cffi_api_when_required(tmp_path: Path) -> None:
+    wheel = _write_wheel(
+        tmp_path / "nnrp_py-1.0.0rc3-py3-none-win_amd64.whl",
+        [
+            "nnrp/native_artifacts/windows-x86_64/manifest.json",
+            "nnrp/native_artifacts/windows-x86_64/nnrp_ffi.dll",
+        ],
+    )
+    summary = inspect_wheel(wheel)
+
+    with pytest.raises(ValueError, match="missing packaged cffi API module"):
+        verify_native_wheels([summary], require_native=True, require_cffi_api=True)
 
 
 @pytest.mark.parametrize(
@@ -176,3 +192,4 @@ def test_verify_native_wheel_cli_reports_success(
     captured = capsys.readouterr().out
     assert "1 manifest(s), 1 native library" in captured
     assert "platform=manylinux_2_28_x86_64" in captured
+    assert "cffi_api=0" in captured

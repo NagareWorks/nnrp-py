@@ -11,6 +11,8 @@ from pathlib import Path
 NATIVE_ARTIFACT_PREFIX = "nnrp/native_artifacts/"
 NATIVE_LIBRARY_SUFFIXES = (".dll", ".so", ".dylib", ".a")
 UNIVERSAL_PLATFORM_TAG = "any"
+CFFI_API_MODULE_PREFIX = "nnrp/_nnrp_cffi_api_submit_result"
+CFFI_API_SUFFIXES = (".py", ".pyd", ".so", ".dylib")
 
 ARTIFACT_PLATFORM_TAGS = {
     "windows-x86": "win32",
@@ -41,6 +43,7 @@ class WheelNativeSummary:
     libraries: tuple[str, ...]
     artifact_tags: tuple[str, ...]
     platform_tag: str
+    cffi_api_entries: tuple[str, ...] = ()
 
     @property
     def has_native_artifacts(self) -> bool:
@@ -62,7 +65,12 @@ def inspect_wheel(path: Path) -> WheelNativeSummary:
         name for name in names if name.startswith(NATIVE_ARTIFACT_PREFIX) and name.endswith(NATIVE_LIBRARY_SUFFIXES)
     )
     artifact_tags = tuple(sorted(_artifact_tags(manifests + libraries)))
-    return WheelNativeSummary(path, manifests, libraries, artifact_tags, platform_tag)
+    cffi_api_entries = tuple(
+        name
+        for name in names
+        if name.startswith(CFFI_API_MODULE_PREFIX) and name.endswith(CFFI_API_SUFFIXES)
+    )
+    return WheelNativeSummary(path, manifests, libraries, artifact_tags, platform_tag, cffi_api_entries)
 
 
 def inspect_dist(dist: Path) -> list[WheelNativeSummary]:
@@ -79,6 +87,7 @@ def verify_native_wheels(
     reject_universal_native: bool = False,
     require_single_platform: bool = False,
     verify_platform_tag: bool = False,
+    require_cffi_api: bool = False,
 ) -> None:
     summary_list = list(summaries)
     failures = [
@@ -120,6 +129,15 @@ def verify_native_wheels(
         )
         raise ValueError(f"wheel platform tag does not match embedded native artifact: {details}")
 
+    missing_cffi_api = [
+        summary
+        for summary in summary_list
+        if require_cffi_api and summary.has_native_artifacts and not summary.cffi_api_entries
+    ]
+    if missing_cffi_api:
+        wheel_names = ", ".join(summary.wheel.name for summary in missing_cffi_api)
+        raise ValueError(f"wheel is missing packaged cffi API module: {wheel_names}")
+
 
 def _artifact_tags(names: Iterable[str]) -> set[str]:
     return {
@@ -155,6 +173,7 @@ def main() -> int:
     parser.add_argument("--reject-universal-native", action="store_true")
     parser.add_argument("--require-single-platform", action="store_true")
     parser.add_argument("--verify-platform-tag", action="store_true")
+    parser.add_argument("--require-cffi-api", action="store_true")
     args = parser.parse_args()
 
     try:
@@ -165,6 +184,7 @@ def main() -> int:
             reject_universal_native=args.reject_universal_native,
             require_single_platform=args.require_single_platform,
             verify_platform_tag=args.verify_platform_tag,
+            require_cffi_api=args.require_cffi_api,
         )
     except ValueError as error:
         print(error, file=sys.stderr)
@@ -176,7 +196,8 @@ def main() -> int:
         print(
             f"{summary.wheel.name}: "
             f"{len(summary.manifests)} manifest(s), {library_count} native {library_label}, "
-            f"platform={summary.platform_tag}, artifacts={','.join(summary.artifact_tags) or '-'}"
+            f"platform={summary.platform_tag}, artifacts={','.join(summary.artifact_tags) or '-'}, "
+            f"cffi_api={len(summary.cffi_api_entries)}"
         )
     return 0
 

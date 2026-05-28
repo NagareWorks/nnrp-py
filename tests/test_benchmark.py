@@ -4,7 +4,14 @@ from pathlib import Path
 import pytest
 
 import nnrp.tools.benchmark as benchmark
-from nnrp import NativeArtifactError, token_delta_payload_descriptor, token_delta_schema_descriptor
+from nnrp import (
+    FFI_STATUS_WOULD_BLOCK,
+    NativeArtifactError,
+    NativeStatus,
+    NativeWouldBlockError,
+    token_delta_payload_descriptor,
+    token_delta_schema_descriptor,
+)
 from nnrp.tools.benchmark import build_benchmark_results_report, main, write_benchmark_results
 
 
@@ -219,6 +226,8 @@ def test_build_benchmark_results_report_measures_configured_scenarios(monkeypatc
     submit_result = results["l4.submit_result.inline_tensor.throughput"]
     assert submit_result["outcome"] == "measured"
     assert submit_result["metrics"]["throughput_ops_per_sec"] > 0
+    assert "cpu_percent" not in submit_result["metrics"]
+    assert "peak_memory_bytes" not in submit_result["metrics"]
 
     metadata_result = results["l4.metadata.session_open_ack.latency"]
     assert metadata_result["outcome"] == "measured"
@@ -227,6 +236,8 @@ def test_build_benchmark_results_report_measures_configured_scenarios(monkeypatc
     transport_result = results["l4.transport.quic.loopback.throughput"]
     assert transport_result["outcome"] == "measured"
     assert transport_result["metrics"]["throughput_ops_per_sec"] > 0
+    assert "cpu_percent" not in transport_result["metrics"]
+    assert "peak_memory_bytes" not in transport_result["metrics"]
 
     assert results["l4.metadata.submit_result.latency"]["outcome"] == "measured"
     assert results["l4.typed_payload.tensor_pack_unpack.latency"]["outcome"] == "measured"
@@ -237,6 +248,37 @@ def test_build_benchmark_results_report_measures_configured_scenarios(monkeypatc
     assert results["l4.native.artifact_probe.latency"]["outcome"] == "skip"
     assert results["l4.session.lifecycle.latency"]["outcome"] == "measured"
     assert results["l4.transport.tcp.loopback.throughput"]["outcome"] == "measured"
+
+
+def test_build_benchmark_results_report_can_profile_throughput_metrics(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(benchmark, "load_native_schema_codec", _missing_native_schema_codec)
+    monkeypatch.setattr(benchmark, "load_native_client", _missing_native_client)
+    monkeypatch.setattr(benchmark, "probe_native_artifact", _missing_native_probe)
+    plan = _plan_document()
+    scenarios = plan["scenarios"]
+    assert isinstance(scenarios, list)
+    for scenario in scenarios:
+        assert isinstance(scenario, dict)
+        workload = scenario.get("workload")
+        assert isinstance(workload, dict)
+        if workload.get("operation") in {"submit_result_loop", "transport_loopback"}:
+            workload["profile"] = True
+
+    report = build_benchmark_results_report(plan)
+
+    results = {result["id"]: result for result in report["results"]}
+    for scenario_id in (
+        "l4.submit_result.inline_tensor.throughput",
+        "l4.transport.quic.loopback.throughput",
+        "l4.transport.tcp.loopback.throughput",
+    ):
+        result = results[scenario_id]
+        assert result["outcome"] == "measured"
+        assert result["metrics"]["throughput_ops_per_sec"] > 0
+        assert result["metrics"]["cpu_percent"] >= 0
+        assert result["metrics"]["peak_memory_bytes"] >= 0
 
 
 def test_build_benchmark_results_report_skips_unknown_operations() -> None:
@@ -313,6 +355,23 @@ def test_build_benchmark_results_report_skips_native_scenarios_without_artifacts
     assert "missing probe artifact" in results["l4.native.artifact_probe.latency"]["message"]
 
 
+def test_build_benchmark_results_report_skips_native_allocation_when_result_is_not_ready(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    native_client = WouldBlockNativeClient()
+    monkeypatch.setattr(benchmark, "load_native_schema_codec", _missing_native_schema_codec)
+    monkeypatch.setattr(benchmark, "load_native_client", lambda: native_client)
+    monkeypatch.setattr(benchmark, "probe_native_artifact", _missing_native_probe)
+
+    report = build_benchmark_results_report(_plan_document())
+
+    results = {result["id"]: result for result in report["results"]}
+    allocation_result = results["l4.native.submit_result.allocations"]
+    assert allocation_result["outcome"] == "skip"
+    assert "allocation smoke unavailable" in allocation_result["message"]
+    assert native_client.connection.closed is True
+
+
 def test_build_benchmark_results_report_supports_single_sample_header_measurement() -> None:
     plan = _plan_document()
     scenarios = plan["scenarios"]
@@ -341,6 +400,7 @@ def test_build_benchmark_results_report_supports_single_sample_header_measuremen
             "non-negative integer",
         ),
         ({"operation": "submit_result_loop", "duration_seconds": 0}, "positive number"),
+        ({"operation": "submit_result_loop", "profile": "yes"}, "profile must be a boolean"),
         ({"operation": "transport_loopback", "probe_payload_bytes": 0}, "positive integer"),
         ({"operation": "native_artifact_probe", "artifact_path": []}, "artifact_path must be a string"),
     ],
@@ -507,6 +567,37 @@ class FakeNativeSession:
         assert max_events == 1
         self.connection.submitted_payloads.append(bytes(payload))
         return object()
+
+
+class WouldBlockNativeClient(FakeNativeClient):
+    def __init__(self) -> None:
+        self.connection = WouldBlockNativeConnection()
+
+
+class WouldBlockNativeConnection(FakeNativeConnection):
+    def open_session(
+        self,
+        *,
+        requested_session_id: int,
+        generation: int,
+        profile_id: int,
+        schema_id: int,
+        schema_version: int,
+    ):
+        assert (requested_session_id, generation, profile_id, schema_id, schema_version) == (1, 1, 0, 0, 0)
+        return WouldBlockNativeSession()
+
+
+class WouldBlockNativeSession:
+    def submit_and_poll_result(
+        self,
+        *,
+        operation_id: int,
+        frame_id: int,
+        payload: bytes | bytearray | memoryview = b"",
+        max_events: int | None = None,
+    ):
+        raise NativeWouldBlockError(NativeStatus(FFI_STATUS_WOULD_BLOCK))
 
 
 class FakeNativeProbe:

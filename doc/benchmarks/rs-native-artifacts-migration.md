@@ -26,12 +26,12 @@ The existing Python SDK owns helper-level packet construction, transport-oriente
 
 ## Pinned Native Contract
 
-The current preview3 binding work consumes `nnrp-rs` native artifact version `1.0.0-preview.3.2`.
+The current preview3 binding work consumes `nnrp-rs` native artifact version `1.0.0-preview.3.3`.
 
 This version is the native artifact contract pin for the current migration branch and includes:
 
 1. The `nnrp_runtime_capabilities` export.
-2. ABI version `1.1.0`.
+2. ABI version `1.2.0`.
 3. Protocol version `1/0`.
 4. Runtime feature flags for protocol core, client/server APIs, event polling, callback dispatch, cache/schema, recovery, typed payloads, and transport slots.
 5. Transport slot bits for TCP and optional QUIC.
@@ -65,26 +65,32 @@ Rules:
 | Run | Date | SDK commit | nnrp-rs artifact | Python | OS/arch | CPU | Notes |
 | --- | --- | --- | --- | --- | --- | --- | --- |
 | Pre-migration baseline | 2026-05-25 | b83dadb | N/A | 3.13.5 | windows/amd64 | Intel(R) Core(TM)2 Duo CPU T7700 @ 2.40GHz | Conformance benchmark runner selected and measured 9 scenarios. |
-| Post-migration native | TBD | TBD | 1.0.0-preview.3.2 | TBD | TBD | TBD | TBD |
+| Post-migration native | 2026-05-28 | 6c9a067 | 1.0.0-preview.3.3 | 3.13.5 | windows/amd64 | Intel64 Family 6 Model 15 Stepping 11, GenuineIntel | Local `nnrp-rs` release artifact installed with `scripts/prepare_native_artifacts.py`; conformance benchmark plan selected and measured 9 scenarios. |
 
 ### Latency Benchmarks
 
 | Benchmark | Payload | Iterations | Pre p50 | Pre p95 | Pre p99 | Post p50 | Post p95 | Post p99 | Delta | Notes |
 | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |
-| Header encode/decode | L0 header | 100000 | 3.7 us | 7.3 us | 15.5 us | TBD | TBD | TBD | TBD | Measured by `l4.header.encode_decode.latency`. |
-| Metadata encode/decode | session open/open ack | 100000 | 7.6 us | 15.6 us | 71.1 us | TBD | TBD | TBD | TBD | Measured by `l4.metadata.session_open_ack.latency`. |
-| Metadata encode/decode | frame submit/result push | 100000 | 5.9 us | 12.4 us | 53.9 us | TBD | TBD | TBD | TBD | Measured by `l4.metadata.submit_result.latency`. |
-| Typed payload pack/unpack | tensor descriptor plus payload | 100000 | 36.4 us | 83.4 us | 328.9 us | TBD | TBD | TBD | TBD | Measured by `l4.typed_payload.tensor_pack_unpack.latency`. |
-| Runtime probe | version plus capability query | 100000 | 1.0 us | 2.0 us | 2.8 us | TBD | TBD | TBD | TBD | Measured by `l4.runtime.probe.latency`. |
-| Session lifecycle | open plus close loop | 100000 | 9.6 us | 18.9 us | 43.9 us | TBD | TBD | TBD | TBD | Measured by `l4.session.lifecycle.latency`. |
+| Header encode/decode | L0 header | 100000 | 3.7 us | 7.3 us | 15.5 us | 3.7 us | 7.2 us | 17.0 us | p50 +0.0% | Measured by `l4.header.encode_decode.latency`. |
+| Metadata encode/decode | session open/open ack | 100000 | 7.6 us | 15.6 us | 71.1 us | 7.4 us | 14.6 us | 40.7 us | p50 -2.6% | Measured by `l4.metadata.session_open_ack.latency`. |
+| Metadata encode/decode | frame submit/result push | 100000 | 5.9 us | 12.4 us | 53.9 us | 6.0 us | 11.9 us | 26.7 us | p50 +1.7% | Measured by `l4.metadata.submit_result.latency`. |
+| Typed payload pack/unpack | tensor descriptor plus payload | 100000 | 36.4 us | 83.4 us | 328.9 us | 36.5 us | 77.0 us | 221.1 us | p50 +0.3% | Measured by `l4.typed_payload.tensor_pack_unpack.latency`. |
+| Runtime probe | version plus capability query | 100000 | 1.0 us | 2.0 us | 2.8 us | 1.0 us | 1.9 us | 2.1 us | p50 +0.0% | Measured by `l4.runtime.probe.latency`. |
+| Session lifecycle | open plus close loop | 100000 | 9.6 us | 18.9 us | 43.9 us | 9.8 us | 18.8 us | 55.2 us | p50 +2.1% | Measured by `l4.session.lifecycle.latency`. |
 
 ### Throughput Benchmarks
 
 | Benchmark | Payload | Duration | Pre throughput | Pre CPU | Pre peak memory | Post throughput | Post CPU | Post peak memory | Delta | Notes |
 | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |
-| Submit/result loop | inline tensor payload | 10 s | 95365.1 ops/s | TBD | TBD | TBD | TBD | TBD | TBD | Measured by `l4.submit_result.inline_tensor.throughput`. |
-| TCP loopback | request/result stream | 10 s | 83973.0 ops/s | TBD | TBD | TBD | TBD | TBD | TBD | Measured by `l4.transport.tcp.loopback.throughput` against the SDK local transport-probe loopback path. |
-| QUIC loopback | request/result stream | 10 s | 91296.2 ops/s | TBD | TBD | TBD | TBD | TBD | TBD | Optional slot; measured by `l4.transport.quic.loopback.throughput` against the SDK local transport-probe loopback path. |
+| Submit/result loop | inline tensor payload | 10 s | 95365.1 ops/s | TBD | TBD | 100471.2 ops/s | TBD | TBD | +5.4% | Measured by `l4.submit_result.inline_tensor.throughput` with raw throughput mode. |
+| TCP loopback | request/result stream | 10 s | 83973.0 ops/s | TBD | TBD | 91017.4 ops/s | TBD | TBD | +8.4% | Measured by `l4.transport.tcp.loopback.throughput` against the SDK local transport-probe loopback path with raw throughput mode. |
+| QUIC loopback | request/result stream | 10 s | 91296.2 ops/s | TBD | TBD | 89373.5 ops/s | TBD | TBD | -2.1% | Optional slot; measured by `l4.transport.quic.loopback.throughput` against the SDK local transport-probe loopback path with raw throughput mode. |
+
+### Interpretation
+
+Latency rows are effectively flat on p50 and improve on most tail measurements, so the native-backed binding did not introduce visible per-operation latency regression on this host.
+
+Raw throughput improves on submit/result and TCP loopback while QUIC loopback is within a small negative band on this host. CPU and peak-memory tracing remain available through the benchmark runner's profiled throughput mode, but those numbers are intentionally kept out of the raw pre/post comparison because tracing adds measurable per-iteration overhead.
 
 ## Migration Phases
 

@@ -31,7 +31,13 @@ from nnrp.core.packet import (
     unpack_tensor_body,
     unpack_tile_index_block,
 )
-from nnrp.native import NativeArtifactError, load_native_client, load_native_schema_codec, probe_native_artifact
+from nnrp.native import (
+    NativeArtifactError,
+    NativeWouldBlockError,
+    load_native_client,
+    load_native_schema_codec,
+    probe_native_artifact,
+)
 from nnrp.schema import (
     pack_schema_descriptor,
     pack_typed_payload_descriptor,
@@ -209,6 +215,7 @@ def _run_metadata_encode_decode(scenario_id: str, workload: dict[str, Any]) -> d
 def _run_submit_result_loop(scenario_id: str, workload: dict[str, Any]) -> dict[str, Any]:
     duration_seconds = _positive_float(workload.get("duration_seconds"), default=10.0)
     warmup_iterations = _non_negative_int(workload.get("warmup_iterations"), default=1_000)
+    profile = _bool(workload.get("profile"), default=False)
     submit_packet, result_packet = _build_submit_result_packets()
 
     def operation() -> None:
@@ -222,8 +229,8 @@ def _run_submit_result_loop(scenario_id: str, workload: dict[str, Any]) -> dict[
     for _ in range(warmup_iterations):
         operation()
 
-    throughput = _measure_throughput_ops_per_second(operation, duration_seconds)
-    return _measured_throughput_result(scenario_id, throughput)
+    metrics = _measure_throughput_metrics(operation, duration_seconds, profile=profile)
+    return _measured_throughput_result(scenario_id, metrics)
 
 
 def _run_submit_result_metadata_encode_decode(scenario_id: str, workload: dict[str, Any]) -> dict[str, Any]:
@@ -392,6 +399,8 @@ def _run_native_submit_result_allocation_smoke(scenario_id: str, workload: dict[
             "outcome": "measured",
             "metrics": metrics,
         }
+    except NativeWouldBlockError as error:
+        return _skip_result(scenario_id, f"native submit/result allocation smoke unavailable: {error}")
     finally:
         connection.close()
 
@@ -452,6 +461,7 @@ def _run_session_lifecycle(scenario_id: str, workload: dict[str, Any]) -> dict[s
 def _run_transport_loopback(scenario_id: str, workload: dict[str, Any]) -> dict[str, Any]:
     duration_seconds = _positive_float(workload.get("duration_seconds"), default=10.0)
     warmup_iterations = _non_negative_int(workload.get("warmup_iterations"), default=1_000)
+    profile = _bool(workload.get("profile"), default=False)
     payload_bytes = _positive_int(workload.get("probe_payload_bytes"), default=32 * 1024)
     probe = build_transport_probe_packet(
         metadata=_transport_probe_metadata(probe_id=7, probe_payload_bytes=payload_bytes),
@@ -474,8 +484,8 @@ def _run_transport_loopback(scenario_id: str, workload: dict[str, Any]) -> dict[
     for _ in range(warmup_iterations):
         operation()
 
-    throughput = _measure_throughput_ops_per_second(operation, duration_seconds)
-    return _measured_throughput_result(scenario_id, throughput)
+    metrics = _measure_throughput_metrics(operation, duration_seconds, profile=profile)
+    return _measured_throughput_result(scenario_id, metrics)
 
 
 def _build_submit_result_packets() -> tuple[bytes, bytes]:
@@ -600,13 +610,34 @@ def _measure_microseconds(operation: Callable[[], None], iterations: int) -> lis
     return samples
 
 
-def _measure_throughput_ops_per_second(operation: Callable[[], None], duration_seconds: float) -> float:
+def _measure_throughput_metrics(
+    operation: Callable[[], None],
+    duration_seconds: float,
+    *,
+    profile: bool,
+) -> dict[str, float | int]:
+    if profile:
+        gc.collect()
+        tracemalloc.start()
+        process_start = time.process_time()
     deadline = time.perf_counter() + duration_seconds
     completed = 0
-    while time.perf_counter() < deadline:
-        operation()
-        completed += 1
-    return completed / duration_seconds
+    try:
+        while time.perf_counter() < deadline:
+            operation()
+            completed += 1
+        if not profile:
+            return {"throughput_ops_per_sec": completed / duration_seconds}
+        _, peak_bytes = tracemalloc.get_traced_memory()
+    finally:
+        if profile:
+            tracemalloc.stop()
+    process_seconds = time.process_time() - process_start
+    return {
+        "throughput_ops_per_sec": completed / duration_seconds,
+        "cpu_percent": (process_seconds / duration_seconds) * 100,
+        "peak_memory_bytes": int(peak_bytes),
+    }
 
 
 def _measure_allocation_smoke(operation: Callable[[], None], iterations: int) -> dict[str, float]:
@@ -640,13 +671,11 @@ def _measured_latency_result(scenario_id: str, samples: list[float]) -> dict[str
     }
 
 
-def _measured_throughput_result(scenario_id: str, throughput_ops_per_second: float) -> dict[str, Any]:
+def _measured_throughput_result(scenario_id: str, metrics: dict[str, float | int]) -> dict[str, Any]:
     return {
         "id": scenario_id,
         "outcome": "measured",
-        "metrics": {
-            "throughput_ops_per_sec": throughput_ops_per_second,
-        },
+        "metrics": metrics,
     }
 
 
@@ -700,6 +729,14 @@ def _non_negative_int(value: object, *, default: int) -> int:
         return default
     if not isinstance(value, int) or value < 0:
         raise ValueError("benchmark workload warmup_iterations must be a non-negative integer")
+    return value
+
+
+def _bool(value: object, *, default: bool) -> bool:
+    if value is None:
+        return default
+    if not isinstance(value, bool):
+        raise ValueError("benchmark workload profile must be a boolean")
     return value
 
 

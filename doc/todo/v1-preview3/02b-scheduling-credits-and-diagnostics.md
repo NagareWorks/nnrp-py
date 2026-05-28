@@ -4,7 +4,7 @@
   - [x] Add immutable host model for session priority class values.
   - [x] Add immutable host model for operation scheduling hint values.
   - [x] Add validation tests for out-of-range priority and hint values.
-- [ ] Reconcile scheduling hint routing with the current native submit/control request structs before release.
+- [x] Reconcile scheduling hint routing with the current native submit/control request structs before release.
 - [x] Add Python host models for operation lifecycle state and cancel scope using upstream frozen enums.
 - [x] Surface connection/session/operation credit updates without redefining scheduler semantics in Python.
   - [x] Add credit update event/result wrapper types.

@@ -3,15 +3,15 @@
 - [x] Adapt Rust callback/polling result delivery into Python async-friendly primitives.
 - [x] Choose one default Python delivery model for preview3: async iterator, callback registration, or explicit polling.
 - [x] Keep backend selection behind an internal interface so tests can run against pure-Python fixtures and native artifacts.
-- [ ] Avoid per-frame Python object churn on the hot submit/result path; batch or borrow native buffers where the ABI allows it.
+- [x] Avoid per-frame Python object churn on the hot submit/result path; batch or borrow native buffers where the ABI allows it.
   - [x] Measure object allocation count for native submit/result loop.
     - [x] Add a local benchmark mode that records allocated Python objects per submit/result iteration.
     - [x] Capture baseline allocation count before changing payload ownership behavior.
   - [x] Add batch poll helper over native batched event polling.
-  - [ ] Add optional borrowed result payload helper for zero-copy delivery.
+  - [x] Defer optional borrowed result payload helpers to post-release zero-copy work.
     - [x] Confirm current Rust ABI exposes value buffer views and native-owned copied buffer handles.
-    - [ ] Decide whether borrowed result views are needed for the first Python release or can remain a post-release optimization.
-    - [ ] Add Python lifetime guard wrapper before exposing any borrowed view.
+    - [x] Decide whether borrowed result views are needed for the first Python release or can remain a post-release optimization.
+    - [x] Keep Python lifetime guard wrapper work paired with any future borrowed view exposure.
   - [x] Add regression test that hot-path payloads are not copied more than the documented boundary.
     - [x] Add submit payload copy-boundary test.
     - [x] Add result payload copy-boundary test.

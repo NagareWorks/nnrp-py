@@ -209,6 +209,18 @@ class NativeClientConnection:
         self._ensure_open()
         operation.cancel()
 
+    def complete_operation(
+        self,
+        operation: NativeRuntimeOperation,
+        payload: bytes | bytearray | memoryview = b"",
+    ) -> None:
+        self._ensure_open()
+        operation.complete(payload)
+
+    def drop_operation(self, operation: NativeRuntimeOperation) -> None:
+        self._ensure_open()
+        operation.drop()
+
     def operation_scope(
         self,
         operation: NativeRuntimeOperation,
@@ -221,6 +233,18 @@ class NativeClientConnection:
     def cancel_frame(self, session: NativeRuntimeSession, *, frame_id: int) -> None:
         self._ensure_open()
         session.cancel(frame_id=frame_id)
+
+    def send_flow_update(self, session: NativeRuntimeSession, *, frame_id: int) -> None:
+        self._ensure_open()
+        session.send_flow_update(frame_id=frame_id)
+
+    def send_result_hint(
+        self,
+        session: NativeRuntimeSession,
+        payload: bytes | bytearray | memoryview = b"",
+    ) -> None:
+        self._ensure_open()
+        session.send_result_hint(payload)
 
     def send_control(
         self,

@@ -24,6 +24,7 @@ from nnrp.native import (
     ERROR_FAMILY_SESSION,
     EVENT_KIND_CONTROL,
     EVENT_KIND_FLOW_UPDATED,
+    EVENT_KIND_RESULT_DROPPED,
     EVENT_KIND_RESULT_HINT,
     EVENT_KIND_RESULT_PUSHED,
     FFI_STATUS_CALLBACK_REJECTED,
@@ -97,7 +98,9 @@ from nnrp.native import (
     _NnrpCacheObjectId,
     _NnrpCallbackSink,
     _NnrpClientCancelRequest,
+    _NnrpClientCompleteOperationRequest,
     _NnrpClientConnectRequest,
+    _NnrpClientDropOperationRequest,
     _NnrpConnectionBootstrap,
     _NnrpControlRequest,
     _NnrpEvent,
@@ -147,7 +150,7 @@ class FakeLibrary:
         self,
         *,
         abi_major: int = 1,
-        abi_minor: int = 2,
+        abi_minor: int = 3,
         abi_patch: int = 0,
         protocol_major: int = 1,
         wire_format: int = 0,
@@ -164,7 +167,7 @@ class FakeLibrary:
             0,
             0,
             3,
-            1,
+            4,
             0,
             transport_slots,
             feature_flags,
@@ -226,6 +229,10 @@ class FakeRuntimeLibrary(FakeEntrypointLibrary):
         self.nnrp_client_close.handler = self._close
         self.nnrp_client_close_connection.handler = self._close_connection
         self.nnrp_client_cancel.handler = self._cancel
+        self.nnrp_client_complete_operation.handler = self._complete_operation
+        self.nnrp_client_drop_operation.handler = self._drop_operation
+        self.nnrp_client_send_flow_update.handler = self._send_flow_update
+        self.nnrp_client_send_result_hint.handler = self._send_result_hint
         self.nnrp_client_await_event.handler = self._await_event
         self.nnrp_client_await_events.handler = self._await_events
         self.nnrp_control.handler = self._control
@@ -299,6 +306,35 @@ class FakeRuntimeLibrary(FakeEntrypointLibrary):
     def _cancel(self, request: _NnrpClientCancelRequest) -> _NnrpFfiStatus:
         if request.session.kind != HANDLE_KIND_SESSION:
             return _NnrpFfiStatus(FFI_STATUS_INVALID_HANDLE, 0, 0, 0)
+        return self.status
+
+    def _complete_operation(self, request: _NnrpClientCompleteOperationRequest) -> _NnrpFfiStatus:
+        if request.operation.kind != HANDLE_KIND_OPERATION:
+            return _NnrpFfiStatus(FFI_STATUS_INVALID_HANDLE, 0, 0, 0)
+        payload = _read_buffer_view(request.payload)
+        self._event_payload_owner = ctypes.create_string_buffer(payload, len(payload)) if payload else None
+        self.event_kind = EVENT_KIND_RESULT_PUSHED
+        return self.status
+
+    def _drop_operation(self, request: _NnrpClientDropOperationRequest) -> _NnrpFfiStatus:
+        if request.operation.kind != HANDLE_KIND_OPERATION:
+            return _NnrpFfiStatus(FFI_STATUS_INVALID_HANDLE, 0, 0, 0)
+        self._event_payload_owner = ctypes.create_string_buffer(b"drop", 4)
+        self.event_kind = EVENT_KIND_RESULT_DROPPED
+        return self.status
+
+    def _send_flow_update(self, request: _NnrpServerFlowUpdateRequest) -> _NnrpFfiStatus:
+        if request.session.kind != HANDLE_KIND_SESSION:
+            return _NnrpFfiStatus(FFI_STATUS_INVALID_HANDLE, 0, 0, 0)
+        self._event_payload_owner = ctypes.create_string_buffer(b"flow", 4)
+        self.event_kind = EVENT_KIND_FLOW_UPDATED
+        return self.status
+
+    def _send_result_hint(self, request: _NnrpControlRequest) -> _NnrpFfiStatus:
+        if request.handle.kind != HANDLE_KIND_SESSION:
+            return _NnrpFfiStatus(FFI_STATUS_INVALID_HANDLE, 0, 0, 0)
+        self._event_payload_owner = ctypes.create_string_buffer(_read_buffer_view(request.payload), request.payload.len)
+        self.event_kind = EVENT_KIND_RESULT_HINT
         return self.status
 
     def _control(self, request: _NnrpControlRequest) -> _NnrpFfiStatus:
@@ -770,6 +806,10 @@ RUNTIME_ENTRYPOINT_SYMBOLS = [
     "nnrp_client_close",
     "nnrp_client_close_connection",
     "nnrp_client_cancel",
+    "nnrp_client_complete_operation",
+    "nnrp_client_drop_operation",
+    "nnrp_client_send_flow_update",
+    "nnrp_client_send_result_hint",
     "nnrp_client_await_event",
     "nnrp_client_await_events",
     "nnrp_server_bind",
@@ -884,12 +924,12 @@ def test_probe_native_artifact_accepts_matching_protocol(tmp_path: Path) -> None
 
     assert result.artifact_path == artifact
     assert result.abi_major == 1
-    assert result.abi_minor == 2
+    assert result.abi_minor == 3
     assert result.abi_patch == 0
     assert result.protocol_major == 1
     assert result.protocol_wire_format == 0
     assert result.sdk_channel == 3
-    assert result.sdk_revision == 1
+    assert result.sdk_revision == 4
     assert result.transport_slots == TRANSPORT_SLOT_TCP
     assert result.feature_flags == REQUIRED_RUNTIME_FEATURES
 
@@ -2079,6 +2119,68 @@ def test_native_runtime_session_submits_and_polls_result(tmp_path: Path) -> None
     assert async_result.payload == b"result"
 
 
+def test_native_runtime_session_completes_and_drops_operations_through_client_abi(tmp_path: Path) -> None:
+    artifact = tmp_path / "nnrp_ffi.dll"
+    artifact.write_bytes(b"fake")
+    library = FakeRuntimeLibrary()
+    session = (
+        load_native_client(artifact, library=library)
+        .connect(connection_id=12, generation=2, transport_id=TRANSPORT_SLOT_TCP)
+        .open_session(
+            requested_session_id=41,
+            generation=3,
+            profile_id=4,
+            schema_id=5,
+            schema_version=6,
+        )
+    )
+
+    completed = session.submit_operation(operation_id=99, frame_id=7, payload=b"submit")
+    session.complete_operation(completed, b"result")
+    completed_result = session.poll_result(completed, max_events=1)
+    dropped = session.submit_operation(operation_id=99, frame_id=7, payload=b"submit")
+    session.drop_operation(dropped)
+    dropped_result = session.poll_result(dropped, max_events=1)
+
+    assert completed_result.state is NativeOperationLifecycle.COMPLETED
+    assert completed_result.payload == b"result"
+    assert dropped_result.state is NativeOperationLifecycle.CANCELLED
+    assert library.nnrp_client_complete_operation.calls[0][0].operation.id == 99
+    assert _read_buffer_view(library.nnrp_client_complete_operation.calls[0][0].payload) == b"result"
+    assert library.nnrp_client_drop_operation.calls[0][0].operation.id == 99
+
+
+def test_native_runtime_session_sends_flow_update_and_result_hint_through_client_aliases(tmp_path: Path) -> None:
+    artifact = tmp_path / "nnrp_ffi.dll"
+    artifact.write_bytes(b"fake")
+    library = FakeRuntimeLibrary()
+    connection = load_native_client(artifact, library=library).connect(
+        connection_id=12,
+        generation=2,
+        transport_id=TRANSPORT_SLOT_TCP,
+    )
+    session = connection.open_session(
+        requested_session_id=41,
+        generation=3,
+        profile_id=4,
+        schema_id=5,
+        schema_version=6,
+    )
+    hint_payload = ResultHintMetadata(retry_after_ms=55).pack()
+
+    session.send_flow_update(frame_id=7)
+    flow_updates = connection.poll_credit_updates(max_events=1)
+    session.send_result_hint(hint_payload)
+    result_hints = connection.poll_result_hints(max_events=1)
+
+    assert library.nnrp_client_send_flow_update.calls[0][0].frame_id == 7
+    assert library.nnrp_client_send_flow_update.calls[0][0].session.id == 41
+    assert library.nnrp_client_send_result_hint.calls[0][0].control_code == 0x18
+    assert _read_buffer_view(library.nnrp_client_send_result_hint.calls[0][0].payload) == hint_payload
+    assert flow_updates[0].frame_id == 7
+    assert result_hints[0].metadata.retry_after_ms == 55
+
+
 def test_native_runtime_session_raises_when_result_is_not_available(tmp_path: Path) -> None:
     artifact = tmp_path / "nnrp_ffi.dll"
     artifact.write_bytes(b"fake")
@@ -2462,6 +2564,10 @@ def test_native_runtime_entrypoints_bind_frozen_symbol_table() -> None:
     assert library.nnrp_session_close.argtypes == [_NnrpHandle]
     assert library.nnrp_client_close.argtypes == [_NnrpHandle]
     assert library.nnrp_client_cancel.argtypes == [_NnrpClientCancelRequest]
+    assert library.nnrp_client_complete_operation.argtypes == [_NnrpClientCompleteOperationRequest]
+    assert library.nnrp_client_drop_operation.argtypes == [_NnrpClientDropOperationRequest]
+    assert library.nnrp_client_send_flow_update.argtypes == [_NnrpServerFlowUpdateRequest]
+    assert library.nnrp_client_send_result_hint.argtypes == [_NnrpControlRequest]
     assert library.nnrp_client_await_event.argtypes == [
         _NnrpHandle,
         ctypes.POINTER(_NnrpPollResult),

@@ -37,6 +37,7 @@
   - [x] Run conformance benchmark plan against native-backed Python helpers.
   - [ ] Run SDK-local benchmark plan against native-backed Python helpers.
     - [x] Add `doc/benchmarks/native-runtime-benchmark-plan.json`.
+    - [x] Wire SDK-local submit/result benchmark execution to the native completion ABI.
     - [ ] Run the SDK-local plan with a native artifact that can complete submit/result polling.
   - [x] Record p50/p95/p99 latency deltas.
   - [x] Record raw throughput deltas.

@@ -1,6 +1,6 @@
 # Python Preview3 Host API Surface
 
-- [ ] Replace Python-owned preview3 packet/session entry points with Rust-backed orchestration.
+- [x] Replace Python-owned preview3 packet/session entry points with Rust-backed orchestration.
   - [x] Add Rust-backed connection/session/submit/result/control facades.
   - [x] Redirect existing public preview helper call sites to the Rust-backed facades.
     - [x] Redirect client connection/session bootstrap helpers.
@@ -19,10 +19,10 @@
       - [x] Add host-friendly cancellation scope wrapper.
       - [x] Add host-friendly control event wrapper.
     - [x] Redirect adapter conformance execution from placeholder reports to native-backed smoke case execution.
-  - [ ] Remove or quarantine superseded Python-owned hot-path packet/session implementations.
-    - [ ] Keep packet codecs only for fixture inspection, diagnostics, and unsupported runtime combinations.
+  - [x] Remove or quarantine superseded Python-owned hot-path packet/session implementations.
+    - [x] Keep packet codecs only for fixture inspection, diagnostics, and unsupported runtime combinations.
       - [x] Move packet codec references in docs to fixture/diagnostic sections.
-      - [ ] Keep raw packet tests as protocol tests, not runtime API examples.
+      - [x] Keep raw packet tests as protocol tests, not runtime API examples.
     - [x] Add explicit fallback selection so native-backed paths are the default when artifacts are present.
       - [x] Add public/backend setting for require-native mode.
       - [x] Add tests for missing artifact fallback behavior.

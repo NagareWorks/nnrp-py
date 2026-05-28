@@ -16,6 +16,9 @@ _SPEC.loader.exec_module(_MODULE)
 
 build_native_wheels = _MODULE.build_native_wheels
 build_native_wheels_main = _MODULE.main
+_cffi_entries_for_artifact = _MODULE._cffi_entries_for_artifact
+_python_abi_tags = _MODULE._python_abi_tags
+_retag_wheel_metadata = _MODULE._retag_wheel_metadata
 
 
 def _write_staging_wheel(path: Path) -> Path:
@@ -55,6 +58,75 @@ def test_build_native_wheels_splits_artifacts_and_retags_platforms(tmp_path: Pat
     assert "Root-Is-Purelib: false" in wheel_metadata
     assert "Tag: py3-none-manylinux_2_28_x86_64" in wheel_metadata
     assert "nnrp_py-1.0.0rc3.dist-info/RECORD" in names
+
+
+def test_build_native_wheels_injects_matching_cffi_api_artifacts(tmp_path: Path) -> None:
+    source = _write_staging_wheel(tmp_path / "nnrp_py-1.0.0rc3-py3-none-any.whl")
+    output = tmp_path / "dist"
+    cffi_dir = tmp_path / "cffi-api"
+    linux_cffi = cffi_dir / "linux-x86_64" / "nnrp" / "_nnrp_cffi_api_submit_result.cpython-311-x86_64-linux-gnu.so"
+    windows_cffi = cffi_dir / "windows-x86_64" / "nnrp" / "_nnrp_cffi_api_submit_result.cp312-win_amd64.pyd"
+    linux_cffi.parent.mkdir(parents=True)
+    windows_cffi.parent.mkdir(parents=True)
+    linux_cffi.write_bytes(b"linux-cffi")
+    windows_cffi.write_bytes(b"windows-cffi")
+
+    built = build_native_wheels(source, output, cffi_dir=cffi_dir)
+
+    assert [wheel.name for wheel in built] == [
+        "nnrp_py-1.0.0rc3-cp311-cp311-manylinux_2_28_x86_64.whl",
+        "nnrp_py-1.0.0rc3-cp312-cp312-win_amd64.whl",
+    ]
+    with zipfile.ZipFile(built[0]) as archive:
+        linux_names = set(archive.namelist())
+        linux_metadata = archive.read("nnrp_py-1.0.0rc3.dist-info/WHEEL").decode("utf-8")
+        linux_cffi_payload = archive.read("nnrp/_nnrp_cffi_api_submit_result.cpython-311-x86_64-linux-gnu.so")
+    with zipfile.ZipFile(built[1]) as archive:
+        windows_names = set(archive.namelist())
+        windows_metadata = archive.read("nnrp_py-1.0.0rc3.dist-info/WHEEL").decode("utf-8")
+        windows_cffi_payload = archive.read("nnrp/_nnrp_cffi_api_submit_result.cp312-win_amd64.pyd")
+
+    assert "nnrp/_nnrp_cffi_api_submit_result.cpython-311-x86_64-linux-gnu.so" in linux_names
+    assert "nnrp/_nnrp_cffi_api_submit_result.cp312-win_amd64.pyd" not in linux_names
+    assert linux_cffi_payload == b"linux-cffi"
+    assert "Tag: cp311-cp311-manylinux_2_28_x86_64" in linux_metadata
+    assert "nnrp/_nnrp_cffi_api_submit_result.cp312-win_amd64.pyd" in windows_names
+    assert "nnrp/_nnrp_cffi_api_submit_result.cpython-311-x86_64-linux-gnu.so" not in windows_names
+    assert windows_cffi_payload == b"windows-cffi"
+    assert "Tag: cp312-cp312-win_amd64" in windows_metadata
+
+
+def test_build_native_wheels_ignores_missing_cffi_dir_and_rejects_file_path(tmp_path: Path) -> None:
+    assert _cffi_entries_for_artifact(tmp_path / "missing", "linux-x86_64") == {}
+
+    cffi_file = tmp_path / "cffi-api" / "linux-x86_64"
+    cffi_file.parent.mkdir()
+    cffi_file.write_text("not a directory", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="must be a directory"):
+        _cffi_entries_for_artifact(tmp_path / "cffi-api", "linux-x86_64")
+
+
+def test_build_native_wheels_rejects_mixed_cffi_python_abi_tags() -> None:
+    with pytest.raises(ValueError, match="exactly one Python ABI tag"):
+        _python_abi_tags(
+            {
+                "nnrp/_nnrp_cffi_api_submit_result.cpython-311-x86_64-linux-gnu.so": b"py311",
+                "nnrp/_nnrp_cffi_api_submit_result.cp312-win_amd64.pyd": b"py312",
+            }
+        )
+
+
+def test_build_native_wheels_adds_missing_metadata_tag() -> None:
+    metadata = _retag_wheel_metadata(
+        b"Wheel-Version: 1.0\nRoot-Is-Purelib: true\n",
+        python_tag="cp311",
+        abi_tag="cp311",
+        platform_tag="manylinux_2_28_x86_64",
+    ).decode("utf-8")
+
+    assert "Root-Is-Purelib: false" in metadata
+    assert "Tag: cp311-cp311-manylinux_2_28_x86_64" in metadata
 
 
 def test_build_native_wheels_clean_removes_stale_outputs(tmp_path: Path) -> None:

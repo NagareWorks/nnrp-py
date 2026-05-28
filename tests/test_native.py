@@ -4,9 +4,11 @@ import asyncio
 import ctypes
 import time
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
+import nnrp.native as native_module
 from nnrp.cache import CacheLeaseOutcome, CacheObjectIdentity
 from nnrp.core.messages.control import (
     ResultHintBudgetPolicy,
@@ -44,6 +46,7 @@ from nnrp.native import (
     HANDLE_KIND_OPERATION,
     HANDLE_KIND_SCHEMA_REGISTRY,
     HANDLE_KIND_SESSION,
+    NATIVE_BINDING_MODE_ENV,
     REQUIRED_RUNTIME_FEATURES,
     RESULT_STATE_COMPLETED,
     SCHEMA_ERROR_HASH_CONFLICT,
@@ -94,6 +97,8 @@ from nnrp.native import (
     NativeStatus,
     NativeStructuredDiagnostic,
     NativeWouldBlockError,
+    _load_native_cffi_submit_result_api,
+    _NativeCffiSubmitResultApi,
     _NnrpBufferView,
     _NnrpBufferViewMut,
     _NnrpCacheLeaseRequest,
@@ -2201,6 +2206,169 @@ def test_native_runtime_session_submits_and_polls_result(tmp_path: Path) -> None
     assert library.nnrp_client_submit.calls == []
     assert library.nnrp_client_complete_operation.calls == []
     assert library.nnrp_client_await_events.calls == []
+
+
+def test_native_runtime_session_submit_result_prefers_cffi_api_when_available(tmp_path: Path) -> None:
+    class FakeCffi:
+        def from_buffer(self, payload: bytes) -> bytes:
+            return payload
+
+        def new(self, type_name: str) -> SimpleNamespace:
+            assert type_name == "NnrpPyCompactResult *"
+            return SimpleNamespace(
+                status_code=0,
+                error_family=0,
+                protocol_error_code=0,
+                detail_code=0,
+                has_result=0,
+                event_kind=0,
+                result_state=0,
+                operation_id=0,
+                frame_id=0,
+                payload_len=0,
+            )
+
+    class FakeCffiLibrary:
+        def __init__(self) -> None:
+            self.calls: list[tuple[object, ...]] = []
+
+        def nnrp_py_client_submit_result_compact(self, *args: object) -> int:
+            self.calls.append(args)
+            out_result = args[-1]
+            out_result.status_code = FFI_STATUS_OK
+            out_result.error_family = 0
+            out_result.protocol_error_code = 0
+            out_result.detail_code = 0
+            out_result.has_result = 1
+            out_result.event_kind = EVENT_KIND_RESULT_PUSHED
+            out_result.result_state = RESULT_STATE_COMPLETED
+            out_result.operation_id = args[5]
+            out_result.frame_id = args[6]
+            out_result.payload_len = args[8]
+            return 0
+
+    artifact = tmp_path / "nnrp_ffi.dll"
+    artifact.write_bytes(b"fake")
+    library = FakeRuntimeLibrary(event_payload=b"ctypes-result")
+    cffi_library = FakeCffiLibrary()
+    cffi_api = _NativeCffiSubmitResultApi(FakeCffi(), cffi_library, b"fake-native")
+    session = (
+        load_native_client(artifact, library=library, cffi_submit_result_api=cffi_api)
+        .connect(connection_id=12, generation=2, transport_id=TRANSPORT_SLOT_TCP)
+        .open_session(
+            requested_session_id=41,
+            generation=3,
+            profile_id=4,
+            schema_id=5,
+            schema_version=6,
+        )
+    )
+    payload = b"payload"
+
+    result = session.submit_result(
+        operation_id=99,
+        frame_id=7,
+        payload=payload,
+        result_payload=payload,
+        max_events=2,
+    )
+
+    assert session.entrypoints.binding_mode == "cffi_api"
+    assert result.state is NativeOperationLifecycle.COMPLETED
+    assert result.operation_id == 99
+    assert result.frame_id == 7
+    assert result.payload == payload
+    assert cffi_library.calls[0][0] == b"fake-native"
+    assert cffi_library.calls[0][5:9] == (99, 7, payload, len(payload))
+    assert library.nnrp_client_submit_result_compact.calls == []
+
+
+def test_native_runtime_session_submit_result_falls_back_when_cffi_api_cannot_preserve_semantics(
+    tmp_path: Path,
+) -> None:
+    class FakeCffi:
+        def from_buffer(self, payload: bytes) -> bytes:
+            return payload
+
+        def new(self, _type_name: str) -> SimpleNamespace:
+            return SimpleNamespace()
+
+    class FakeCffiLibrary:
+        def __init__(self) -> None:
+            self.calls: list[tuple[object, ...]] = []
+
+        def nnrp_py_client_submit_result_compact(self, *args: object) -> int:
+            self.calls.append(args)
+            return 0
+
+    artifact = tmp_path / "nnrp_ffi.dll"
+    artifact.write_bytes(b"fake")
+    cffi_library = FakeCffiLibrary()
+    cffi_api = _NativeCffiSubmitResultApi(FakeCffi(), cffi_library, b"fake-native")
+
+    for kwargs in (
+        {"payload": b"payload", "result_payload": b"result", "max_events": 2},
+        {"payload": b"payload", "result_payload": b"payload", "max_events": 1},
+    ):
+        library = FakeRuntimeLibrary(event_payload=b"result")
+        session = (
+            load_native_client(artifact, library=library, cffi_submit_result_api=cffi_api)
+            .connect(connection_id=12, generation=2, transport_id=TRANSPORT_SLOT_TCP)
+            .open_session(
+                requested_session_id=41,
+                generation=3,
+                profile_id=4,
+                schema_id=5,
+                schema_version=6,
+            )
+        )
+
+        result = session.submit_result(operation_id=99, frame_id=7, **kwargs)
+
+        assert result.payload == kwargs["result_payload"]
+        assert library.nnrp_client_submit_result_compact.calls[0][0].operation_id == 99
+
+    assert cffi_library.calls == []
+
+
+def test_native_cffi_api_loader_respects_binding_mode(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    artifact = tmp_path / "nnrp_ffi.dll"
+    artifact.write_bytes(b"fake")
+    calls: list[str] = []
+
+    def fail_import(name: str) -> object:
+        calls.append(name)
+        raise ImportError("missing cffi API")
+
+    monkeypatch.setattr(native_module.importlib, "import_module", fail_import)
+    monkeypatch.delenv(NATIVE_BINDING_MODE_ENV, raising=False)
+
+    assert _load_native_cffi_submit_result_api(artifact) is None
+    assert calls == ["nnrp._nnrp_cffi_api_submit_result", "_nnrp_cffi_api_submit_result"]
+
+    calls.clear()
+    monkeypatch.setenv(NATIVE_BINDING_MODE_ENV, "ctypes")
+    assert _load_native_cffi_submit_result_api(artifact) is None
+    assert calls == []
+
+    monkeypatch.setenv(NATIVE_BINDING_MODE_ENV, "cffi_api")
+    with pytest.raises(NativeArtifactError, match="native cffi API binding is unavailable"):
+        _load_native_cffi_submit_result_api(artifact)
+
+    class FakeCffiLibrary:
+        def nnrp_py_client_submit_result_compact(self, *_args: object) -> int:
+            return 0
+
+    monkeypatch.setattr(
+        native_module.importlib,
+        "import_module",
+        lambda _name: SimpleNamespace(ffi=object(), lib=FakeCffiLibrary()),
+    )
+
+    api = _load_native_cffi_submit_result_api(artifact)
+
+    assert api is not None
+    assert api.library.nnrp_py_client_submit_result_compact() == 0
 
 
 def test_native_runtime_session_polls_result_with_batch_when_event_budget_allows(tmp_path: Path) -> None:

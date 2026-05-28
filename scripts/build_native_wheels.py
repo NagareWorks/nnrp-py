@@ -6,12 +6,14 @@ import base64
 import csv
 import hashlib
 import io
+import re
 import shutil
 import zipfile
 from pathlib import Path
 
 NATIVE_ARTIFACT_PREFIX = "nnrp/native_artifacts/"
 WHEEL_SUFFIX = ".whl"
+CFFI_EXTENSION_SUFFIXES = (".pyd", ".so", ".dylib")
 
 DEFAULT_PLATFORM_TAGS = {
     "windows-x86": "win32",
@@ -32,7 +34,13 @@ DEFAULT_PLATFORM_TAGS = {
 }
 
 
-def build_native_wheels(source_wheel: Path, output_dir: Path, *, clean: bool = False) -> list[Path]:
+def build_native_wheels(
+    source_wheel: Path,
+    output_dir: Path,
+    *,
+    clean: bool = False,
+    cffi_dir: Path | None = None,
+) -> list[Path]:
     if clean and output_dir.exists():
         shutil.rmtree(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -45,11 +53,7 @@ def build_native_wheels(source_wheel: Path, output_dir: Path, *, clean: bool = F
 
         dist_info = _find_dist_info(names)
         wheel_metadata_name = f"{dist_info}/WHEEL"
-        base_entries = {
-            name: archive.read(name)
-            for name in names
-            if name != f"{dist_info}/RECORD"
-        }
+        base_entries = {name: archive.read(name) for name in names if name != f"{dist_info}/RECORD"}
 
     built: list[Path] = []
     for artifact_tag in artifact_tags:
@@ -57,13 +61,22 @@ def build_native_wheels(source_wheel: Path, output_dir: Path, *, clean: bool = F
         if platform_tag is None:
             raise ValueError(f"no Python wheel platform tag is configured for native artifact {artifact_tag}")
 
-        entries = {
-            name: data
-            for name, data in base_entries.items()
-            if _keep_entry_for_artifact(name, artifact_tag)
-        }
-        entries[wheel_metadata_name] = _retag_wheel_metadata(entries[wheel_metadata_name], platform_tag)
-        output_wheel = output_dir / _retag_wheel_name(source_wheel.name, platform_tag)
+        entries = {name: data for name, data in base_entries.items() if _keep_entry_for_artifact(name, artifact_tag)}
+        cffi_entries = _cffi_entries_for_artifact(cffi_dir, artifact_tag)
+        entries.update(cffi_entries)
+        python_tag, abi_tag = _python_abi_tags(cffi_entries)
+        entries[wheel_metadata_name] = _retag_wheel_metadata(
+            entries[wheel_metadata_name],
+            python_tag=python_tag,
+            abi_tag=abi_tag,
+            platform_tag=platform_tag,
+        )
+        output_wheel = output_dir / _retag_wheel_name(
+            source_wheel.name,
+            python_tag=python_tag,
+            abi_tag=abi_tag,
+            platform_tag=platform_tag,
+        )
         entries[f"{dist_info}/RECORD"] = _build_record(entries)
         with zipfile.ZipFile(output_wheel, "w", compression=zipfile.ZIP_DEFLATED) as archive:
             for name, data in sorted(entries.items()):
@@ -96,7 +109,51 @@ def _keep_entry_for_artifact(name: str, artifact_tag: str) -> bool:
     return name.startswith(f"{NATIVE_ARTIFACT_PREFIX}{artifact_tag}/")
 
 
-def _retag_wheel_metadata(source: bytes, platform_tag: str) -> bytes:
+def _cffi_entries_for_artifact(cffi_dir: Path | None, artifact_tag: str) -> dict[str, bytes]:
+    if cffi_dir is None:
+        return {}
+
+    root = cffi_dir / artifact_tag
+    if not root.exists():
+        return {}
+    if not root.is_dir():
+        raise ValueError(f"cffi artifact path must be a directory: {root}")
+
+    entries: dict[str, bytes] = {}
+    for path in sorted(root.rglob("*")):
+        relative = path.relative_to(root).as_posix()
+        if path.is_file() and relative.startswith("nnrp/") and path.name.endswith(CFFI_EXTENSION_SUFFIXES):
+            entries[relative] = path.read_bytes()
+    return entries
+
+
+def _python_abi_tags(cffi_entries: dict[str, bytes]) -> tuple[str, str]:
+    tags = {
+        _cffi_python_tag(match)
+        for name in cffi_entries
+        for match in [_cffi_python_tag_match(name)]
+        if match is not None
+    }
+    if not tags:
+        return "py3", "none"
+    if len(tags) != 1:
+        raise ValueError(f"cffi API artifacts must use exactly one Python ABI tag: {','.join(sorted(tags))}")
+    tag = tags.pop()
+    return tag, tag
+
+
+def _cffi_python_tag_match(name: str) -> re.Match[str] | None:
+    return re.search(r"(?:\.|-)cpython-(?P<cpython>3\d{2})(?:[.-])|[.-](?P<cp>cp3\d{2})(?:[.-])", name)
+
+
+def _cffi_python_tag(match: re.Match[str]) -> str:
+    cp_tag = match.group("cp")
+    if cp_tag is not None:
+        return cp_tag
+    return f"cp{match.group('cpython')}"
+
+
+def _retag_wheel_metadata(source: bytes, *, python_tag: str, abi_tag: str, platform_tag: str) -> bytes:
     lines = source.decode("utf-8").splitlines()
     rewritten: list[str] = []
     wrote_tag = False
@@ -105,23 +162,23 @@ def _retag_wheel_metadata(source: bytes, platform_tag: str) -> bytes:
             rewritten.append("Root-Is-Purelib: false")
         elif line.startswith("Tag:"):
             if not wrote_tag:
-                rewritten.append(f"Tag: py3-none-{platform_tag}")
+                rewritten.append(f"Tag: {python_tag}-{abi_tag}-{platform_tag}")
                 wrote_tag = True
         else:
             rewritten.append(line)
     if not wrote_tag:
-        rewritten.append(f"Tag: py3-none-{platform_tag}")
+        rewritten.append(f"Tag: {python_tag}-{abi_tag}-{platform_tag}")
     return ("\n".join(rewritten) + "\n").encode("utf-8")
 
 
-def _retag_wheel_name(name: str, platform_tag: str) -> str:
+def _retag_wheel_name(name: str, *, python_tag: str, abi_tag: str, platform_tag: str) -> str:
     if not name.endswith(WHEEL_SUFFIX):
         raise ValueError(f"source file is not a wheel: {name}")
     stem = name[: -len(WHEEL_SUFFIX)]
     parts = stem.split("-")
     if len(parts) < 5:
         raise ValueError(f"invalid wheel filename: {name}")
-    parts[-3:] = ["py3", "none", platform_tag]
+    parts[-3:] = [python_tag, abi_tag, platform_tag]
     return "-".join(parts) + WHEEL_SUFFIX
 
 
@@ -152,9 +209,15 @@ def main() -> int:
     )
     parser.add_argument("--dist", type=Path, default=Path("dist"), help="Output directory for platform wheels.")
     parser.add_argument("--clean", action="store_true", help="Remove the output directory before writing wheels.")
+    parser.add_argument(
+        "--cffi-dir",
+        type=Path,
+        default=None,
+        help="Optional directory containing per-artifact-tag cffi API package entries.",
+    )
     args = parser.parse_args()
 
-    for wheel in build_native_wheels(args.wheel, args.dist, clean=args.clean):
+    for wheel in build_native_wheels(args.wheel, args.dist, clean=args.clean, cffi_dir=args.cffi_dir):
         print(wheel)
     return 0
 

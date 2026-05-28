@@ -39,11 +39,13 @@ nnrp-quic-smoke = "nnrp.tools.smoke:main"
 
 [project.optional-dependencies]
 dev = [
+  "cffi>=2.0.0",
   "mypy>=1.11.0",
   "pytest>=8.3.0",
   "pytest-asyncio>=0.24.0",
   "pytest-cov>=7.0.0",
   "ruff>=0.6.0",
+  "setuptools>=82.0.1",
 ]
 
 [tool.hatch.build.targets.wheel]

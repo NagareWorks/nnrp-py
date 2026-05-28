@@ -97,6 +97,8 @@ The native helpers provide:
 
 By default the native loader searches `nnrp/native_artifacts/<os>-<arch>/` inside the installed package. Set `NNRP_NATIVE_ARTIFACT_ROOT` when testing an external artifact tree. Pass `require_native=True` in host code that must fail fast instead of falling back to SDK-local fixtures.
 
+The native binding layer has two paths. The default `NNRP_NATIVE_BINDING_MODE=auto` tries a packaged cffi API fast path for compact submit/result operations and falls back to the zero-compile `ctypes` ABI path when that module is unavailable or cannot preserve the requested payload semantics. Set `NNRP_NATIVE_BINDING_MODE=ctypes` for compiler-free diagnostics, or `NNRP_NATIVE_BINDING_MODE=cffi_api` when a benchmark or deployment should fail fast unless the cffi API module is present.
+
 Polled native events and results expose Python-owned `bytes` payload snapshots. The current Python API does not expose borrowed result buffers, so a result object remains stable even if the native runtime reuses its poll buffer after the call returns.
 
 Cache leases and schema validation follow the same host/runtime split. Python code passes stable identifiers, descriptors, and payload views into the native runtime; lease policy, schema matching, and diagnostics remain owned by Rust:

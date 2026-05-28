@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import ctypes
+import importlib
 import os
 import platform
 from collections.abc import AsyncIterator, Callable
@@ -133,6 +134,7 @@ EVENT_KIND_ERROR = 10
 EVENT_KIND_RESULT_HINT = 11
 CONTROL_CODE_RESULT_HINT = 0x18
 DEFAULT_ARTIFACT_ROOT_ENV = "NNRP_NATIVE_ARTIFACT_ROOT"
+NATIVE_BINDING_MODE_ENV = "NNRP_NATIVE_BINDING_MODE"
 _CallbackEventT = TypeVar("_CallbackEventT")
 
 
@@ -793,7 +795,15 @@ class _NnrpSessionResumeRequest(ctypes.Structure):
 class NativeRuntimeEntrypoints:
     """ctypes entrypoint table for the frozen Rust runtime ABI."""
 
-    def __init__(self, library: Any) -> None:
+    def __init__(
+        self,
+        library: Any,
+        *,
+        artifact_path: Path | None = None,
+        cffi_submit_result_api: _NativeCffiSubmitResultApi | None = None,
+    ) -> None:
+        self.artifact_path = artifact_path
+        self.cffi_submit_result_api = cffi_submit_result_api
         self.current_protocol_version = _bind_native_function(
             library, "nnrp_current_protocol_version", _NnrpProtocolVersion, []
         )
@@ -1063,6 +1073,63 @@ class NativeRuntimeEntrypoints:
             "nnrp_dispatch_event",
             _NnrpFfiStatus,
             [_NnrpCallbackSink, ctypes.POINTER(_NnrpEvent)],
+        )
+
+    @property
+    def binding_mode(self) -> str:
+        return "cffi_api" if self.cffi_submit_result_api is not None else "ctypes"
+
+
+@dataclass(frozen=True)
+class _NativeCffiSubmitResultApi:
+    ffi: Any
+    library: Any
+    artifact_path_bytes: bytes
+
+    @property
+    def supports_max_events(self) -> bool:
+        return hasattr(self.library, "nnrp_py_client_submit_result_compact_v2")
+
+    def submit_result_compact(
+        self,
+        *,
+        session: NativeHandle,
+        operation_id: int,
+        frame_id: int,
+        payload_view: Any,
+        payload_len: int,
+        max_events: int,
+        out_result: Any,
+    ) -> int | None:
+        if self.supports_max_events:
+            return self.library.nnrp_py_client_submit_result_compact_v2(
+                self.artifact_path_bytes,
+                session.kind,
+                session.id,
+                session.generation,
+                session.flags,
+                operation_id,
+                frame_id,
+                payload_view,
+                payload_len,
+                max_events,
+                out_result,
+            )
+
+        if max_events != 2:
+            return None
+
+        return self.library.nnrp_py_client_submit_result_compact(
+            self.artifact_path_bytes,
+            session.kind,
+            session.id,
+            session.generation,
+            session.flags,
+            operation_id,
+            frame_id,
+            payload_view,
+            payload_len,
+            out_result,
         )
 
 
@@ -1852,10 +1919,91 @@ def _submit_result_from_ok_compact_ffi_result(
     return result
 
 
+def _submit_result_from_cffi_api_result(
+    compact: Any,
+    *,
+    connection: NativeHandle,
+    session: NativeHandle,
+    state: NativeOperationLifecycle | str | None,
+    result_payload: bytes | bytearray | memoryview,
+) -> NativeRuntimeResult:
+    status = _status_from_cffi_api_result(compact)
+    diagnostic = (
+        _NATIVE_RUNTIME_DIAGNOSTIC_OK
+        if status is _NATIVE_STATUS_OK
+        else NativeRuntimeDiagnostic(
+            status=status,
+            related_connection_id=0,
+            related_session_id=0,
+            related_operation_id=int(compact.operation_id),
+            related_frame_id=int(compact.frame_id),
+        )
+    )
+    structured_diagnostic = (
+        _NATIVE_STRUCTURED_DIAGNOSTIC_OK
+        if diagnostic is _NATIVE_RUNTIME_DIAGNOSTIC_OK
+        else NativeStructuredDiagnostic.from_runtime_diagnostic(diagnostic)
+    )
+    operation = object.__new__(NativeHandle)
+    object.__setattr__(operation, "kind", HANDLE_KIND_OPERATION)
+    object.__setattr__(operation, "id", int(compact.operation_id))
+    object.__setattr__(operation, "generation", 0)
+    object.__setattr__(operation, "flags", 0)
+    frame_id = int(compact.frame_id)
+    payload = _cffi_api_result_payload(int(compact.payload_len), result_payload)
+    event_kind = int(compact.event_kind)
+    runtime_event = object.__new__(NativeRuntimeEvent)
+    object.__setattr__(runtime_event, "kind", event_kind)
+    object.__setattr__(runtime_event, "connection", connection)
+    object.__setattr__(runtime_event, "session", session)
+    object.__setattr__(runtime_event, "operation", operation)
+    object.__setattr__(runtime_event, "frame_id", frame_id)
+    object.__setattr__(runtime_event, "payload", payload)
+    object.__setattr__(runtime_event, "diagnostic", diagnostic)
+
+    result = object.__new__(NativeRuntimeResult)
+    object.__setattr__(
+        result,
+        "state",
+        _compact_result_state(compact, status=status, state=state),
+    )
+    object.__setattr__(result, "operation_id", operation.id)
+    object.__setattr__(result, "frame_id", frame_id)
+    object.__setattr__(result, "payload", payload)
+    object.__setattr__(result, "event", runtime_event)
+    object.__setattr__(result, "diagnostic", structured_diagnostic)
+    return result
+
+
 def _compact_result_payload(view: _NnrpBufferView, result_payload: bytes | bytearray | memoryview) -> bytes:
     if isinstance(result_payload, bytes) and int(view.len) == len(result_payload):
         return result_payload
     return _copy_buffer_view(view)
+
+
+def _cffi_api_result_payload(length: int, result_payload: bytes | bytearray | memoryview) -> bytes:
+    if isinstance(result_payload, bytes) and length == len(result_payload):
+        return result_payload
+    view = memoryview(result_payload)
+    if length == view.nbytes:
+        return view.tobytes()
+    return view[:length].tobytes()
+
+
+def _status_from_cffi_api_result(compact: Any) -> NativeStatus:
+    if (
+        int(compact.status_code) == FFI_STATUS_OK
+        and int(compact.error_family) == ERROR_FAMILY_NONE
+        and int(compact.protocol_error_code) == 0
+        and int(compact.detail_code) == 0
+    ):
+        return _NATIVE_STATUS_OK
+    return NativeStatus(
+        int(compact.status_code),
+        int(compact.error_family),
+        int(compact.protocol_error_code),
+        int(compact.detail_code),
+    )
 
 
 def _compact_result_state(
@@ -2391,6 +2539,9 @@ class NativeRuntimeSession:
     _submit_result_max_events: Any = field(default=None, init=False, repr=False, compare=False)
     _submit_result_connection_handle: Any = field(default=None, init=False, repr=False, compare=False)
     _submit_result_native_session_handle: Any = field(default=None, init=False, repr=False, compare=False)
+    _cffi_submit_result_out: Any = field(default=None, init=False, repr=False, compare=False)
+    _cffi_submit_result_payload_cache: Any = field(default=None, init=False, repr=False, compare=False)
+    _cffi_submit_result_payload_view: Any = field(default=None, init=False, repr=False, compare=False)
 
     def submit(
         self,
@@ -2627,6 +2778,16 @@ class NativeRuntimeSession:
             object.__setattr__(self, "_submit_result_max_events", selected_max_events)
         request.operation_id = operation_id
         request.frame_id = frame_id
+        cffi_result = self._try_submit_result_cffi_api(
+            operation_id=operation_id,
+            frame_id=frame_id,
+            payload=payload,
+            selected_result_payload=selected_result_payload,
+            state=state,
+            max_events=selected_max_events,
+        )
+        if cffi_result is not None:
+            return cffi_result
         compact_result = self._submit_result_compact_result
         status = self._submit_result_client_submit_result_compact(
             request,
@@ -2705,6 +2866,65 @@ class NativeRuntimeSession:
             connection=self._submit_result_connection_handle,
             session=self._submit_result_native_session_handle,
             state=state,
+        )
+
+    def _try_submit_result_cffi_api(
+        self,
+        *,
+        operation_id: int,
+        frame_id: int,
+        payload: bytes | bytearray | memoryview,
+        selected_result_payload: bytes | bytearray | memoryview,
+        state: NativeOperationLifecycle | str | None,
+        max_events: int,
+    ) -> NativeRuntimeResult | None:
+        cffi_api = self.entrypoints.cffi_submit_result_api
+        if cffi_api is None or selected_result_payload is not payload:
+            return None
+
+        if self._cffi_submit_result_out is None:
+            object.__setattr__(
+                self,
+                "_cffi_submit_result_out",
+                cffi_api.ffi.new("NnrpPyCompactResult *"),
+            )
+
+        if isinstance(payload, bytes) and payload is self._cffi_submit_result_payload_cache:
+            payload_view = self._cffi_submit_result_payload_view
+        else:
+            payload_view = cffi_api.ffi.from_buffer(payload)
+            if isinstance(payload, bytes):
+                object.__setattr__(self, "_cffi_submit_result_payload_cache", payload)
+                object.__setattr__(self, "_cffi_submit_result_payload_view", payload_view)
+
+        wrapper_status = cffi_api.submit_result_compact(
+            session=self.handle.handle,
+            operation_id=operation_id,
+            frame_id=frame_id,
+            payload_view=payload_view,
+            payload_len=memoryview(payload).nbytes,
+            max_events=max_events,
+            out_result=self._cffi_submit_result_out,
+        )
+        if wrapper_status is None:
+            return None
+        if wrapper_status != 0:
+            raise NativeInternalError(
+                NativeStatus(FFI_STATUS_INTERNAL_ERROR),
+                f"native cffi API submit/result wrapper failed: {wrapper_status}",
+            )
+
+        result = self._cffi_submit_result_out
+        status = _status_from_cffi_api_result(result)
+        raise_for_native_status(status)
+        if not result.has_result:
+            raise NativeWouldBlockError(NativeStatus(FFI_STATUS_WOULD_BLOCK))
+        return _submit_result_from_cffi_api_result(
+            result,
+            connection=self._submit_result_connection_handle,
+            session=self._submit_result_native_session_handle,
+            state=state,
+            result_payload=selected_result_payload,
         )
 
     def submit_and_poll_result(
@@ -2894,18 +3114,56 @@ def load_native_library(artifact_path: Path | str) -> ctypes.CDLL:
         raise NativeArtifactError(f"failed to load native artifact {artifact_path}: {error}") from error
 
 
+def _load_native_cffi_submit_result_api(artifact_path: Path) -> _NativeCffiSubmitResultApi | None:
+    mode = os.environ.get(NATIVE_BINDING_MODE_ENV, "auto").strip().lower().replace("-", "_")
+    if mode in {"", "auto"}:
+        required = False
+    elif mode in {"ctypes", "ctypes_abi"}:
+        return None
+    elif mode in {"cffi", "cffi_api"}:
+        required = True
+    else:
+        raise NativeArtifactError(f"unsupported native binding mode: {mode}")
+
+    try:
+        try:
+            module = importlib.import_module("nnrp._nnrp_cffi_api_submit_result")
+        except ImportError:
+            module = importlib.import_module("_nnrp_cffi_api_submit_result")
+        ffi = module.ffi
+        library = module.lib
+        if not hasattr(library, "nnrp_py_client_submit_result_compact") and not hasattr(
+            library,
+            "nnrp_py_client_submit_result_compact_v2",
+        ):
+            raise NativeArtifactError("native cffi API module does not expose submit/result compact wrapper")
+        return _NativeCffiSubmitResultApi(ffi, library, os.fsencode(artifact_path))
+    except (ImportError, AttributeError, OSError, RuntimeError, NativeArtifactError) as error:
+        if required:
+            raise NativeArtifactError(f"native cffi API binding is unavailable: {error}") from error
+        return None
+
+
 def load_native_runtime(
     artifact_path: Path | str | None = None,
     *,
     root: Path | str | None = None,
     native_platform: NativePlatform | None = None,
     library: Any | None = None,
+    cffi_submit_result_api: _NativeCffiSubmitResultApi | None = None,
 ) -> NativeRuntimeEntrypoints:
     resolved_path = Path(artifact_path) if artifact_path is not None else resolve_native_artifact(root, native_platform)
     loaded_library = library if library is not None else load_native_library(resolved_path)
     capabilities = _call_runtime_capabilities(loaded_library)
     _validate_runtime_capabilities(capabilities)
-    return NativeRuntimeEntrypoints(loaded_library)
+    resolved_cffi_api = cffi_submit_result_api
+    if resolved_cffi_api is None and library is None:
+        resolved_cffi_api = _load_native_cffi_submit_result_api(resolved_path)
+    return NativeRuntimeEntrypoints(
+        loaded_library,
+        artifact_path=resolved_path,
+        cffi_submit_result_api=resolved_cffi_api,
+    )
 
 
 def load_native_client(
@@ -2914,9 +3172,16 @@ def load_native_client(
     root: Path | str | None = None,
     native_platform: NativePlatform | None = None,
     library: Any | None = None,
+    cffi_submit_result_api: _NativeCffiSubmitResultApi | None = None,
 ) -> NativeRuntimeClient:
     return NativeRuntimeClient(
-        load_native_runtime(artifact_path, root=root, native_platform=native_platform, library=library)
+        load_native_runtime(
+            artifact_path,
+            root=root,
+            native_platform=native_platform,
+            library=library,
+            cffi_submit_result_api=cffi_submit_result_api,
+        )
     )
 
 

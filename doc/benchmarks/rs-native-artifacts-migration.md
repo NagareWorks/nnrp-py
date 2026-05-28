@@ -22,7 +22,9 @@ The existing Python SDK owns helper-level packet construction, transport-oriente
 2. Load native artifacts by platform tag and architecture at import or first-use time.
 3. Probe the loaded artifact for ABI version, protocol version, enabled transport slots, and feature flags before accepting it.
 4. Route runtime operations through the native backend when the probe passes.
-5. Keep a pure-Python fallback only for fixture inspection, diagnostics, and explicitly unsupported runtime combinations.
+5. Prefer a packaged cffi API fast path for compact submit/result operations when `NNRP_NATIVE_BINDING_MODE=auto`.
+6. Fall back to the zero-compile `ctypes` ABI path when the cffi API module is unavailable, a local environment cannot compile extension modules, or a call shape cannot be represented by the current cffi wrapper.
+7. Keep a pure-Python fallback only for fixture inspection, diagnostics, and explicitly unsupported runtime combinations.
 
 ## Pinned Native Contract
 
@@ -105,5 +107,4 @@ Raw throughput improves on submit/result and TCP loopback while QUIC loopback is
 ## Open Decisions
 
 1. Whether Python should ship one wheel per platform or a thin wheel plus externally resolved native artifacts.
-2. Whether the first binding layer should use `ctypes` directly or a generated binding layer over the stable C ABI.
-3. Which native capability probe names are considered stable enough for Python-side feature gating.
+2. Which native capability probe names are considered stable enough for Python-side feature gating.

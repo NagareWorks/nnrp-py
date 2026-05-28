@@ -1,9 +1,9 @@
 # Python Preview3 Control Events And Recovery
 
 - [x] Add async-friendly wrappers for result/event pump delivery.
-- [ ] Add async-friendly wrappers for `FLOW_UPDATE` and current control-event result hints.
+- [x] Add async-friendly wrappers for `FLOW_UPDATE` and current control-event result hints.
   - [x] Add `FLOW_UPDATE` event wrapper over Rust poll results.
-  - [ ] Add host-facing `RESULT_HINT` wrapper over the native `NNRP_EVENT_RESULT_HINT` event kind.
+  - [x] Add host-facing `RESULT_HINT` wrapper over the native `NNRP_EVENT_RESULT_HINT` event kind.
   - [x] Add async iterator helpers for control-event filtering.
   - [x] Add cancellation behavior tests for control-event iterators.
 - [x] Keep Python event delivery aligned with Rust-native semantics rather than inventing a second Python session-pump contract.

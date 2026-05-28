@@ -1,5 +1,6 @@
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -365,7 +366,8 @@ def test_build_benchmark_results_report_measures_native_scenarios_when_artifacts
     assert native_submit_result["metrics"]["throughput_ops_per_sec"] > 0
     assert native_submit_result["metrics"]["completed_operations"] > 0
     assert native_submit_result["metrics"]["native_ffi_calls_per_op"] == 1
-    assert native_submit_result["metrics"]["native_ffi_client_submit_result_calls_per_op"] == 1
+    assert native_submit_result["metrics"]["native_ffi_client_submit_result_compact_calls_per_op"] == 1
+    assert native_submit_result["metrics"]["native_ffi_client_submit_result_calls_per_op"] == 0
     assert native_submit_result["metrics"]["native_ffi_client_submit_calls_per_op"] == 0
     assert native_submit_result["metrics"]["native_ffi_client_complete_operation_calls_per_op"] == 0
     assert native_submit_result["metrics"]["native_ffi_client_await_events_calls_per_op"] == 0
@@ -382,6 +384,61 @@ def test_build_benchmark_results_report_measures_native_scenarios_when_artifacts
     assert set(native_client.connection.submitted_payloads) == {b"x" * 8}
     assert native_client.connection.closed is True
     assert native_probe.calls == [(None, None)] * 5
+
+
+def test_native_submit_result_cffi_api_loop_measures_when_wrapper_is_available(monkeypatch: pytest.MonkeyPatch) -> None:
+    class FakeFFI:
+        def from_buffer(self, payload: bytes):
+            return payload
+
+        def new(self, _type_name: str):
+            return SimpleNamespace(status_code=0, has_result=0)
+
+    class FakeCffiApi:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def nnrp_py_client_submit_result_compact(self, *_args):
+            self.calls += 1
+            out_result = _args[-1]
+            out_result.status_code = 0
+            out_result.has_result = 1
+            return 0
+
+    native_client = FakeNativeClient()
+    cffi_api = FakeCffiApi()
+    monkeypatch.setattr(benchmark, "default_artifact_root", lambda: Path("native-root"))
+    monkeypatch.setattr(benchmark, "resolve_native_artifact", lambda _root: Path("nnrp_ffi.dll"))
+    monkeypatch.setattr(benchmark, "load_native_client", lambda _artifact_path=None: native_client)
+    monkeypatch.setattr(benchmark, "_load_cffi_api_submit_result_module", lambda: (FakeFFI(), cffi_api))
+
+    result = benchmark._run_native_submit_result_cffi_api_loop(
+        "l4.native.submit_result.cffi_api.throughput",
+        {"duration_seconds": 0.01, "warmup_iterations": 1, "payload_bytes": 8},
+    )
+
+    assert result["outcome"] == "measured"
+    assert result["metrics"]["native_binding_mode"] == "cffi_api"
+    assert result["metrics"]["native_ffi_client_submit_result_compact_calls_per_op"] == 1
+    assert cffi_api.calls > 0
+    assert native_client.connection.closed is True
+
+
+def test_native_submit_result_cffi_api_loop_skips_wrapper_failures(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(benchmark, "resolve_native_artifact", lambda _root: Path("nnrp_ffi.dll"))
+    monkeypatch.setattr(
+        benchmark,
+        "_load_cffi_api_submit_result_module",
+        lambda: (_ for _ in ()).throw(OSError("no compiler")),
+    )
+
+    result = benchmark._run_native_submit_result_cffi_api_loop(
+        "l4.native.submit_result.cffi_api.throughput",
+        {"duration_seconds": 0.01, "warmup_iterations": 1, "payload_bytes": 8},
+    )
+
+    assert result["outcome"] == "skip"
+    assert "no compiler" in result["message"]
 
 
 def test_drain_native_setup_events_ignores_single_poll_would_block() -> None:
@@ -638,6 +695,7 @@ class FakeNativeConnection:
         self.submitted_payloads: list[bytes] = []
         self.completed_payloads: list[bytes] = []
         self.polled_results: list[int | None] = []
+        self.opened_session: FakeNativeSession | None = None
         self.closed = False
 
     def open_session(
@@ -650,7 +708,8 @@ class FakeNativeConnection:
         schema_version: int,
     ):
         assert (requested_session_id, generation, profile_id, schema_id, schema_version) == (1, 1, 0, 0, 0)
-        return FakeNativeSession(self)
+        self.opened_session = FakeNativeSession(self)
+        return self.opened_session
 
     def poll_events_batch(self, *, max_events: int):
         self.polled_batches.append(max_events)
@@ -667,6 +726,7 @@ class FakeNativeSession:
     def __init__(self, connection: FakeNativeConnection) -> None:
         self.connection = connection
         self.entrypoints = FakeNativeEntrypoints(self)
+        self.handle = SimpleNamespace(handle=SimpleNamespace(kind=2, id=1, generation=1, flags=0))
 
     def submit_operation(
         self,

@@ -34,6 +34,7 @@ RUNTIME_FEATURE_BUFFER_HANDLES = 0x0000000000001000
 RUNTIME_FEATURE_EXECUTABLE_RESUME = 0x0000000000002000
 RUNTIME_FEATURE_CLIENT_COMPLETION_HELPERS = 0x0000000000004000
 RUNTIME_FEATURE_CLIENT_COARSE_RESULT_HELPERS = 0x0000000000008000
+RUNTIME_FEATURE_CLIENT_COMPACT_RESULT_HELPERS = 0x0000000000010000
 SCHEMA_REGISTRY_ACTION_INSTALLED = 0
 SCHEMA_REGISTRY_ACTION_ALREADY_INSTALLED = 1
 SCHEMA_REGISTRY_ACTION_UPDATED = 2
@@ -46,6 +47,13 @@ SESSION_RECOVERY_OUTCOME_FRESH = 0
 SESSION_RECOVERY_OUTCOME_RESUME_ENABLED = 1
 SESSION_RECOVERY_OUTCOME_RESUMED = 2
 SESSION_RECOVERY_OUTCOME_RESUME_REJECTED = 3
+RESULT_STATE_NONE = 0
+RESULT_STATE_COMPLETED = 1
+RESULT_STATE_PARTIAL = 2
+RESULT_STATE_DEGRADED = 3
+RESULT_STATE_STALE_REUSE = 4
+RESULT_STATE_CANCELLED = 5
+RESULT_STATE_FAILED = 6
 REQUIRED_RUNTIME_FEATURES = (
     RUNTIME_FEATURE_PROTOCOL_CORE
     | RUNTIME_FEATURE_CLIENT_API
@@ -63,6 +71,7 @@ REQUIRED_RUNTIME_FEATURES = (
     | RUNTIME_FEATURE_EXECUTABLE_RESUME
     | RUNTIME_FEATURE_CLIENT_COMPLETION_HELPERS
     | RUNTIME_FEATURE_CLIENT_COARSE_RESULT_HELPERS
+    | RUNTIME_FEATURE_CLIENT_COMPACT_RESULT_HELPERS
 )
 REQUIRED_TRANSPORT_SLOTS = TRANSPORT_SLOT_TCP
 FFI_STATUS_OK = 0
@@ -572,6 +581,20 @@ class _NnrpPollResult(ctypes.Structure):
     ]
 
 
+class _NnrpCompactResult(ctypes.Structure):
+    _fields_ = [
+        ("status", _NnrpFfiStatus),
+        ("has_result", ctypes.c_uint8),
+        ("event_kind", ctypes.c_uint32),
+        ("result_state", ctypes.c_uint32),
+        ("operation", _NnrpHandle),
+        ("operation_id", ctypes.c_uint64),
+        ("frame_id", ctypes.c_uint32),
+        ("payload", _NnrpBufferView),
+        ("diagnostic", _NnrpFfiDiagnostic),
+    ]
+
+
 class _NnrpConnectionBootstrap(ctypes.Structure):
     _fields_ = [
         ("connection_id", ctypes.c_uint64),
@@ -844,6 +867,12 @@ class NativeRuntimeEntrypoints:
             "nnrp_client_submit_result",
             _NnrpFfiStatus,
             [_NnrpClientSubmitResultRequest, ctypes.POINTER(_NnrpHandle), ctypes.POINTER(_NnrpPollResult)],
+        )
+        self.client_submit_result_compact = _bind_native_function(
+            library,
+            "nnrp_client_submit_result_compact",
+            _NnrpFfiStatus,
+            [_NnrpClientSubmitResultRequest, ctypes.POINTER(_NnrpCompactResult)],
         )
         self.client_send_flow_update = _bind_native_function(
             library, "nnrp_client_send_flow_update", _NnrpFfiStatus, [_NnrpServerFlowUpdateRequest]
@@ -1726,6 +1755,125 @@ def _submit_result_from_ok_result_pushed_ffi_event(
     return result
 
 
+def _submit_result_from_compact_ffi_result(
+    compact: _NnrpCompactResult,
+    *,
+    connection: NativeHandle,
+    session: NativeHandle,
+    state: NativeOperationLifecycle | str | None,
+    result_payload: bytes | bytearray | memoryview,
+) -> NativeRuntimeResult:
+    raw_diagnostic = compact.diagnostic
+    raw_status = raw_diagnostic.status
+    status = NativeStatus.from_ffi(raw_status)
+    if (
+        status is _NATIVE_STATUS_OK
+        and raw_diagnostic.related_connection_id == 0
+        and raw_diagnostic.related_session_id == 0
+        and raw_diagnostic.related_operation_id == 0
+        and raw_diagnostic.related_frame_id == 0
+    ):
+        diagnostic = _NATIVE_RUNTIME_DIAGNOSTIC_OK
+        structured_diagnostic = _NATIVE_STRUCTURED_DIAGNOSTIC_OK
+    else:
+        diagnostic = NativeRuntimeDiagnostic(
+            status=status,
+            related_connection_id=int(raw_diagnostic.related_connection_id),
+            related_session_id=int(raw_diagnostic.related_session_id),
+            related_operation_id=int(raw_diagnostic.related_operation_id),
+            related_frame_id=int(raw_diagnostic.related_frame_id),
+        )
+        structured_diagnostic = NativeStructuredDiagnostic(
+            status=status,
+            related_connection_id=diagnostic.related_connection_id,
+            related_session_id=diagnostic.related_session_id,
+            related_operation_id=diagnostic.related_operation_id,
+            related_frame_id=diagnostic.related_frame_id,
+        )
+
+    raw_operation = compact.operation
+    operation = object.__new__(NativeHandle)
+    object.__setattr__(operation, "kind", int(raw_operation.kind))
+    object.__setattr__(operation, "id", int(raw_operation.id or compact.operation_id))
+    object.__setattr__(operation, "generation", int(raw_operation.generation))
+    object.__setattr__(operation, "flags", int(raw_operation.flags))
+    frame_id = int(compact.frame_id)
+    payload = _compact_result_payload(compact.payload, result_payload)
+    event_kind = int(compact.event_kind)
+    runtime_event = object.__new__(NativeRuntimeEvent)
+    object.__setattr__(runtime_event, "kind", event_kind)
+    object.__setattr__(runtime_event, "connection", connection)
+    object.__setattr__(runtime_event, "session", session)
+    object.__setattr__(runtime_event, "operation", operation)
+    object.__setattr__(runtime_event, "frame_id", frame_id)
+    object.__setattr__(runtime_event, "payload", payload)
+    object.__setattr__(runtime_event, "diagnostic", diagnostic)
+
+    result = object.__new__(NativeRuntimeResult)
+    object.__setattr__(result, "state", _compact_result_state(compact, status=status, state=state))
+    object.__setattr__(result, "operation_id", int(compact.operation_id or operation.id))
+    object.__setattr__(result, "frame_id", frame_id)
+    object.__setattr__(result, "payload", payload)
+    object.__setattr__(result, "event", runtime_event)
+    object.__setattr__(result, "diagnostic", structured_diagnostic)
+    return result
+
+
+def _submit_result_from_ok_compact_ffi_result(
+    compact: _NnrpCompactResult,
+    *,
+    connection: NativeHandle,
+    session: NativeHandle,
+    result_payload: bytes | bytearray | memoryview,
+) -> NativeRuntimeResult:
+    raw_operation = compact.operation
+    operation = object.__new__(NativeHandle)
+    object.__setattr__(operation, "kind", int(raw_operation.kind))
+    object.__setattr__(operation, "id", int(raw_operation.id or compact.operation_id))
+    object.__setattr__(operation, "generation", int(raw_operation.generation))
+    object.__setattr__(operation, "flags", int(raw_operation.flags))
+    frame_id = int(compact.frame_id)
+    payload = _compact_result_payload(compact.payload, result_payload)
+    runtime_event = object.__new__(NativeRuntimeEvent)
+    object.__setattr__(runtime_event, "kind", EVENT_KIND_RESULT_PUSHED)
+    object.__setattr__(runtime_event, "connection", connection)
+    object.__setattr__(runtime_event, "session", session)
+    object.__setattr__(runtime_event, "operation", operation)
+    object.__setattr__(runtime_event, "frame_id", frame_id)
+    object.__setattr__(runtime_event, "payload", payload)
+    object.__setattr__(runtime_event, "diagnostic", _NATIVE_RUNTIME_DIAGNOSTIC_OK)
+    result = object.__new__(NativeRuntimeResult)
+    object.__setattr__(result, "state", NativeOperationLifecycle.COMPLETED)
+    object.__setattr__(result, "operation_id", int(compact.operation_id or operation.id))
+    object.__setattr__(result, "frame_id", frame_id)
+    object.__setattr__(result, "payload", payload)
+    object.__setattr__(result, "event", runtime_event)
+    object.__setattr__(result, "diagnostic", _NATIVE_STRUCTURED_DIAGNOSTIC_OK)
+    return result
+
+
+def _compact_result_payload(view: _NnrpBufferView, result_payload: bytes | bytearray | memoryview) -> bytes:
+    if isinstance(result_payload, bytes) and int(view.len) == len(result_payload):
+        return result_payload
+    return _copy_buffer_view(view)
+
+
+def _compact_result_state(
+    compact: _NnrpCompactResult,
+    *,
+    status: NativeStatus,
+    state: NativeOperationLifecycle | str | None,
+) -> NativeOperationLifecycle:
+    if state is not None:
+        return NativeOperationLifecycle(state)
+    try:
+        return _RESULT_STATE_LIFECYCLE[int(compact.result_state)]
+    except KeyError:
+        if status.status_code == FFI_STATUS_OK and int(compact.event_kind) != EVENT_KIND_ERROR:
+            return NativeOperationLifecycle.COMPLETED
+        return NativeOperationLifecycle.FAILED
+
+
 @dataclass(frozen=True)
 class NativeRuntimeOperation:
     entrypoints: NativeRuntimeEntrypoints
@@ -2227,8 +2375,10 @@ class NativeRuntimeSession:
     _submit_result_request: Any = field(default=None, init=False, repr=False, compare=False)
     _submit_result_out_operation: Any = field(default=None, init=False, repr=False, compare=False)
     _submit_result_poll_result: Any = field(default=None, init=False, repr=False, compare=False)
+    _submit_result_compact_result: Any = field(default=None, init=False, repr=False, compare=False)
     _submit_result_out_operation_ref: Any = field(default=None, init=False, repr=False, compare=False)
     _submit_result_poll_result_ref: Any = field(default=None, init=False, repr=False, compare=False)
+    _submit_result_compact_result_ref: Any = field(default=None, init=False, repr=False, compare=False)
     _submit_result_session_handle: Any = field(default=None, init=False, repr=False, compare=False)
     _submit_result_payload_cache: Any = field(default=None, init=False, repr=False, compare=False)
     _submit_result_payload_view: Any = field(default=None, init=False, repr=False, compare=False)
@@ -2237,6 +2387,8 @@ class NativeRuntimeSession:
     _submit_result_result_payload_view: Any = field(default=None, init=False, repr=False, compare=False)
     _submit_result_result_payload_owner: Any = field(default=None, init=False, repr=False, compare=False)
     _submit_result_client_submit_result: Any = field(default=None, init=False, repr=False, compare=False)
+    _submit_result_client_submit_result_compact: Any = field(default=None, init=False, repr=False, compare=False)
+    _submit_result_max_events: Any = field(default=None, init=False, repr=False, compare=False)
     _submit_result_connection_handle: Any = field(default=None, init=False, repr=False, compare=False)
     _submit_result_native_session_handle: Any = field(default=None, init=False, repr=False, compare=False)
 
@@ -2417,8 +2569,10 @@ class NativeRuntimeSession:
         if isinstance(payload, bytes) and payload is self._submit_result_payload_cache:
             submit_payload_view = self._submit_result_payload_view
             _submit_payload_owner = self._submit_result_payload_owner
+            assign_submit_payload = False
         else:
             submit_payload_view, _submit_payload_owner = _buffer_view_from_payload(payload)
+            assign_submit_payload = True
             if isinstance(payload, bytes):
                 object.__setattr__(self, "_submit_result_payload_cache", payload)
                 object.__setattr__(self, "_submit_result_payload_view", submit_payload_view)
@@ -2430,32 +2584,89 @@ class NativeRuntimeSession:
         ):
             result_payload_view = self._submit_result_result_payload_view
             _result_payload_owner = self._submit_result_result_payload_owner
+            assign_result_payload = False
         else:
             result_payload_view, _result_payload_owner = _buffer_view_from_payload(selected_result_payload)
+            assign_result_payload = True
             if isinstance(selected_result_payload, bytes):
                 object.__setattr__(self, "_submit_result_result_payload_cache", selected_result_payload)
                 object.__setattr__(self, "_submit_result_result_payload_view", result_payload_view)
                 object.__setattr__(self, "_submit_result_result_payload_owner", _result_payload_owner)
         request = self._submit_result_request
+        assign_static_request_fields = request is None
         if request is None:
             request = _NnrpClientSubmitResultRequest()
             out_operation = _NnrpHandle()
             poll_result = _NnrpPollResult()
+            compact_result = _NnrpCompactResult()
             object.__setattr__(self, "_submit_result_request", request)
             object.__setattr__(self, "_submit_result_out_operation", out_operation)
             object.__setattr__(self, "_submit_result_poll_result", poll_result)
+            object.__setattr__(self, "_submit_result_compact_result", compact_result)
             object.__setattr__(self, "_submit_result_out_operation_ref", ctypes.byref(out_operation))
             object.__setattr__(self, "_submit_result_poll_result_ref", ctypes.byref(poll_result))
+            object.__setattr__(self, "_submit_result_compact_result_ref", ctypes.byref(compact_result))
             object.__setattr__(self, "_submit_result_session_handle", self.handle.to_ffi())
             object.__setattr__(self, "_submit_result_client_submit_result", self.entrypoints.client_submit_result)
+            object.__setattr__(
+                self,
+                "_submit_result_client_submit_result_compact",
+                self.entrypoints.client_submit_result_compact,
+            )
             object.__setattr__(self, "_submit_result_connection_handle", self.connection.handle)
             object.__setattr__(self, "_submit_result_native_session_handle", self.handle.handle)
-        request.session = self._submit_result_session_handle
+        selected_max_events = 0 if max_events is None else max_events
+        if assign_static_request_fields:
+            request.session = self._submit_result_session_handle
+        if assign_submit_payload:
+            request.submit_payload = submit_payload_view
+        if assign_result_payload:
+            request.result_payload = result_payload_view
+        if selected_max_events != self._submit_result_max_events:
+            request.max_events = selected_max_events
+            object.__setattr__(self, "_submit_result_max_events", selected_max_events)
         request.operation_id = operation_id
         request.frame_id = frame_id
-        request.submit_payload = submit_payload_view
-        request.result_payload = result_payload_view
-        request.max_events = 0 if max_events is None else max_events
+        compact_result = self._submit_result_compact_result
+        status = self._submit_result_client_submit_result_compact(
+            request,
+            self._submit_result_compact_result_ref,
+        )
+        if status.status_code != FFI_STATUS_OK:
+            _raise_for_native_ffi_status(status)
+        compact_status = compact_result.status
+        if compact_status.status_code != FFI_STATUS_OK:
+            _raise_for_native_ffi_status(compact_status)
+        if not compact_result.has_result:
+            raise NativeWouldBlockError(NativeStatus(FFI_STATUS_WOULD_BLOCK))
+        raw_diagnostic = compact_result.diagnostic
+        raw_diagnostic_status = raw_diagnostic.status
+        if (
+            state is None
+            and compact_result.event_kind == EVENT_KIND_RESULT_PUSHED
+            and compact_result.result_state == RESULT_STATE_COMPLETED
+            and raw_diagnostic_status.status_code == FFI_STATUS_OK
+            and raw_diagnostic_status.error_family == ERROR_FAMILY_NONE
+            and raw_diagnostic_status.protocol_error_code == 0
+            and raw_diagnostic_status.detail_code == 0
+            and raw_diagnostic.related_connection_id == 0
+            and raw_diagnostic.related_session_id == 0
+            and raw_diagnostic.related_operation_id == 0
+            and raw_diagnostic.related_frame_id == 0
+        ):
+            return _submit_result_from_ok_compact_ffi_result(
+                compact_result,
+                connection=self._submit_result_connection_handle,
+                session=self._submit_result_native_session_handle,
+                result_payload=selected_result_payload,
+            )
+        return _submit_result_from_compact_ffi_result(
+            compact_result,
+            connection=self._submit_result_connection_handle,
+            session=self._submit_result_native_session_handle,
+            state=state,
+            result_payload=selected_result_payload,
+        )
         poll_result = self._submit_result_poll_result
         status = self._submit_result_client_submit_result(
             request,
@@ -3190,6 +3401,15 @@ _SESSION_PRIORITY_CLASS_CODES = {
 
 _SESSION_PRIORITY_CLASS_BY_CODE = {
     code: priority_class for priority_class, code in _SESSION_PRIORITY_CLASS_CODES.items()
+}
+
+_RESULT_STATE_LIFECYCLE = {
+    RESULT_STATE_COMPLETED: NativeOperationLifecycle.COMPLETED,
+    RESULT_STATE_PARTIAL: NativeOperationLifecycle.PARTIAL,
+    RESULT_STATE_DEGRADED: NativeOperationLifecycle.DEGRADED,
+    RESULT_STATE_STALE_REUSE: NativeOperationLifecycle.STALE_REUSE,
+    RESULT_STATE_CANCELLED: NativeOperationLifecycle.CANCELLED,
+    RESULT_STATE_FAILED: NativeOperationLifecycle.FAILED,
 }
 
 _SESSION_RECOVERY_OUTCOME_NAMES = {

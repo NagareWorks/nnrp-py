@@ -23,6 +23,7 @@ from nnrp.native import (
     ERROR_FAMILY_SCHEMA,
     ERROR_FAMILY_SESSION,
     EVENT_KIND_CONTROL,
+    EVENT_KIND_ERROR,
     EVENT_KIND_FLOW_UPDATED,
     EVENT_KIND_RESULT_DROPPED,
     EVENT_KIND_RESULT_HINT,
@@ -44,6 +45,7 @@ from nnrp.native import (
     HANDLE_KIND_SCHEMA_REGISTRY,
     HANDLE_KIND_SESSION,
     REQUIRED_RUNTIME_FEATURES,
+    RESULT_STATE_COMPLETED,
     SCHEMA_ERROR_HASH_CONFLICT,
     SESSION_ERROR_PRIORITY_REJECTED,
     SESSION_RECOVERY_OUTCOME_RESUME_ENABLED,
@@ -103,6 +105,7 @@ from nnrp.native import (
     _NnrpClientConnectRequest,
     _NnrpClientDropOperationRequest,
     _NnrpClientSubmitResultRequest,
+    _NnrpCompactResult,
     _NnrpConnectionBootstrap,
     _NnrpControlRequest,
     _NnrpEvent,
@@ -152,7 +155,7 @@ class FakeLibrary:
         self,
         *,
         abi_major: int = 1,
-        abi_minor: int = 4,
+        abi_minor: int = 5,
         abi_patch: int = 0,
         protocol_major: int = 1,
         wire_format: int = 0,
@@ -169,7 +172,7 @@ class FakeLibrary:
             0,
             0,
             3,
-            5,
+            6,
             0,
             transport_slots,
             feature_flags,
@@ -229,6 +232,7 @@ class FakeRuntimeLibrary(FakeEntrypointLibrary):
         self.nnrp_client_resume_session.handler = self._resume_session
         self.nnrp_client_submit.handler = self._submit
         self.nnrp_client_submit_result.handler = self._submit_result
+        self.nnrp_client_submit_result_compact.handler = self._submit_result_compact
         self.nnrp_client_close.handler = self._close
         self.nnrp_client_close_connection.handler = self._close_connection
         self.nnrp_client_cancel.handler = self._cancel
@@ -350,6 +354,36 @@ class FakeRuntimeLibrary(FakeEntrypointLibrary):
             len(result_payload),
         )
         result_target.event.diagnostic.status = NativeStatus.ok().to_ffi()
+        return self.status
+
+    def _submit_result_compact(
+        self,
+        request: _NnrpClientSubmitResultRequest,
+        out_result: object,
+    ) -> _NnrpFfiStatus:
+        if request.session.kind != HANDLE_KIND_SESSION:
+            return _NnrpFfiStatus(FFI_STATUS_INVALID_HANDLE, 0, 0, 0)
+        submit_payload = _read_buffer_view(request.submit_payload)
+        result_payload = _read_buffer_view(request.result_payload)
+        self.submitted_payloads.append(submit_payload)
+        self._event_payload_owner = (
+            ctypes.create_string_buffer(result_payload, len(result_payload)) if result_payload else None
+        )
+        result_target = getattr(out_result, "_obj", None)
+        if result_target is None:
+            result_target = ctypes.cast(out_result, ctypes.POINTER(_NnrpCompactResult)).contents
+        result_target.status = NativeStatus.ok().to_ffi()
+        result_target.has_result = 1
+        result_target.event_kind = EVENT_KIND_RESULT_PUSHED
+        result_target.result_state = RESULT_STATE_COMPLETED
+        result_target.operation = _NnrpHandle(HANDLE_KIND_OPERATION, request.operation_id, 1, 0)
+        result_target.operation_id = request.operation_id
+        result_target.frame_id = request.frame_id
+        result_target.payload = _NnrpBufferView(
+            ctypes.cast(self._event_payload_owner, ctypes.c_void_p) if self._event_payload_owner else None,
+            len(result_payload),
+        )
+        result_target.diagnostic.status = NativeStatus.ok().to_ffi()
         return self.status
 
     def _drop_operation(self, request: _NnrpClientDropOperationRequest) -> _NnrpFfiStatus:
@@ -839,6 +873,7 @@ RUNTIME_ENTRYPOINT_SYMBOLS = [
     "nnrp_submit",
     "nnrp_client_submit",
     "nnrp_client_submit_result",
+    "nnrp_client_submit_result_compact",
     "nnrp_session_close",
     "nnrp_client_close",
     "nnrp_client_close_connection",
@@ -961,12 +996,12 @@ def test_probe_native_artifact_accepts_matching_protocol(tmp_path: Path) -> None
 
     assert result.artifact_path == artifact
     assert result.abi_major == 1
-    assert result.abi_minor == 4
+    assert result.abi_minor == 5
     assert result.abi_patch == 0
     assert result.protocol_major == 1
     assert result.protocol_wire_format == 0
     assert result.sdk_channel == 3
-    assert result.sdk_revision == 5
+    assert result.sdk_revision == 6
     assert result.transport_slots == TRANSPORT_SLOT_TCP
     assert result.feature_flags == REQUIRED_RUNTIME_FEATURES
 
@@ -2161,7 +2196,8 @@ def test_native_runtime_session_submits_and_polls_result(tmp_path: Path) -> None
     assert result.payload == b"result"
     assert async_result.state is NativeOperationLifecycle.COMPLETED
     assert async_result.payload == b"result"
-    assert library.nnrp_client_submit_result.calls[0][0].operation_id == 99
+    assert library.nnrp_client_submit_result_compact.calls[0][0].operation_id == 99
+    assert library.nnrp_client_submit_result.calls == []
     assert library.nnrp_client_submit.calls == []
     assert library.nnrp_client_complete_operation.calls == []
     assert library.nnrp_client_await_events.calls == []
@@ -2195,18 +2231,16 @@ def test_native_runtime_session_polls_result_with_batch_when_event_budget_allows
 
 def test_native_runtime_session_submit_result_reports_would_block_when_no_event(tmp_path: Path) -> None:
     class EmptySubmitResultRuntimeLibrary(FakeRuntimeLibrary):
-        def _submit_result(
+        def _submit_result_compact(
             self,
             request: _NnrpClientSubmitResultRequest,
-            out_operation: object,
             out_result: object,
         ) -> _NnrpFfiStatus:
-            _write_handle(out_operation, _NnrpHandle(HANDLE_KIND_OPERATION, request.operation_id, 1, 0))
             result_target = getattr(out_result, "_obj", None)
             if result_target is None:
-                result_target = ctypes.cast(out_result, ctypes.POINTER(_NnrpPollResult)).contents
+                result_target = ctypes.cast(out_result, ctypes.POINTER(_NnrpCompactResult)).contents
             result_target.status = NativeStatus.ok().to_ffi()
-            result_target.has_event = 0
+            result_target.has_result = 0
             return self.status
 
     artifact = tmp_path / "nnrp_ffi.dll"
@@ -2233,20 +2267,19 @@ def test_native_runtime_session_submit_result_reports_would_block_when_no_event(
 
 def test_native_runtime_session_submit_result_preserves_related_diagnostic_ids(tmp_path: Path) -> None:
     class RelatedDiagnosticRuntimeLibrary(FakeRuntimeLibrary):
-        def _submit_result(
+        def _submit_result_compact(
             self,
             request: _NnrpClientSubmitResultRequest,
-            out_operation: object,
             out_result: object,
         ) -> _NnrpFfiStatus:
-            status = super()._submit_result(request, out_operation, out_result)
+            status = super()._submit_result_compact(request, out_result)
             result_target = getattr(out_result, "_obj", None)
             if result_target is None:
-                result_target = ctypes.cast(out_result, ctypes.POINTER(_NnrpPollResult)).contents
-            result_target.event.diagnostic.related_connection_id = 12
-            result_target.event.diagnostic.related_session_id = 41
-            result_target.event.diagnostic.related_operation_id = request.operation_id
-            result_target.event.diagnostic.related_frame_id = request.frame_id
+                result_target = ctypes.cast(out_result, ctypes.POINTER(_NnrpCompactResult)).contents
+            result_target.diagnostic.related_connection_id = 12
+            result_target.diagnostic.related_session_id = 41
+            result_target.diagnostic.related_operation_id = request.operation_id
+            result_target.diagnostic.related_frame_id = request.frame_id
             return status
 
     artifact = tmp_path / "nnrp_ffi.dll"
@@ -2271,6 +2304,118 @@ def test_native_runtime_session_submit_result_preserves_related_diagnostic_ids(t
     assert result.diagnostic.related_operation_id == 99
     assert result.diagnostic.related_frame_id == 7
     assert result.event.diagnostic.related_operation_id == 99
+
+
+def test_native_runtime_session_submit_result_handles_compact_non_ok_statuses(tmp_path: Path) -> None:
+    class WrapperFailureRuntimeLibrary(FakeRuntimeLibrary):
+        def _submit_result_compact(
+            self,
+            request: _NnrpClientSubmitResultRequest,
+            out_result: object,
+        ) -> _NnrpFfiStatus:
+            return _NnrpFfiStatus(FFI_STATUS_INTERNAL_ERROR, 0, 0, 0)
+
+    class ResultFailureRuntimeLibrary(FakeRuntimeLibrary):
+        def _submit_result_compact(
+            self,
+            request: _NnrpClientSubmitResultRequest,
+            out_result: object,
+        ) -> _NnrpFfiStatus:
+            status = super()._submit_result_compact(request, out_result)
+            result_target = getattr(out_result, "_obj", None)
+            if result_target is None:
+                result_target = ctypes.cast(out_result, ctypes.POINTER(_NnrpCompactResult)).contents
+            result_target.status = _NnrpFfiStatus(FFI_STATUS_INTERNAL_ERROR, 0, 0, 0)
+            return status
+
+    artifact = tmp_path / "nnrp_ffi.dll"
+    artifact.write_bytes(b"fake")
+
+    for library in (WrapperFailureRuntimeLibrary(), ResultFailureRuntimeLibrary()):
+        session = (
+            load_native_client(artifact, library=library)
+            .connect(connection_id=12, generation=2, transport_id=TRANSPORT_SLOT_TCP)
+            .open_session(
+                requested_session_id=41,
+                generation=3,
+                profile_id=4,
+                schema_id=5,
+                schema_version=6,
+            )
+        )
+
+        with pytest.raises(NativeInternalError):
+            session.submit_result(operation_id=99, frame_id=7, payload=b"payload", result_payload=b"result")
+
+
+def test_native_runtime_session_submit_result_falls_back_for_unknown_compact_states(tmp_path: Path) -> None:
+    class UnknownStateRuntimeLibrary(FakeRuntimeLibrary):
+        def _submit_result_compact(
+            self,
+            request: _NnrpClientSubmitResultRequest,
+            out_result: object,
+        ) -> _NnrpFfiStatus:
+            status = super()._submit_result_compact(request, out_result)
+            result_target = getattr(out_result, "_obj", None)
+            if result_target is None:
+                result_target = ctypes.cast(out_result, ctypes.POINTER(_NnrpCompactResult)).contents
+            result_target.result_state = 999
+            return status
+
+    class UnknownErrorStateRuntimeLibrary(UnknownStateRuntimeLibrary):
+        def _submit_result_compact(
+            self,
+            request: _NnrpClientSubmitResultRequest,
+            out_result: object,
+        ) -> _NnrpFfiStatus:
+            status = super()._submit_result_compact(request, out_result)
+            result_target = getattr(out_result, "_obj", None)
+            if result_target is None:
+                result_target = ctypes.cast(out_result, ctypes.POINTER(_NnrpCompactResult)).contents
+            result_target.event_kind = EVENT_KIND_ERROR
+            return status
+
+    artifact = tmp_path / "nnrp_ffi.dll"
+    artifact.write_bytes(b"fake")
+    completed_session = (
+        load_native_client(artifact, library=UnknownStateRuntimeLibrary())
+        .connect(connection_id=12, generation=2, transport_id=TRANSPORT_SLOT_TCP)
+        .open_session(
+            requested_session_id=41,
+            generation=3,
+            profile_id=4,
+            schema_id=5,
+            schema_version=6,
+        )
+    )
+    failed_session = (
+        load_native_client(artifact, library=UnknownErrorStateRuntimeLibrary())
+        .connect(connection_id=12, generation=2, transport_id=TRANSPORT_SLOT_TCP)
+        .open_session(
+            requested_session_id=41,
+            generation=3,
+            profile_id=4,
+            schema_id=5,
+            schema_version=6,
+        )
+    )
+
+    completed = completed_session.submit_result(
+        operation_id=99,
+        frame_id=7,
+        payload=b"payload",
+        result_payload=bytearray(b"result"),
+    )
+    failed = failed_session.submit_result(
+        operation_id=99,
+        frame_id=7,
+        payload=b"payload",
+        result_payload=bytearray(b"result"),
+    )
+
+    assert completed.state is NativeOperationLifecycle.COMPLETED
+    assert completed.payload == b"result"
+    assert failed.state is NativeOperationLifecycle.FAILED
 
 
 def test_native_runtime_session_batch_poll_reports_would_block_when_no_result(tmp_path: Path) -> None:
@@ -2866,6 +3011,10 @@ def test_native_runtime_entrypoints_bind_frozen_symbol_table() -> None:
         _NnrpClientSubmitResultRequest,
         ctypes.POINTER(_NnrpHandle),
         ctypes.POINTER(_NnrpPollResult),
+    ]
+    assert library.nnrp_client_submit_result_compact.argtypes == [
+        _NnrpClientSubmitResultRequest,
+        ctypes.POINTER(_NnrpCompactResult),
     ]
     assert library.nnrp_session_close.argtypes == [_NnrpHandle]
     assert library.nnrp_client_close.argtypes == [_NnrpHandle]

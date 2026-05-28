@@ -70,3 +70,9 @@ python_version = "3.11"
 warn_unused_configs = true
 strict = false
 packages = ["nnrp"]
+
+[dependency-groups]
+dev = [
+    "cffi>=2.0.0",
+    "setuptools>=82.0.1",
+]

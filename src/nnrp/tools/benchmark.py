@@ -31,7 +31,7 @@ from nnrp.core.packet import (
     unpack_tensor_body,
     unpack_tile_index_block,
 )
-from nnrp.native import NativeArtifactError, load_native_client, load_native_schema_codec
+from nnrp.native import NativeArtifactError, load_native_client, load_native_schema_codec, probe_native_artifact
 from nnrp.schema import (
     pack_schema_descriptor,
     pack_typed_payload_descriptor,
@@ -396,6 +396,31 @@ def _run_native_submit_result_allocation_smoke(scenario_id: str, workload: dict[
         connection.close()
 
 
+def _run_native_artifact_probe(scenario_id: str, workload: dict[str, Any]) -> dict[str, Any]:
+    iterations = _positive_int(workload.get("iterations"), default=1_000)
+    warmup_iterations = _non_negative_int(workload.get("warmup_iterations"), default=min(100, iterations))
+    artifact_path = workload.get("artifact_path")
+    root = workload.get("artifact_root")
+    if artifact_path is not None and not isinstance(artifact_path, str):
+        raise ValueError("benchmark workload artifact_path must be a string")
+    if root is not None and not isinstance(root, str):
+        raise ValueError("benchmark workload artifact_root must be a string")
+
+    try:
+        probe_native_artifact(artifact_path, root=root)
+    except NativeArtifactError as error:
+        return _skip_result(scenario_id, f"native artifact probe unavailable: {error}")
+
+    def operation() -> None:
+        probe_native_artifact(artifact_path, root=root)
+
+    for _ in range(warmup_iterations):
+        operation()
+
+    samples = _measure_microseconds(operation, iterations)
+    return _measured_latency_result(scenario_id, samples)
+
+
 def _run_session_lifecycle(scenario_id: str, workload: dict[str, Any]) -> dict[str, Any]:
     iterations = _positive_int(workload.get("iterations"), default=100_000)
     warmup_iterations = _non_negative_int(workload.get("warmup_iterations"), default=min(10_000, iterations))
@@ -705,6 +730,7 @@ _SCENARIO_RUNNERS: dict[str, Callable[[str, dict[str, Any]], dict[str, Any]]] = 
     "typed_payload_pack_unpack": _run_typed_payload_pack_unpack,
     "native_schema_descriptor_roundtrip": _run_native_schema_descriptor_roundtrip,
     "native_event_polling": _run_native_event_polling,
+    "native_artifact_probe": _run_native_artifact_probe,
     "native_submit_result_allocation_smoke": _run_native_submit_result_allocation_smoke,
     "runtime_probe": _run_runtime_probe,
     "session_lifecycle": _run_session_lifecycle,

@@ -29,7 +29,7 @@
 - [ ] Add performance smoke checks that verify Python preview3 hot paths do not regress into full payload copies by default.
   - [x] Add submit/result allocation-count smoke.
   - [x] Add payload-copy boundary smoke.
-  - [ ] Add native artifact load/probe latency smoke.
+  - [x] Add native artifact load/probe latency smoke.
   - [x] Add native batch event polling latency smoke.
   - [x] Add schema descriptor native parse/write latency smoke.
   - [ ] Gate smoke thresholds with stable local baselines before enabling CI failure.

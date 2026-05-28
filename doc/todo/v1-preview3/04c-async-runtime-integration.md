@@ -1,5 +1,50 @@
 # Python Preview3 Async Runtime Integration
 
-- [ ] Adapt Rust callback/polling result delivery into Python async-friendly primitives.
-- [ ] Expose structured event, tool delta, and workflow-state updates through Python-native async iterators or callbacks backed by Rust result pumps.
-- [ ] Keep any remaining pure-Python codec code limited to preview2 fixture inspection or other non-hot-path tooling.
+- [x] Adapt Rust callback/polling result delivery into Python async-friendly primitives.
+- [x] Choose one default Python delivery model for preview3: async iterator, callback registration, or explicit polling.
+- [x] Keep backend selection behind an internal interface so tests can run against pure-Python fixtures and native artifacts.
+- [x] Avoid per-frame Python object churn on the hot submit/result path; batch or borrow native buffers where the ABI allows it.
+  - [x] Measure object allocation count for native submit/result loop.
+    - [x] Add a local benchmark mode that records allocated Python objects per submit/result iteration.
+    - [x] Capture baseline allocation count before changing payload ownership behavior.
+  - [x] Add batch poll helper over native batched event polling.
+  - [x] Defer optional borrowed result payload helpers to post-release zero-copy work.
+    - [x] Confirm current Rust ABI exposes value buffer views and native-owned copied buffer handles.
+    - [x] Decide whether borrowed result views are needed for the first Python release or can remain a post-release optimization.
+    - [x] Keep Python lifetime guard wrapper work paired with any future borrowed view exposure.
+  - [x] Add regression test that hot-path payloads are not copied more than the documented boundary.
+    - [x] Add submit payload copy-boundary test.
+    - [x] Add result payload copy-boundary test.
+    - [x] Add callback payload copy-boundary test.
+- [x] Define cancellation behavior when a Python task is cancelled while a native operation is active.
+- [x] Expose structured event, tool delta, and workflow-state updates through Python-native async iterators or callbacks backed by Rust result pumps.
+  - [x] Add structured-event async iterator over native result pump events.
+  - [x] Add tool-delta async iterator over native result pump events.
+  - [x] Add workflow-state async iterator over native result pump events.
+  - [x] Add callback registration wrapper if async iterator alone is insufficient for host integrations.
+- [x] Keep any remaining pure-Python codec code limited to preview2 fixture inspection or other non-hot-path tooling.
+  - [x] Keep native runtime backend selection separate from the pure-Python fallback/test fixtures.
+  - [x] Audit preview3 runtime call sites and move remaining Python-owned codec helpers behind fixture/diagnostic paths.
+    - [x] Audit `nnrp.client.transport` runtime-facing helpers.
+    - [x] Audit `nnrp.tools.smoke` runtime-facing examples.
+    - [x] Audit README/runtime examples.
+    - [x] Update docs/tests so packet builders are presented as protocol fixtures, not runtime execution.
+- [x] Run the pre-migration benchmark suite and record the baseline in `doc/benchmarks/rs-native-artifacts-migration.md`.
+- [x] Run the same benchmark suite after native migration and record the deltas in `doc/benchmarks/rs-native-artifacts-migration.md`.
+  - [x] Build/download matching `nnrp-rs` native artifacts for the benchmark host.
+  - [x] Install artifacts into `src/nnrp/native_artifacts` using `scripts/prepare_native_artifacts.py`.
+  - [x] Verify the installed artifact is accepted by `probe_native_artifact`.
+  - [x] Run conformance benchmark plan against native-backed Python helpers.
+  - [x] Run SDK-local benchmark plan against native-backed Python helpers.
+    - [x] Add `doc/benchmarks/native-runtime-benchmark-plan.json`.
+    - [x] Wire SDK-local submit/result benchmark execution to the native completion ABI.
+    - [x] Run the SDK-local plan with a native artifact that can complete submit/result polling.
+  - [x] Record p50/p95/p99 latency deltas.
+  - [x] Record raw throughput deltas.
+  - [x] Record profiled CPU/memory baselines without mixing them into raw throughput comparisons.
+  - [x] Record artifact version, Python version, OS/arch, and CPU in the post-migration environment row.
+- [x] Add a second-stage performance optimization pass for the native-glue runtime path.
+  - [x] Run raw throughput benchmarks for native runtime scenarios separately from fixture/helper scenarios.
+  - [x] Record profiled CPU/memory baselines for those native runtime scenarios after raw throughput is stable.
+  - [x] Investigate any native runtime scenario that does not reach the expected 30%+ improvement target.
+  - [x] Feed confirmed bottlenecks back into FFI batching, handle reuse, or zero-copy follow-up work.

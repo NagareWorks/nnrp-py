@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "nnrp-py"
-version = "1.0.0rc2"
+version = "1.0.0rc3"
 description = "Python SDK for NNRP protocol primitives and adapters"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -34,20 +34,27 @@ Repository = "https://github.com/NagareWorks/nnrp-py"
 Issues = "https://github.com/NagareWorks/nnrp-py/issues"
 
 [project.scripts]
-nnrp-export-conformance-vectors = "nnrp.tools.conformance:main"
+nnrp-run-benchmark = "nnrp.tools.benchmark:main"
 nnrp-quic-smoke = "nnrp.tools.smoke:main"
 
 [project.optional-dependencies]
 dev = [
+  "cffi>=2.0.0",
   "mypy>=1.11.0",
   "pytest>=8.3.0",
   "pytest-asyncio>=0.24.0",
   "pytest-cov>=7.0.0",
   "ruff>=0.6.0",
+  "setuptools>=82.0.1",
 ]
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/nnrp"]
+
+[tool.hatch.build.targets.sdist]
+exclude = [
+  "/src/nnrp/native_artifacts",
+]
 
 [tool.pytest.ini_options]
 pythonpath = ["src"]
@@ -65,3 +72,9 @@ python_version = "3.11"
 warn_unused_configs = true
 strict = false
 packages = ["nnrp"]
+
+[dependency-groups]
+dev = [
+    "cffi>=2.0.0",
+    "setuptools>=82.0.1",
+]

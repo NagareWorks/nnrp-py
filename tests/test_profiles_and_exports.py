@@ -1,3 +1,24 @@
+import asyncio
+
+import pytest
+
+import nnrp.client as client_module
+from nnrp import (
+    CacheLeaseDescriptor,
+    CacheObjectIdentity,
+    Preview3TypedPayloadDescriptor,
+    SchemaDescriptorHeader,
+    SchemaRegistryCatalog,
+    SessionRecoveryReport,
+    StandardProfile,
+    StreamSemantics,
+    should_replay_frame_after_migration,
+    token_delta_payload_descriptor,
+    token_delta_schema_descriptor,
+    validate_migration_recovery,
+    validate_session_recovery_ack,
+    validate_session_recovery_request,
+)
 from nnrp.client import (
     ClientControlBootstrapSession,
     ClientDialPolicy,
@@ -9,6 +30,10 @@ from nnrp.client import (
     MigrationTriggerMonitor,
     MigrationTriggerPolicy,
     MigrationTriggerSnapshot,
+    NativeClientConnection,
+    NativeClientConnectionOptions,
+    NativeClientSessionOpenOptions,
+    NativeClientSessionOptions,
     PathHealthSample,
     Result,
     ResultRouter,
@@ -21,12 +46,14 @@ from nnrp.client import (
     build_client_hello_packet,
     connect_client_control,
     connect_client_control_with_probe,
-    connect_client_session,
-    connect_client_session_with_probe,
+    connect_native_client_connection,
+    connect_native_client_session,
     plan_client_transport,
     probe_client_transport,
     resolve_client_hello_transport_policy,
+    select_client_native_backend,
 )
+from nnrp.client.transport import connect_client_session, connect_client_session_with_probe
 from nnrp.core import (
     BODY_REGION_PRELUDE_LENGTH,
     CLIENT_HELLO_LOSS_TOLERANCE_EXTENSION,
@@ -308,8 +335,36 @@ def test_connect_client_control_is_exported() -> None:
 
 def test_connect_client_session_is_exported() -> None:
     assert ClientSession.__name__ == "ClientSession"
+    assert "connect_client_session" not in client_module.__all__
+    assert "connect_client_session_with_probe" not in client_module.__all__
+    assert not hasattr(client_module, "connect_client_session")
+    assert not hasattr(client_module, "connect_client_session_with_probe")
     assert callable(connect_client_session)
     assert callable(connect_client_session_with_probe)
+    assert "packet transport smoke/tooling" in (connect_client_session.__doc__ or "")
+    assert "packet transport smoke/tooling" in (connect_client_session_with_probe.__doc__ or "")
+    assert NativeClientConnection.__name__ == "NativeClientConnection"
+    assert NativeClientConnectionOptions.__name__ == "NativeClientConnectionOptions"
+    assert NativeClientSessionOptions.__name__ == "NativeClientSessionOptions"
+    assert NativeClientSessionOpenOptions.__name__ == "NativeClientSessionOpenOptions"
+    assert callable(connect_native_client_connection)
+    assert callable(connect_native_client_session)
+    assert callable(select_client_native_backend)
+    assert SessionRecoveryReport.__name__ == "SessionRecoveryReport"
+    assert callable(validate_session_recovery_request)
+    assert callable(validate_session_recovery_ack)
+    assert callable(validate_migration_recovery)
+    assert callable(should_replay_frame_after_migration)
+
+
+def test_legacy_packet_session_helpers_warn_as_tooling_only() -> None:
+    async def enter_legacy_session() -> None:
+        async with connect_client_session("127.0.0.1"):
+            pass
+
+    with pytest.warns(RuntimeWarning, match="packet transport smoke/tooling helpers"):
+        with pytest.raises(ValueError, match="selected transport id is unspecified"):
+            asyncio.run(enter_legacy_session())
 
 
 def test_current_typed_models_are_exported() -> None:
@@ -322,6 +377,15 @@ def test_current_typed_models_are_exported() -> None:
     assert MigrationTriggerMonitor.__name__ == "MigrationTriggerMonitor"
     assert Result.__name__ == "Result"
     assert ResultRouter.__name__ == "ResultRouter"
+    assert CacheObjectIdentity.__name__ == "CacheObjectIdentity"
+    assert CacheLeaseDescriptor.__name__ == "CacheLeaseDescriptor"
+    assert SchemaDescriptorHeader.__name__ == "SchemaDescriptorHeader"
+    assert SchemaRegistryCatalog.__name__ == "SchemaRegistryCatalog"
+    assert Preview3TypedPayloadDescriptor.__name__ == "Preview3TypedPayloadDescriptor"
+    assert StandardProfile.TOKEN == 2
+    assert StreamSemantics.APPEND == 2
+    assert token_delta_schema_descriptor().profile_id is StandardProfile.TOKEN
+    assert token_delta_payload_descriptor(offset=0, length=1).profile_id is StandardProfile.TOKEN
 
 
 def test_current_result_helpers_expose_payload_kinds_without_tensor_coverage() -> None:

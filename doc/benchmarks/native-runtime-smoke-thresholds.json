@@ -1,0 +1,33 @@
+{
+  "$schema": "./native-runtime-smoke-thresholds.schema.json",
+  "description": "Local native-runtime smoke thresholds for post-artifact validation. These are intentionally loose enough for CI variance and should be reviewed whenever the pinned nnrp-rs artifact changes.",
+  "thresholds": [
+    {
+      "id": "l4.native.submit_result.throughput",
+      "min": {
+        "throughput_ops_per_sec": 300000,
+        "native_ffi_calls_per_op": 1
+      },
+      "max": {
+        "native_ffi_calls_per_op": 1
+      }
+    },
+    {
+      "id": "l4.native.submit_result.cffi_api.throughput",
+      "allow_skip": true,
+      "min": {
+        "throughput_ops_per_sec": 1000000,
+        "native_ffi_client_submit_result_compact_calls_per_op": 1
+      },
+      "max": {
+        "native_ffi_client_submit_result_compact_calls_per_op": 1
+      }
+    },
+    {
+      "id": "l4.native.event_polling.throughput",
+      "min": {
+        "throughput_ops_per_sec": 300000
+      }
+    }
+  ]
+}

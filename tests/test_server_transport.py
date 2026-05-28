@@ -8,8 +8,8 @@ from nnrp.client import (
     SubmitRequest,
     TypedPayload,
     build_client_hello_packet,
-    connect_client_session,
 )
+from nnrp.client.transport import connect_client_session
 from nnrp.core import (
     InputProfile,
     PayloadKind,

@@ -2,16 +2,71 @@
 
 ## Validation
 
-- [ ] Add a preview3 conformance exporter and wire it into the suite-owned conformance action against the Rust canonical vectors.
-- [ ] Add Python integration tests that exercise multi-session preview3 flows on one live connection.
-- [ ] Add Python integration tests for cache lease expiry, schema mismatch, operation cancellation, priority-aware flow updates, and resume paths.
-- [ ] Keep the active Python preview regression suite green while preview3 Rust-backed helpers replace the prior preview surface.
-- [ ] Add performance smoke checks that verify Python preview3 hot paths do not regress into full payload copies by default.
+- [x] Freeze the preview3 adapter command contract as a Python-owned wrapper over the suite-owned plan/result JSON: `python -m nnrp.tools.adapter_conformance --plan <path> --output <path>`.
+- [x] Freeze that `nnrp-conformance` owns only the execution-plan/result JSON and selected-case semantics; `nnrp-py` owns the module path, interpreter selection, extra flags, and runtime bootstrap around the adapter wrapper.
+- [x] Add the initial `nnrp.tools.adapter_conformance` wrapper so it can read the suite-owned execution plan and emit a schema-valid case-result report.
+- [x] Implement SDK-local adapter smoke execution inside `nnrp.tools.adapter_conformance` so selected core cases stop returning placeholder results.
+- [x] Extend adapter execution from SDK-local smoke coverage to full suite-selected case behavior.
+  - [x] Add case dispatch table that maps suite-selected case ids to native host API operations.
+  - [x] Add case parameter decoding for connection/session/operation ids.
+  - [x] Add case parameter decoding for payload shapes and expected result states.
+  - [x] Add evidence artifact writing for each executed adapter case.
+  - [x] Add failure diagnostics that preserve native status/family/detail fields.
+- [x] Keep conformance integration adapter-first: Python declares capabilities and executes suite-owned plans rather than maintaining SDK-owned vector generation.
+- [x] Add Python integration tests that exercise multiple native preview3 sessions on one live connection facade.
+- [x] Add Python integration tests that exercise routed multi-session preview3 result delivery on one live connection.
+- [x] Add Python integration tests for cache lease expiry, schema mismatch, operation cancellation, priority-aware flow updates, and resume paths.
+  - [x] Add cache lease expiry integration test through native cache lease operations.
+  - [x] Add schema mismatch integration test through native schema registry operations.
+    - [x] Add native typed payload binding mismatch test through `NativeSchemaCodec`.
+    - [x] Add public schema helper mismatch test once helper routing is native-backed.
+  - [x] Add operation cancellation integration test through native session/operation helpers.
+  - [x] Add priority-aware flow update integration test over native credit events and Python scheduling hint routing.
+  - [x] Add resume-path integration test through native recovery/resume operations.
+    - [x] Add recovery validation integration test through `NativeRecoveryCodec`.
+    - [x] Add full resume operation integration test after Rust exposes executable resume/open helper.
+- [x] Keep the active Python preview regression suite green while preview3 Rust-backed helpers replace the prior preview surface.
+- [x] Add performance smoke checks that verify Python preview3 hot paths do not regress into full payload copies by default.
+  - [x] Add submit/result allocation-count smoke.
+  - [x] Add payload-copy boundary smoke.
+  - [x] Add native artifact load/probe latency smoke.
+  - [x] Add native batch event polling latency smoke.
+  - [x] Add schema descriptor native parse/write latency smoke.
+  - [x] Gate smoke thresholds with stable local baselines before enabling CI failure.
+- [x] Add release packaging validation for installing `nnrp-rs` native artifacts into the Python wheel source tree.
 
 ## Documentation And Rollout
 
-- [ ] Document the preview3 Python package as a Rust-backed binding layer plus host-facing control/session helpers.
-- [ ] Document the current connection/session model and how it replaces the earlier single-session host mental model.
-- [ ] Document cache lease, schema registry, profile neutrality, and operation/workflow lifecycle semantics for Python hosts.
-- [ ] Document how preview3 Rust-backed helpers replace the prior preview helper surface within `NNRP/1`.
-- [ ] Document PR merge gates for freeze-dependent work so GitHub reviewers can reject Python-side protocol invention.
+- [x] Document the preview3 Python package as a Rust-backed binding layer plus host-facing control/session helpers.
+  - [x] Add native artifact installation/loading section.
+  - [x] Add native connection/session quick-start.
+  - [x] Add native submit/result/cancel/control examples.
+  - [x] Add fallback/require-native behavior section.
+- [x] Keep `doc/benchmarks/rs-native-artifacts-migration.md` updated with the native artifact plan, supported platform matrix, and pre/post migration benchmark results.
+  - [x] Update pinned `nnrp-rs` tag/commit before release.
+  - [x] Update benchmark scenario list after native-backed schema/recovery helpers land.
+  - [x] Fill post-migration benchmark environment row.
+  - [x] Fill post-migration latency table.
+  - [x] Fill post-migration throughput table.
+  - [x] Add interpretation notes for regressions or wins.
+- [x] Document the current connection/session model and how it replaces the earlier single-session host mental model.
+  - [x] Document connection-owned session lifecycle.
+  - [x] Document multiple sessions on one connection.
+  - [x] Document routed result polling.
+  - [x] Document session close and connection context cleanup behavior.
+- [x] Document cache lease, schema registry, profile neutrality, and operation/workflow lifecycle semantics for Python hosts.
+  - [x] Document cache lease host wrapper behavior.
+  - [x] Document schema/profile registry host wrapper behavior.
+  - [x] Document `profile_id = 0` as unspecified.
+  - [x] Document tensor/token parity and structured-event/tool-delta payload families.
+  - [x] Document operation lifecycle states and diagnostics.
+- [x] Document how preview3 Rust-backed helpers replace the prior preview helper surface within `NNRP/1`.
+  - [x] Map old packet/session examples to native host API examples.
+  - [x] Move packet builder examples into protocol fixture/diagnostic sections.
+  - [x] Remove obsolete SDK-owned vector-generation wording.
+- [x] Document PR merge gates for freeze-dependent work so GitHub reviewers can reject Python-side protocol invention.
+  - [x] List required upstream Rust/doc freeze references for cache/schema/recovery work.
+  - [x] List required native ABI tag or artifact version for each native helper PR.
+  - [x] List required conformance adapter coverage for public API changes.
+  - [x] List required coverage/benchmark gates for hot-path changes.
+  - [x] List release-wheel checks required before publishing native artifacts to PyPI.

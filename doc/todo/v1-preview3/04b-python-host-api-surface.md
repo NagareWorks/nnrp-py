@@ -1,6 +1,34 @@
 # Python Preview3 Host API Surface
 
-- [ ] Replace Python-owned preview3 packet/session entry points with Rust-backed orchestration.
-- [ ] Add host-facing submit/result/control helpers that compose Rust preview3 handles rather than rebuilding packet logic in Python.
-- [ ] Add Python-facing operation identifiers, parent/group relationships, and cancellation scopes on top of Rust lifecycle primitives.
-- [ ] Preserve the distinction among `partial`, `degraded`, `stale_reuse`, `cancelled`, `failed`, and `completed` lifecycle states on the Python API surface.
+- [x] Replace Python-owned preview3 packet/session entry points with Rust-backed orchestration.
+  - [x] Add Rust-backed connection/session/submit/result/control facades.
+  - [x] Redirect existing public preview helper call sites to the Rust-backed facades.
+    - [x] Redirect client connection/session bootstrap helpers.
+      - [x] Add `connect_native_client_session` for direct native session bootstrap.
+      - [x] Add `connect_native_client_connection` for direct native connection bootstrap.
+      - [x] Update README/current examples to use native connection/session helpers.
+      - [x] Deprecate or move old packet transport bootstrap examples to smoke/tooling docs.
+    - [x] Redirect submit/result helper paths.
+      - [x] Expose native submit/result operations on sessions.
+      - [x] Expose native connection-level result polling wrapper for multi-session hosts.
+      - [x] Add higher-level submit/result convenience helper over native operations.
+      - [x] Replace old packet-level submit/result examples where raw packet behavior is not under test.
+    - [x] Redirect cancellation/control helper paths.
+      - [x] Expose native session cancel/control helpers.
+      - [x] Expose native operation cancel helper.
+      - [x] Add host-friendly cancellation scope wrapper.
+      - [x] Add host-friendly control event wrapper.
+    - [x] Redirect adapter conformance execution from placeholder reports to native-backed smoke case execution.
+  - [x] Remove or quarantine superseded Python-owned hot-path packet/session implementations.
+    - [x] Keep packet codecs only for fixture inspection, diagnostics, and unsupported runtime combinations.
+      - [x] Move packet codec references in docs to fixture/diagnostic sections.
+      - [x] Keep raw packet tests as protocol tests, not runtime API examples.
+    - [x] Add explicit fallback selection so native-backed paths are the default when artifacts are present.
+      - [x] Add public/backend setting for require-native mode.
+      - [x] Add tests for missing artifact fallback behavior.
+      - [x] Add tests for require-native failure behavior from client helpers.
+- [x] Add host-facing submit/result/control helpers that compose Rust preview3 handles rather than rebuilding packet logic in Python.
+- [x] Add a client-facing native session context helper so host code can open Rust-backed sessions without using packet transport helpers.
+- [x] Add a client-facing native connection context helper for opening multiple Rust-backed sessions on one connection.
+- [x] Add Python-facing operation identifiers, parent/group relationships, and cancellation scopes on top of Rust lifecycle primitives.
+- [x] Preserve the distinction among `partial`, `degraded`, `stale_reuse`, `cancelled`, `failed`, and `completed` lifecycle states on the Python API surface.

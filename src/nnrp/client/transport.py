@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import time
+import warnings
 from collections import deque
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
@@ -78,6 +79,11 @@ _PAYLOAD_KIND_ORDER = (
     PayloadKind.STRUCTURED_EVENT,
     PayloadKind.TOOL_DELTA,
     PayloadKind.OPAQUE_BYTES,
+)
+_PACKET_TRANSPORT_TOOLING_WARNING = (
+    "connect_client_session and connect_client_session_with_probe are packet transport smoke/tooling helpers; "
+    "host runtime integrations should use nnrp.client.connect_native_client_connection or "
+    "nnrp.client.connect_native_client_session."
 )
 
 
@@ -1381,6 +1387,8 @@ async def connect_client_session_with_probe(
     include_warmup_probe: bool = False,
     timeout: float = 10.0,
 ) -> AsyncIterator[ClientSession]:
+    """Open a packet transport smoke/tooling session after running transport probes."""
+    warnings.warn(_PACKET_TRANSPORT_TOOLING_WARNING, RuntimeWarning, stacklevel=2)
     from nnrp.tools.smoke import run_parallel_transport_probes
 
     probe_selection = await run_parallel_transport_probes(
@@ -1429,6 +1437,8 @@ async def connect_client_session(
     forced_transport_id: TransportId = TransportId.UNSPECIFIED,
     timeout: float = 10.0,
 ) -> AsyncIterator[ClientSession]:
+    """Open a packet transport smoke/tooling session for adapter bring-up."""
+    warnings.warn(_PACKET_TRANSPORT_TOOLING_WARNING, RuntimeWarning, stacklevel=2)
     bootstrap = bootstrap_client_transport(
         requested_session_id=requested_session_id,
         auth_block=auth_block,

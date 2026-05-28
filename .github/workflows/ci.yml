@@ -2,6 +2,10 @@ name: CI
 
 on:
   push:
+    branches:
+      - develop
+      - main
+      - release/**
   pull_request:
   workflow_dispatch:
 
@@ -18,6 +22,11 @@ jobs:
 
           head_ref="${{ github.head_ref }}"
           base_ref="${{ github.base_ref }}"
+
+          if [[ "$head_ref" == "develop" && "$base_ref" == "main" ]]; then
+            echo "Develop-to-main integration PR detected; multi-commit history is allowed."
+            exit 0
+          fi
 
           if [[ "$head_ref" =~ ^release/ ]] || [[ "$base_ref" =~ ^release/ ]]; then
             echo "Release/version branch PR detected; multi-commit history is allowed when needed."
@@ -62,7 +71,6 @@ jobs:
       - name: Test with coverage
         shell: pwsh
         run: |
-          $env:NNRP_CONFORMANCE_RECIPE_MANIFEST = Join-Path $PWD 'nnrp-conformance-action/protocol/nnrp-1-preview2/vectors/semantic-vectors.json'
           $pytestArgs = @(
             '--cov=src/nnrp'
             '--cov=scripts'
@@ -147,11 +155,10 @@ jobs:
           capabilities-path: ${{ steps.conformance-baseline.outputs.capabilities-path }}
           working-directory: .
           artifact-name: ${{ steps.conformance-baseline.outputs.artifact-name }}
-          sdk-vector-command: >-
-            ${{ steps.setup-python.outputs.python-path }} -m nnrp.tools.conformance
-            --protocol-version ${{ steps.conformance-baseline.outputs.protocol-version }}
-            --recipe-manifest nnrp-conformance-action/protocol/${{ steps.conformance-baseline.outputs.protocol-version }}/vectors/semantic-vectors.json
-            --output $env:NNRP_CONFORMANCE_SDK_VECTOR_OUTPUT
+          adapter-command: >-
+            ${{ steps.setup-python.outputs.python-path }} -m nnrp.tools.adapter_conformance
+            --plan $env:NNRP_CONFORMANCE_ADAPTER_PLAN
+            --output $env:NNRP_CONFORMANCE_ADAPTER_RESULTS
 
   required-checks:
     needs:

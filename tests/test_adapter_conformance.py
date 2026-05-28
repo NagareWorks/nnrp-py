@@ -1,0 +1,482 @@
+import json
+from pathlib import Path
+
+import pytest
+
+from nnrp.native import FFI_STATUS_INVALID_ARGUMENT, NativeArtifactError, NativeInvalidArgumentError, NativeStatus
+from nnrp.tools import adapter_conformance
+from nnrp.tools.adapter_conformance import build_adapter_case_results_report, main, write_adapter_case_results
+
+
+def _write_plan(tmp_path: Path) -> Path:
+    plan_path = tmp_path / "adapter-plan.json"
+    plan_path.write_text(
+        json.dumps(
+            {
+                "$schema": "../../schemas/adapter-execution-plan.schema.json",
+                "protocol_version": "nnrp-1",
+                "suite_version": "nnrp-1-bootstrap",
+                "implementation_name": "nnrp-py",
+                "artifacts": {
+                    "results_path": "artifacts/adapter-results.json",
+                    "evidence_dir": "artifacts/evidence",
+                },
+                "cases": [
+                    {
+                        "id": "l1.handshake.basic",
+                        "layer": "L1",
+                        "status": "mandatory",
+                        "feature": "handshake",
+                        "required_capabilities": ["control.client_hello"],
+                        "description": "Basic handshake path.",
+                    },
+                    {
+                        "id": "l1.session.open_close",
+                        "layer": "L1",
+                        "status": "mandatory",
+                        "feature": "session_lifecycle",
+                        "required_capabilities": ["control.session_open"],
+                        "description": "Open and close a session.",
+                    },
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    return plan_path
+
+
+def test_build_adapter_case_results_report_executes_supported_cases() -> None:
+    report = build_adapter_case_results_report(
+        {
+            "protocol_version": "nnrp-1",
+            "cases": [
+                {"id": "l1.handshake.basic"},
+                {"id": "l1.session.open_close"},
+                {"id": "l1.cache.unimplemented"},
+            ],
+        }
+    )
+
+    assert report["implementation_name"] == "nnrp-py"
+    assert [result["id"] for result in report["results"]] == [
+        "l1.handshake.basic",
+        "l1.session.open_close",
+        "l1.cache.unimplemented",
+    ]
+    assert [result["outcome"] for result in report["results"]] == ["pass", "pass", "skip"]
+
+
+def test_build_adapter_case_results_report_marks_runtime_smoke_failures() -> None:
+    class RejectingBackend:
+        def connect(self, *, connection_id: int, generation: int, transport_id: int) -> object:
+            raise RuntimeError("boom")
+
+        def bootstrap_connection(self, *, connection_id: int, generation: int, transport_id: int) -> object:
+            raise RuntimeError("boom")
+
+    report = build_adapter_case_results_report(
+        {
+            "protocol_version": "nnrp-1",
+            "cases": [{"id": "l1.handshake.basic"}],
+        },
+        backend=RejectingBackend(),
+    )
+
+    assert report["results"][0]["outcome"] == "fail"
+    assert "boom" in report["results"][0]["message"]
+
+
+def test_build_adapter_case_results_report_executes_all_supported_smoke_paths() -> None:
+    report = build_adapter_case_results_report(
+        {
+            "protocol_version": "nnrp-1",
+            "cases": [
+                {"id": "l1.frame_submit.tensor.inline"},
+                {"id": "l1.frame_submit.tensor.inline.routing.validation"},
+                {"id": "l1.result_push.basic.terminal.validation"},
+            ],
+        }
+    )
+
+    assert [result["outcome"] for result in report["results"]] == ["pass", "pass", "pass"]
+
+
+def test_build_adapter_case_results_report_uses_case_parameters_and_writes_evidence(tmp_path: Path) -> None:
+    evidence_dir = tmp_path / "evidence"
+
+    report = build_adapter_case_results_report(
+        {
+            "protocol_version": "nnrp-1",
+            "artifacts": {"evidence_dir": str(evidence_dir)},
+            "cases": [
+                {
+                    "id": "l1.result_push.basic.terminal.validation",
+                    "parameters": {
+                        "connection_id": 7,
+                        "session_id": 8,
+                        "operation_id": 9,
+                        "frame_id": 10,
+                        "payload": [1, 2, 3],
+                        "max_events": 2,
+                    },
+                },
+            ],
+        }
+    )
+
+    assert report["results"][0]["outcome"] == "pass"
+    evidence = json.loads((evidence_dir / "l1-result_push-basic-terminal-validation.json").read_text())
+    assert evidence["case_id"] == "l1.result_push.basic.terminal.validation"
+    assert evidence["session_id"] == 8
+    assert evidence["operation_id"] == 9
+    assert evidence["frame_id"] == 10
+    assert evidence["result_payload_bytes"] == 3
+
+
+def test_adapter_case_parameter_validation_failures_are_reported() -> None:
+    report = build_adapter_case_results_report(
+        {
+            "protocol_version": "nnrp-1",
+            "cases": [
+                {
+                    "id": "l1.handshake.basic",
+                    "parameters": {"connection_id": "bad"},
+                },
+                {
+                    "id": "l1.result_push.basic.terminal.validation",
+                    "parameters": {"expected_result_state": ""},
+                },
+                {
+                    "id": "l1.frame_submit.tensor.inline",
+                    "parameters": {"payload": [256]},
+                },
+            ],
+        }
+    )
+
+    assert [result["outcome"] for result in report["results"]] == ["fail", "fail", "fail"]
+    assert [result["diagnostic"]["error_type"] for result in report["results"]] == [
+        "ValueError",
+        "ValueError",
+        "ValueError",
+    ]
+
+
+def test_adapter_case_rejects_invalid_parameter_container() -> None:
+    report = build_adapter_case_results_report(
+        {
+            "protocol_version": "nnrp-1",
+            "cases": [
+                {
+                    "id": "l1.handshake.basic",
+                    "parameters": [],
+                },
+            ],
+        }
+    )
+
+    assert report["results"][0]["outcome"] == "fail"
+    assert "parameters" in report["results"][0]["message"]
+
+
+def test_adapter_result_state_validation_failure_is_reported() -> None:
+    class StatefulResult(adapter_conformance._AdapterSmokeResult):
+        state = "completed"
+
+    class StatefulSession(adapter_conformance._AdapterSmokeSession):
+        def poll_result(
+            self,
+            operation: adapter_conformance._AdapterSmokeOperation,
+            *,
+            max_events: int | None = None,
+        ) -> StatefulResult:
+            return StatefulResult(operation.operation_id, operation.frame_id, operation.payload)
+
+    class StatefulConnection(adapter_conformance._AdapterSmokeConnection):
+        def open_session(
+            self,
+            *,
+            requested_session_id: int,
+            generation: int,
+            profile_id: int,
+            schema_id: int,
+            schema_version: int,
+        ) -> StatefulSession:
+            return StatefulSession(
+                connection=self,
+                session_id=requested_session_id,
+                generation=generation,
+                profile_id=profile_id,
+                schema_id=schema_id,
+                schema_version=schema_version,
+            )
+
+    class StatefulBackend(adapter_conformance._AdapterSmokeBackend):
+        def connect(self, *, connection_id: int, generation: int, transport_id: int) -> StatefulConnection:
+            return StatefulConnection(connection_id, generation, transport_id)
+
+    report = build_adapter_case_results_report(
+        {
+            "protocol_version": "nnrp-1",
+            "cases": [
+                {
+                    "id": "l1.result_push.basic.terminal.validation",
+                    "parameters": {"expected_result_state": "failed"},
+                }
+            ],
+        },
+        backend=StatefulBackend(),
+    )
+
+    assert report["results"][0]["outcome"] == "fail"
+    assert "expected result state" in report["results"][0]["message"]
+
+
+def test_adapter_result_terminal_prefers_native_submit_result_facade() -> None:
+    class NativeLikeResult:
+        def __init__(self, operation_id: int, frame_id: int, payload: bytes) -> None:
+            self.operation_id = operation_id
+            self.frame_id = frame_id
+            self.payload = payload
+            self.state = "completed"
+
+    class NativeLikeSession:
+        frame_id = 0
+
+        def __init__(self) -> None:
+            self.closed = False
+            self.submitted: list[tuple[int, int, bytes, bytes, int | None]] = []
+
+        def submit_result(
+            self,
+            *,
+            operation_id: int,
+            frame_id: int,
+            payload: bytes,
+            result_payload: bytes,
+            max_events: int | None = None,
+        ) -> NativeLikeResult:
+            self.submitted.append((operation_id, frame_id, bytes(payload), bytes(result_payload), max_events))
+            return NativeLikeResult(operation_id, frame_id, bytes(result_payload))
+
+        def close(self) -> None:
+            self.closed = True
+
+    class NativeLikeConnection:
+        def __init__(self) -> None:
+            self.session = NativeLikeSession()
+            self.batch_polls = 0
+
+        def open_session(self, **_kwargs):
+            return self.session
+
+        def poll_events_batch(self, *, max_events: int):
+            self.batch_polls += 1
+            assert max_events == 8
+            return ()
+
+    class NativeLikeBackend:
+        def __init__(self) -> None:
+            self.connection = NativeLikeConnection()
+
+        def connect(self, *, connection_id: int, generation: int, transport_id: int):
+            assert (connection_id, generation, transport_id) == (1, 1, 2)
+            return self.connection
+
+    backend = NativeLikeBackend()
+
+    report = build_adapter_case_results_report(
+        {
+            "protocol_version": "nnrp-1",
+            "cases": [
+                {
+                    "id": "l1.result_push.basic.terminal.validation",
+                    "parameters": {
+                        "operation_id": 9,
+                        "frame_id": 10,
+                        "payload": [1, 2, 3],
+                        "max_events": 2,
+                    },
+                }
+            ],
+        },
+        backend=backend,
+    )
+
+    assert report["results"][0]["outcome"] == "pass"
+    assert backend.connection.batch_polls == 1
+    assert backend.connection.session.submitted == [(9, 10, b"\x01\x02\x03", b"\x01\x02\x03", 2)]
+
+
+def test_adapter_runtime_helpers_read_native_handle_shapes() -> None:
+    class Handle:
+        def __init__(self) -> None:
+            self.id = 123
+
+    class Wrapper:
+        def __init__(self) -> None:
+            self.handle = Handle()
+            self._closed = True
+
+    assert adapter_conformance._runtime_id(Wrapper()) == 123
+    assert adapter_conformance._runtime_id(object()) == 0
+    assert adapter_conformance._runtime_closed(Wrapper()) is True
+    assert adapter_conformance._runtime_closed(object()) is False
+
+
+def test_adapter_evidence_dir_resolution_ignores_invalid_shapes(tmp_path: Path) -> None:
+    assert adapter_conformance._resolve_evidence_dir({}) is None
+    assert adapter_conformance._resolve_evidence_dir({"artifacts": {"evidence_dir": ""}}) is None
+    assert adapter_conformance._resolve_evidence_dir(
+        {"artifacts": {"evidence_dir": "evidence"}},
+        base_dir=tmp_path,
+    ) == tmp_path / "evidence"
+
+
+def test_adapter_backend_loader_can_require_native(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def reject_native_backend(*args: object, **kwargs: object) -> object:
+        raise NativeArtifactError("missing native")
+
+    monkeypatch.setattr(adapter_conformance, "select_native_runtime_backend", reject_native_backend)
+    monkeypatch.setenv("NNRP_ADAPTER_REQUIRE_NATIVE", "true")
+
+    with pytest.raises(NativeArtifactError, match="missing native"):
+        adapter_conformance._load_adapter_backend()
+
+
+def test_adapter_case_failure_preserves_native_diagnostics() -> None:
+    class RejectingOperationBackend:
+        def connect(self, *, connection_id: int, generation: int, transport_id: int) -> object:
+            return adapter_conformance._AdapterSmokeConnection(connection_id, generation, transport_id)
+
+        def bootstrap_connection(self, *, connection_id: int, generation: int, transport_id: int) -> object:
+            return self.connect(connection_id=connection_id, generation=generation, transport_id=transport_id)
+
+    class RejectingExecution(adapter_conformance._AdapterCaseExecution):
+        def _submit_operation(self, session: object) -> object:
+            raise NativeInvalidArgumentError(NativeStatus(FFI_STATUS_INVALID_ARGUMENT, 12, 34, 56))
+
+    original_execution = adapter_conformance._AdapterCaseExecution
+    adapter_conformance._AdapterCaseExecution = RejectingExecution
+    try:
+        report = build_adapter_case_results_report(
+            {
+                "protocol_version": "nnrp-1",
+                "cases": [{"id": "l1.frame_submit.tensor.inline"}],
+            },
+            backend=RejectingOperationBackend(),
+        )
+    finally:
+        adapter_conformance._AdapterCaseExecution = original_execution
+
+    result = report["results"][0]
+    assert result["outcome"] == "fail"
+    assert result["diagnostic"] == {
+        "status_code": FFI_STATUS_INVALID_ARGUMENT,
+        "error_family": 12,
+        "protocol_error_code": 34,
+        "detail_code": 56,
+    }
+
+
+def test_adapter_smoke_backend_bootstrap_and_closed_session_guards() -> None:
+    backend = adapter_conformance._AdapterSmokeBackend()
+    connection = backend.bootstrap_connection(connection_id=7, generation=2, transport_id=1)
+    session = connection.open_session(
+        requested_session_id=8,
+        generation=3,
+        profile_id=4,
+        schema_id=5,
+        schema_version=6,
+    )
+    operation = session.submit_operation(
+        operation_id=9,
+        frame_id=10,
+        payload=memoryview(b"payload"),
+        parent_operation_id=1,
+        operation_group_id=2,
+    )
+    result = session.poll_result(operation, max_events=1)
+    session.control(control_code=11, payload=bytearray(b"control"))
+    session.cancel(frame_id=10)
+    session.close()
+
+    assert result.payload == b"payload"
+    assert session.controls == [(11, b"control")]
+    assert session.cancelled_frames == [10]
+    with pytest.raises(RuntimeError, match="closed"):
+        session.cancel(frame_id=10)
+
+
+def test_main_reads_paths_from_environment_and_writes_report(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    plan_path = _write_plan(tmp_path)
+    output_path = tmp_path / "artifacts" / "adapter-results.json"
+    monkeypatch.setenv("NNRP_CONFORMANCE_ADAPTER_PLAN", str(plan_path))
+    monkeypatch.setenv("NNRP_CONFORMANCE_ADAPTER_RESULTS", str(output_path))
+
+    assert main([]) == 0
+
+    report = json.loads(output_path.read_text(encoding="utf-8"))
+    assert report["protocol_version"] == "nnrp-1"
+    assert len(report["results"]) == 2
+    assert report["results"][0]["outcome"] == "pass"
+    assert (tmp_path / "artifacts" / "evidence" / "l1-handshake-basic.json").is_file()
+
+
+def test_main_accepts_explicit_cli_paths_and_creates_parent_directory(tmp_path: Path) -> None:
+    plan_path = _write_plan(tmp_path)
+    output_path = tmp_path / "nested" / "artifacts" / "adapter-results.json"
+
+    assert main(["--plan", str(plan_path), "--output", str(output_path)]) == 0
+
+    report = json.loads(output_path.read_text(encoding="utf-8"))
+    assert report["implementation_name"] == "nnrp-py"
+    assert [result["id"] for result in report["results"]] == [
+        "l1.handshake.basic",
+        "l1.session.open_close",
+    ]
+
+
+def test_main_uses_argparse_error_when_required_paths_are_missing(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("NNRP_CONFORMANCE_ADAPTER_PLAN", raising=False)
+    monkeypatch.delenv("NNRP_CONFORMANCE_ADAPTER_RESULTS", raising=False)
+
+    with pytest.raises(SystemExit, match="2"):
+        main([])
+
+
+def test_write_adapter_case_results_rejects_missing_plan_path(tmp_path: Path) -> None:
+    output_path = tmp_path / "artifacts" / "adapter-results.json"
+
+    with pytest.raises(ValueError, match="adapter execution plan path does not exist"):
+        write_adapter_case_results(tmp_path / "missing-plan.json", output_path)
+
+
+@pytest.mark.parametrize(
+    ("document", "match"),
+    [
+        ([], "must be a JSON object"),
+        ({"protocol_version": "nnrp-1"}, "cases list"),
+        (
+            {
+                "protocol_version": "nnrp-1",
+                "cases": ["l1.handshake.basic"],
+            },
+            "JSON objects",
+        ),
+    ],
+)
+def test_write_adapter_case_results_rejects_invalid_plan_shapes(
+    tmp_path: Path,
+    document: object,
+    match: str,
+) -> None:
+    plan_path = tmp_path / "adapter-plan.json"
+    output_path = tmp_path / "artifacts" / "adapter-results.json"
+    plan_path.write_text(json.dumps(document), encoding="utf-8")
+
+    with pytest.raises(ValueError, match=match):
+        write_adapter_case_results(plan_path, output_path)

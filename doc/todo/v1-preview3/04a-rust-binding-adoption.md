@@ -1,5 +1,95 @@
 # Python Preview3 Rust Binding Adoption
 
-- [ ] Consume the frozen Rust FFI surface from `nnrp-rs`.
-- [ ] Map connection, session, operation, schema, and buffer handles into Python-owned wrapper types.
-- [ ] Map stable Rust error codes into Python exception hierarchies.
+- [x] Consume the frozen Rust FFI surface from `nnrp-rs`.
+  - [x] Bind and load the frozen preview3 runtime entrypoint table and request/event structs behind the native backend module.
+  - [x] Add a native-backed facade for connect, bootstrap, open-session, submit, cancel, control, event polling, close, schema descriptors, typed payload binding validation, and recovery validation.
+  - [x] Bind client completion/drop/flow-update/result-hint helpers from the Rust native artifact ABI.
+  - [x] Replace SDK runtime calls with the bound native entrypoints.
+    - [x] Route adapter conformance smoke execution through the native backend selector.
+    - [x] Route new client connection/session helpers through native backend handles.
+    - [x] Route public submit/result helper paths through native session operations.
+    - [x] Route public cancellation/control helper paths through native session/operation control calls.
+    - [x] Route cache/schema/profile helper paths through native calls where the ABI exposes execution helpers.
+      - [x] Bind native schema descriptor parse/write and typed payload binding validation.
+      - [x] Add native schema codec selection to schema/profile helper entry points.
+      - [x] Preserve pure-Python schema catalog as fixture/diagnostic fallback only.
+      - [x] Add tests proving schema mismatch diagnostics come from native status fields.
+      - [x] Route cache lease query/touch/prefetch/release through native cache lease FFI operations.
+    - [x] Route recovery helper paths through native calls.
+      - [x] Bind native recovery request/ack and migration validation helpers.
+      - [x] Add public recovery helper functions that call `NativeRecoveryCodec`.
+      - [x] Add host-facing resume outcome reports without parsing opaque recovery data in Python.
+      - [x] Add tests proving invalid recovery inputs preserve native status fields.
+    - [x] Route benchmark hot paths through native calls where the ABI already exists.
+      - [x] Replace header/metadata descriptor benchmark runners with native-backed descriptor helpers.
+      - [x] Add a native event polling benchmark runner.
+      - [x] Keep packet-level benchmarks labeled as fixture/diagnostic baselines.
+    - [x] Add native-runtime benchmark scenarios that measure glued Rust execution instead of packet fixture helpers.
+      - [x] Add `native_submit_result_loop` benchmark with connection/session prepared outside the measured loop.
+      - [x] Add `native_batch_event_polling_throughput` benchmark that polls multiple events per FFI call.
+      - [x] Add a benchmark plan that separates fixture/helper throughput from native runtime throughput.
+      - [x] Route native submit/result benchmark scenarios through explicit submit, client completion, and result polling calls.
+    - [x] Optimize FFI call granularity until the native runtime path shows the expected migration win.
+      - [x] Count Python-to-native calls per submit/result iteration.
+      - [x] Batch submit plus result polling where one coarse native call can replace multiple fine-grained calls.
+      - [x] Reuse native connection/session handles across hot benchmark iterations without rebuilding Python wrapper state.
+      - [x] Bind compact submit/result ABI and skip repeated ctypes request field writes on the hot path.
+      - [x] Add a benchmark-only cffi API mode runner to compare binding overhead when a local C compiler is available.
+      - [x] Add cffi API auto-detection on the production native submit/result path with ctypes fallback when the fast path is unavailable.
+      - [x] Compare raw throughput against the pre-migration baseline and target at least 30% improvement for the glued runtime path.
+    - [x] Audit payload copy boundaries after native-runtime benchmarks land.
+      - [x] Measure submit payload copy count on the native runtime benchmark path.
+      - [x] Measure result/event payload snapshot count on the native runtime benchmark path.
+      - [x] Decide whether borrowed result views become release-blocking if copy overhead dominates benchmark results.
+        - [x] Current benchmark rows clear the 30% target with copied snapshots, so borrowed result views stay a post-release zero-copy optimization rather than a preview3 release blocker.
+- [x] Pin the exact `nnrp-rs` commit, tag, or artifact version used by the Python package.
+- [x] Define the packaged native artifact layout for Windows, macOS, Linux, Android, and iOS.
+- [x] Add release packaging glue that normalizes `nnrp-rs` native artifact zips into platform wheel contents before publish.
+  - [x] Add native artifact normalization script for release zips.
+  - [x] Add wheel inspection script that rejects missing native payloads.
+  - [x] Build platform-specific wheels instead of a `py3-none-any` wheel when native artifacts are required.
+  - [x] Ensure each wheel contains only the native artifact for its platform tag.
+  - [x] Verify wheel tags match the embedded native artifact OS/architecture.
+  - [x] Keep sdist free of prebuilt native libraries unless release policy explicitly changes.
+  - [x] Add CI/release checks that fail if a native release publishes a universal wheel.
+- [x] Add a platform and architecture resolver for x86, x86_64, arm, and arm64 variants.
+- [x] Load the native artifact through one internal backend module before exposing any host-facing API.
+- [x] Probe ABI version, protocol version, enabled transport slots, and feature flags before accepting the native artifact.
+- [x] Reject ABI/protocol mismatches with a deterministic Python exception and actionable diagnostic text.
+- [x] Map connection, session, operation, event pump, and buffer value handles into Python-owned wrapper types.
+- [x] Separate release-required native handle wrappers from optional zero-copy borrowed-buffer wrappers.
+  - [x] Add schema registry handle wrapper over the native schema registry handle.
+  - [x] Add native-owned immutable buffer handle wrapper over acquire-copy/view/release.
+  - [x] Decide whether a borrowed mutable buffer wrapper belongs in the first Python release.
+  - [x] Add lifetime guard tests for native-owned immutable buffer views.
+  - [x] Keep borrowed mutable views unexposed until lifetime guard tests are required.
+- [x] Define ownership and lifetime rules for native buffers returned to Python.
+  - [x] Snapshot polled native event payloads into Python-owned bytes before returning them to callers.
+  - [x] Document event/result snapshot behavior in the native client API docs.
+  - [x] Add tests for payload snapshot independence after native poll buffer reuse.
+- [x] Define optional borrowed-buffer rules for post-release zero-copy result/body views.
+  - [x] Confirm current ABI exposes value `NnrpBufferView` structs and stable native-owned copied buffer handles.
+  - [x] Define whether borrowed handles may be exposed from sync polling without weakening lifetime safety.
+  - [x] Define whether borrowed handles may be exposed from async polling without weakening lifetime safety.
+  - [x] Define copy fallback behavior when borrowed view lifetime cannot be guaranteed.
+- [x] Ensure callbacks or poll results never outlive the native connection/session handle that owns them.
+  - [x] Return SDK-owned poll/event snapshots from the native connection facade instead of raw FFI structs.
+  - [x] Guard native session operations after explicit close on the Python facade.
+  - [x] Add connection-level lifetime guards once native connection close/dispose is exposed.
+  - [x] Add host-level native connection wrapper that closes owned sessions on context exit.
+  - [x] Add native connection close/dispose FFI binding once exported.
+  - [x] Add tests for use-after-close on native connection handles after FFI dispose exists.
+- [x] Map stable Rust error codes into Python exception hierarchies.
+- [x] Keep pure-Python codec helpers limited to fixture inspection, diagnostics, and explicitly unsupported runtime combinations.
+  - [x] Inventory pure-Python helpers used by runtime-facing public APIs.
+    - [x] Inventory `nnrp.client.transport` connection/session helpers.
+    - [x] Inventory `nnrp.tools.smoke` packet transport examples.
+    - [x] Inventory README and package-level public imports that still lead with packet builders.
+    - [x] Inventory benchmark runners that still measure Python-owned packet construction as runtime behavior.
+  - [x] Move fixture-only helpers under test/tooling documentation.
+    - [x] Mark packet builders as protocol fixture/diagnostic helpers in API docs.
+    - [x] Keep raw packet examples out of default runtime quick-start paths.
+    - [x] Keep smoke-only transport helpers outside the primary host API narrative.
+  - [x] Add explicit runtime fallback selection instead of implicit pure-Python execution.
+  - [x] Add tests that default host runtime uses native artifacts when available.
+- [x] Add loader and probe tests for every supported platform tag using fake or fixture native artifacts where real artifacts are unavailable.

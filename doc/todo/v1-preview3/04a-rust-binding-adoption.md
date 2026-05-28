@@ -37,10 +37,11 @@
       - [x] Add a benchmark-only cffi API mode runner to compare binding overhead when a local C compiler is available.
       - [x] Add cffi API auto-detection on the production native submit/result path with ctypes fallback when the fast path is unavailable.
       - [x] Compare raw throughput against the pre-migration baseline and target at least 30% improvement for the glued runtime path.
-    - [ ] Audit payload copy boundaries after native-runtime benchmarks land.
-      - [ ] Measure submit payload copy count on the native runtime benchmark path.
-      - [ ] Measure result/event payload snapshot count on the native runtime benchmark path.
-      - [ ] Decide whether borrowed result views become release-blocking if copy overhead dominates benchmark results.
+    - [x] Audit payload copy boundaries after native-runtime benchmarks land.
+      - [x] Measure submit payload copy count on the native runtime benchmark path.
+      - [x] Measure result/event payload snapshot count on the native runtime benchmark path.
+      - [x] Decide whether borrowed result views become release-blocking if copy overhead dominates benchmark results.
+        - [x] Current benchmark rows clear the 30% target with copied snapshots, so borrowed result views stay a post-release zero-copy optimization rather than a preview3 release blocker.
 - [x] Pin the exact `nnrp-rs` commit, tag, or artifact version used by the Python package.
 - [x] Define the packaged native artifact layout for Windows, macOS, Linux, Android, and iOS.
 - [x] Add release packaging glue that normalizes `nnrp-rs` native artifact zips into platform wheel contents before publish.

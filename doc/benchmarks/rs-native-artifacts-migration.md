@@ -66,9 +66,9 @@ Rules:
 
 | Run | Date | SDK commit | nnrp-rs artifact | Python | OS/arch | CPU | Notes |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| Current host fixture baseline | 2026-05-29 | 38bdac7 | N/A | 3.13.1 | windows/amd64 | Intel64 Family 6 Model 183 Stepping 1, GenuineIntel | SDK-local pure Python fixture submit/result loop, 1024-byte payload, raw throughput mode. |
-| Current host native ctypes | 2026-05-29 | 38bdac7 | 1.0.0-preview.3.6 | 3.13.1 | windows/amd64 | Intel64 Family 6 Model 183 Stepping 1, GenuineIntel | Local `nnrp-rs` release artifact installed with `scripts/prepare_native_artifacts.py`; `NNRP_NATIVE_BINDING_MODE=ctypes`. |
-| Current host native cffi API | 2026-05-29 | 38bdac7 | 1.0.0-preview.3.6 | 3.13.1 | windows/amd64 | Intel64 Family 6 Model 183 Stepping 1, GenuineIntel | Same native artifact; benchmark-only cffi API wrapper compiled locally for the fast-path comparison. |
+| Current host fixture baseline | 2026-05-29 | 1e88eac | N/A | 3.13.1 | windows/amd64 | Intel64 Family 6 Model 183 Stepping 1, GenuineIntel | SDK-local pure Python fixture submit/result loop, 1024-byte payload, raw throughput mode. |
+| Current host native ctypes | 2026-05-29 | 1e88eac | 1.0.0-preview.3.6 | 3.13.1 | windows/amd64 | Intel64 Family 6 Model 183 Stepping 1, GenuineIntel | Local `nnrp-rs` release artifact installed with `scripts/prepare_native_artifacts.py`; `NNRP_NATIVE_BINDING_MODE=ctypes`. |
+| Current host native cffi API | 2026-05-29 | 1e88eac | 1.0.0-preview.3.6 | 3.13.1 | windows/amd64 | Intel64 Family 6 Model 183 Stepping 1, GenuineIntel | Same native artifact; benchmark-only cffi API wrapper compiled locally for the fast-path comparison. |
 
 ### Latency Benchmarks
 
@@ -91,17 +91,37 @@ Rules:
 | Benchmark | Payload | Duration | Binding/runtime path | Throughput | Delta vs fixture baseline | Notes |
 | --- | --- | ---: | --- | ---: | ---: | --- |
 | Submit/result loop | 1024-byte inline payload | 10 s | Pure Python fixture helper | 264148.8 ops/s | baseline | Measured by `l4.submit_result.inline_tensor.throughput`; this is a fixture/diagnostic path, not the preferred runtime path. |
-| Submit/result loop | 1024-byte inline payload | 10 s | Native compact ABI through `ctypes` | 408113.6 ops/s | +54.5% | Measured by `l4.native.submit_result.throughput`; one compact Rust FFI call per operation, `NNRP_NATIVE_BINDING_MODE=ctypes`. |
-| Submit/result loop | 1024-byte inline payload | 10 s | Native compact ABI through cffi API | 1740038.0 ops/s | +558.7% | Measured by `l4.native.submit_result.cffi_api.throughput`; benchmark-only compiled wrapper on this host. |
-| Batch event polling | empty batch | 10 s | Native batch event polling through `ctypes` | 402907.5 ops/s | N/A | Measured by `l4.native.event_polling.throughput`; included as a native pump smoke baseline. |
+| Submit/result loop | 1024-byte inline payload | 10 s | Native compact ABI through `ctypes` | 434336.7 ops/s | +64.4% | Measured by `l4.native.submit_result.throughput`; one compact Rust FFI call per operation, `NNRP_NATIVE_BINDING_MODE=ctypes`. |
+| Submit/result loop | 1024-byte inline payload | 10 s | Native compact ABI through cffi API | 1747087.8 ops/s | +561.4% | Measured by `l4.native.submit_result.cffi_api.throughput`; benchmark-only compiled wrapper on this host. |
+| Batch event polling | empty batch | 10 s | Native batch event polling through `ctypes` | 398662.6 ops/s | N/A | Measured by `l4.native.event_polling.throughput`; included as a native pump smoke baseline. |
+
+### Profiled CPU And Memory Smoke
+
+| Benchmark | Payload | Duration | Binding/runtime path | Throughput under tracing | CPU | Peak traced memory | Notes |
+| --- | --- | ---: | --- | ---: | ---: | ---: | --- |
+| Submit/result loop | 1024-byte inline payload | 10 s | Native compact ABI through `ctypes` | 42198.9 ops/s | 98.6% | 1188 B | Measured by `l4.native.submit_result.profile`; tracing overhead is intentionally not compared with raw throughput. |
+| Submit/result loop | 1024-byte inline payload | 10 s | Native compact ABI through cffi API | 625687.1 ops/s | 99.4% | 288 B | Measured by `l4.native.submit_result.cffi_api.profile`; confirms the compiled wrapper keeps Python-side traced memory nearly flat. |
+| Batch event polling | empty batch | 10 s | Native batch event polling through `ctypes` | 77871.8 ops/s | 99.1% | 6361 B | Measured by `l4.native.event_polling.profile`; included as a native pump memory baseline. |
+
+### Smoke Threshold Gate
+
+The local native-runtime smoke thresholds live in `doc/benchmarks/native-runtime-smoke-thresholds.json` and can be enforced with:
+
+```bash
+python scripts/check_benchmark_thresholds.py \
+  --results artifacts/native-runtime-benchmark-results.json \
+  --thresholds doc/benchmarks/native-runtime-smoke-thresholds.json
+```
+
+The current host run passes the gate with the `nnrp-rs` `1.0.0-preview.3.6` Windows x86_64 artifact. The cffi API threshold is marked `allow_skip` so zero-compiler environments can still validate the ctypes fallback without pretending the preferred fast path is available.
 
 ### Interpretation
 
-The previous ctypes path was roughly flat against the fixture baseline because Python-side result/event materialization dominated the cost after the Rust compact ABI reduced the native call count. The current hot-path pass removes eager event materialization and avoids duplicate payload view construction, so the zero-compile ctypes path now clears the 30% target with a +54.5% submit/result throughput gain on this host. On the submit/result micro-latency measurement, ctypes also improves p50 latency from 3.7 us to 2.2 us.
+The previous ctypes path was roughly flat against the fixture baseline because Python-side result/event materialization dominated the cost after the Rust compact ABI reduced the native call count. The current hot-path pass removes eager event materialization and avoids duplicate payload view construction, so the zero-compile ctypes path now clears the 30% target with a +64.4% submit/result throughput gain on this host. On the submit/result micro-latency measurement, ctypes also improves p50 latency from 3.7 us to 2.2 us.
 
-The cffi API path remains much faster at 1.74M ops/s and 0.5 us p50 submit/result latency, about 4.3x the optimized ctypes throughput and 6.6x the fixture throughput baseline. That confirms the Rust runtime and compact ABI have enough headroom; ctypes is still useful as a compiler-free fallback, while packaged cffi API wheels should be treated as the preferred fast path where platform/Python ABI artifacts are available.
+The cffi API path remains much faster at 1.75M ops/s and 0.5 us p50 submit/result latency, about 4.0x the optimized ctypes throughput and 6.6x the fixture throughput baseline. That confirms the Rust runtime and compact ABI have enough headroom; ctypes is still useful as a compiler-free fallback, while packaged cffi API wheels should be treated as the preferred fast path where platform/Python ABI artifacts are available.
 
-CPU and peak-memory tracing remain available through the benchmark runner's profiled throughput mode, but those numbers are intentionally kept out of the raw comparison because tracing adds measurable per-iteration overhead.
+CPU and peak-memory tracing are now recorded in separate profiled smoke rows. Those numbers are intentionally kept out of the raw comparison because tracing adds measurable per-iteration overhead.
 
 ## Migration Phases
 

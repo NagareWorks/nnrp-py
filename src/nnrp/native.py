@@ -162,7 +162,7 @@ class NativeHandleError(ValueError):
     """Raised when an FFI handle or buffer view violates the native ABI contract."""
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class NativeStatus:
     status_code: int
     error_family: int = ERROR_FAMILY_NONE
@@ -282,7 +282,7 @@ class NativeInternalError(NativeRuntimeError):
     """Raised when Rust FFI reports an internal failure."""
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class NativeHandle:
     kind: int
     id: int
@@ -1291,7 +1291,7 @@ class NativeRecoveryCodec:
         return bool(out_should_replay.value)
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class NativeRuntimeDiagnostic:
     status: NativeStatus
     related_connection_id: int
@@ -1310,7 +1310,7 @@ class NativeRuntimeDiagnostic:
         )
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class NativeStructuredDiagnostic:
     status: NativeStatus
     related_connection_id: int = 0
@@ -1397,7 +1397,7 @@ _NATIVE_RUNTIME_DIAGNOSTIC_OK = NativeRuntimeDiagnostic(
 _NATIVE_STRUCTURED_DIAGNOSTIC_OK = NativeStructuredDiagnostic(status=_NATIVE_STATUS_OK)
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class NativeRuntimeEvent:
     kind: int
     connection: NativeHandle
@@ -1597,7 +1597,7 @@ class NativeOperationSchedulingHint:
         return self.parent_operation_id is not None or self.operation_group_id is not None
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class NativeRuntimeResult:
     state: NativeOperationLifecycle
     operation_id: int
@@ -1691,6 +1691,38 @@ def _submit_result_from_ffi_event(
     object.__setattr__(result, "payload", payload)
     object.__setattr__(result, "event", runtime_event)
     object.__setattr__(result, "diagnostic", structured_diagnostic)
+    return result
+
+
+def _submit_result_from_ok_result_pushed_ffi_event(
+    event: _NnrpEvent,
+    *,
+    connection: NativeHandle,
+    session: NativeHandle,
+) -> NativeRuntimeResult:
+    payload = _copy_buffer_view(event.payload)
+    raw_operation = event.operation
+    operation = object.__new__(NativeHandle)
+    object.__setattr__(operation, "kind", int(raw_operation.kind))
+    object.__setattr__(operation, "id", int(raw_operation.id))
+    object.__setattr__(operation, "generation", int(raw_operation.generation))
+    object.__setattr__(operation, "flags", int(raw_operation.flags))
+    frame_id = int(event.frame_id)
+    runtime_event = object.__new__(NativeRuntimeEvent)
+    object.__setattr__(runtime_event, "kind", EVENT_KIND_RESULT_PUSHED)
+    object.__setattr__(runtime_event, "connection", connection)
+    object.__setattr__(runtime_event, "session", session)
+    object.__setattr__(runtime_event, "operation", operation)
+    object.__setattr__(runtime_event, "frame_id", frame_id)
+    object.__setattr__(runtime_event, "payload", payload)
+    object.__setattr__(runtime_event, "diagnostic", _NATIVE_RUNTIME_DIAGNOSTIC_OK)
+    result = object.__new__(NativeRuntimeResult)
+    object.__setattr__(result, "state", NativeOperationLifecycle.COMPLETED)
+    object.__setattr__(result, "operation_id", operation.id)
+    object.__setattr__(result, "frame_id", frame_id)
+    object.__setattr__(result, "payload", payload)
+    object.__setattr__(result, "event", runtime_event)
+    object.__setattr__(result, "diagnostic", _NATIVE_STRUCTURED_DIAGNOSTIC_OK)
     return result
 
 
@@ -2204,6 +2236,9 @@ class NativeRuntimeSession:
     _submit_result_result_payload_cache: Any = field(default=None, init=False, repr=False, compare=False)
     _submit_result_result_payload_view: Any = field(default=None, init=False, repr=False, compare=False)
     _submit_result_result_payload_owner: Any = field(default=None, init=False, repr=False, compare=False)
+    _submit_result_client_submit_result: Any = field(default=None, init=False, repr=False, compare=False)
+    _submit_result_connection_handle: Any = field(default=None, init=False, repr=False, compare=False)
+    _submit_result_native_session_handle: Any = field(default=None, init=False, repr=False, compare=False)
 
     def submit(
         self,
@@ -2412,6 +2447,9 @@ class NativeRuntimeSession:
             object.__setattr__(self, "_submit_result_out_operation_ref", ctypes.byref(out_operation))
             object.__setattr__(self, "_submit_result_poll_result_ref", ctypes.byref(poll_result))
             object.__setattr__(self, "_submit_result_session_handle", self.handle.to_ffi())
+            object.__setattr__(self, "_submit_result_client_submit_result", self.entrypoints.client_submit_result)
+            object.__setattr__(self, "_submit_result_connection_handle", self.connection.handle)
+            object.__setattr__(self, "_submit_result_native_session_handle", self.handle.handle)
         request.session = self._submit_result_session_handle
         request.operation_id = operation_id
         request.frame_id = frame_id
@@ -2419,19 +2457,42 @@ class NativeRuntimeSession:
         request.result_payload = result_payload_view
         request.max_events = 0 if max_events is None else max_events
         poll_result = self._submit_result_poll_result
-        status = self.entrypoints.client_submit_result(
+        status = self._submit_result_client_submit_result(
             request,
             self._submit_result_out_operation_ref,
             self._submit_result_poll_result_ref,
         )
-        _raise_for_native_ffi_status(status)
-        _raise_for_native_ffi_status(poll_result.status)
+        if status.status_code != FFI_STATUS_OK:
+            _raise_for_native_ffi_status(status)
+        poll_status = poll_result.status
+        if poll_status.status_code != FFI_STATUS_OK:
+            _raise_for_native_ffi_status(poll_status)
         if not poll_result.has_event:
             raise NativeWouldBlockError(NativeStatus(FFI_STATUS_WOULD_BLOCK))
+        raw_event = poll_result.event
+        raw_diagnostic = raw_event.diagnostic
+        raw_status = raw_diagnostic.status
+        if (
+            state is None
+            and raw_event.kind == EVENT_KIND_RESULT_PUSHED
+            and raw_status.status_code == FFI_STATUS_OK
+            and raw_status.error_family == ERROR_FAMILY_NONE
+            and raw_status.protocol_error_code == 0
+            and raw_status.detail_code == 0
+            and raw_diagnostic.related_connection_id == 0
+            and raw_diagnostic.related_session_id == 0
+            and raw_diagnostic.related_operation_id == 0
+            and raw_diagnostic.related_frame_id == 0
+        ):
+            return _submit_result_from_ok_result_pushed_ffi_event(
+                raw_event,
+                connection=self._submit_result_connection_handle,
+                session=self._submit_result_native_session_handle,
+            )
         return _submit_result_from_ffi_event(
-            poll_result.event,
-            connection=self.connection.handle,
-            session=self.handle.handle,
+            raw_event,
+            connection=self._submit_result_connection_handle,
+            session=self._submit_result_native_session_handle,
             state=state,
         )
 

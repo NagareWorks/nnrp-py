@@ -58,11 +58,11 @@
   - [x] Add token stream profile wrapper.
   - [x] Add token delta/result wrapper.
   - [x] Add tests for minimum token profile fields.
-- [ ] Surface `structured_event` and `tool_delta` as protocol-visible payload families without hard-coding their bodies into Python fixed metadata models.
+- [x] Surface `structured_event` and `tool_delta` as protocol-visible payload families without hard-coding their bodies into Python fixed metadata models.
   - [x] Add structured-event payload family wrapper.
   - [x] Add tool-delta payload family wrapper.
-  - [ ] Add async delivery tests for structured-event payloads.
-  - [ ] Add async delivery tests for tool-delta payloads.
-  - [ ] Add callback dispatch tests for structured-event payload family filtering.
-  - [ ] Add callback dispatch tests for tool-delta payload family filtering.
-  - [ ] Document these as payload families rather than schema/profile aliases.
+  - [x] Add async delivery tests for structured-event payloads.
+  - [x] Add async delivery tests for tool-delta payloads.
+  - [x] Add callback dispatch tests for structured-event payload family filtering.
+  - [x] Add callback dispatch tests for tool-delta payload family filtering.
+  - [x] Document these as payload families rather than schema/profile aliases.

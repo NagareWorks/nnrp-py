@@ -1729,7 +1729,10 @@ def test_native_runtime_connection_wraps_payload_family_events(tmp_path: Path) -
     assert workflow_states[0].payload_family == "workflow_state"
     assert workflow_states[0].is_workflow_state is True
     assert [event.payload for event in async_structured] == [b'{"delta":"ok"}']
+    assert [event.is_structured_event for event in async_structured] == [True]
     assert [event.payload_family for event in async_tool_deltas] == ["tool_delta"]
+    assert [event.payload for event in async_tool_deltas] == [b'{"delta":"ok"}']
+    assert [event.is_tool_delta for event in async_tool_deltas] == [True]
     assert [event.payload_family for event in async_workflow_states] == ["workflow_state"]
 
 
@@ -1750,11 +1753,16 @@ def test_native_runtime_connection_dispatches_callbacks(tmp_path: Path) -> None:
     )
     raw_payloads: list[bytes] = []
     structured_payloads: list[bytes] = []
+    tool_payloads: list[bytes] = []
     credit_frames: list[int] = []
 
     raw_count = result_connection.dispatch_events(lambda event: raw_payloads.append(event.payload), max_events=1)
     structured_count = result_connection.dispatch_structured_events(
         lambda event: structured_payloads.append(event.payload),
+        max_events=1,
+    )
+    tool_count = result_connection.dispatch_tool_deltas(
+        lambda event: tool_payloads.append(event.payload),
         max_events=1,
     )
     credit_count = credit_connection.dispatch_credit_updates(
@@ -1764,10 +1772,49 @@ def test_native_runtime_connection_dispatches_callbacks(tmp_path: Path) -> None:
 
     assert raw_count == 1
     assert structured_count == 1
+    assert tool_count == 1
     assert credit_count == 1
     assert raw_payloads == [b'{"delta":"ok"}']
     assert structured_payloads == [b'{"delta":"ok"}']
+    assert tool_payloads == [b'{"delta":"ok"}']
     assert credit_frames == [7]
+
+
+def test_native_runtime_connection_dispatches_payload_family_callbacks_by_event_kind(tmp_path: Path) -> None:
+    artifact = tmp_path / "nnrp_ffi.dll"
+    artifact.write_bytes(b"fake")
+    result_library = FakeRuntimeLibrary(event_payload=b'{"result":true}', event_kind=EVENT_KIND_RESULT_PUSHED)
+    result_connection = load_native_client(artifact, library=result_library).connect(
+        connection_id=12,
+        generation=2,
+        transport_id=TRANSPORT_SLOT_TCP,
+    )
+    control_library = FakeRuntimeLibrary(event_payload=b'{"control":true}', event_kind=EVENT_KIND_CONTROL)
+    control_connection = load_native_client(artifact, library=control_library).connect(
+        connection_id=12,
+        generation=2,
+        transport_id=TRANSPORT_SLOT_TCP,
+    )
+    structured_events: list[tuple[str, bytes, int]] = []
+    tool_deltas: list[tuple[str, bytes, int]] = []
+
+    structured_count = control_connection.dispatch_payload_family_events(
+        "structured_event",
+        lambda event: structured_events.append((event.payload_family, event.payload, event.event.kind)),
+        max_events=1,
+        event_kind=EVENT_KIND_CONTROL,
+    )
+    tool_count = result_connection.dispatch_payload_family_events(
+        "tool_delta",
+        lambda event: tool_deltas.append((event.payload_family, event.payload, event.event.kind)),
+        max_events=1,
+        event_kind=EVENT_KIND_RESULT_PUSHED,
+    )
+
+    assert structured_count == 1
+    assert tool_count == 1
+    assert structured_events == [("structured_event", b'{"control":true}', EVENT_KIND_CONTROL)]
+    assert tool_deltas == [("tool_delta", b'{"result":true}', EVENT_KIND_RESULT_PUSHED)]
 
 
 def test_native_runtime_connection_maps_callback_rejection(tmp_path: Path) -> None:

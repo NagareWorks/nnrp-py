@@ -22,13 +22,13 @@
   - [x] Add tool-delta async iterator over native result pump events.
   - [x] Add workflow-state async iterator over native result pump events.
   - [x] Add callback registration wrapper if async iterator alone is insufficient for host integrations.
-- [ ] Keep any remaining pure-Python codec code limited to preview2 fixture inspection or other non-hot-path tooling.
+- [x] Keep any remaining pure-Python codec code limited to preview2 fixture inspection or other non-hot-path tooling.
   - [x] Keep native runtime backend selection separate from the pure-Python fallback/test fixtures.
-  - [ ] Audit preview3 runtime call sites and move remaining Python-owned codec helpers behind fixture/diagnostic paths.
-    - [ ] Audit `nnrp.client.transport` runtime-facing helpers.
-    - [ ] Audit `nnrp.tools.smoke` runtime-facing examples.
-    - [ ] Audit README/runtime examples.
-    - [ ] Update docs/tests so packet builders are presented as protocol fixtures, not runtime execution.
+  - [x] Audit preview3 runtime call sites and move remaining Python-owned codec helpers behind fixture/diagnostic paths.
+    - [x] Audit `nnrp.client.transport` runtime-facing helpers.
+    - [x] Audit `nnrp.tools.smoke` runtime-facing examples.
+    - [x] Audit README/runtime examples.
+    - [x] Update docs/tests so packet builders are presented as protocol fixtures, not runtime execution.
 - [x] Run the pre-migration benchmark suite and record the baseline in `doc/benchmarks/rs-native-artifacts-migration.md`.
 - [ ] Run the same benchmark suite after native migration and record the deltas in `doc/benchmarks/rs-native-artifacts-migration.md`.
   - [ ] Build/download matching `nnrp-rs` native artifacts for the benchmark host.

@@ -134,6 +134,7 @@ with connect_native_client_connection(require_native=True) as connection:
 ## Public Wire API
 
 The public wire surface remains available for protocol fixtures, diagnostics, and tooling. It should not be treated as the primary host runtime path when native artifacts are available.
+The legacy `connect_client_session()` and `connect_client_session_with_probe()` helpers remain available only for packet transport smoke tests and adapter bring-up. Production host integrations should use the Rust-backed native connection/session helpers from `nnrp.client`.
 
 ### Schema And Profile Constants
 
@@ -250,7 +251,7 @@ The replay helpers currently provide:
 1. Prefer `nnrp.client.connect_native_client_connection()` for host runtime integration.
 2. Prefer `nnrp.core` when writing protocol-native tests or SDK integration code.
 3. Prefer `nnrp.tools` when building replay fixtures or generating stable regression summaries.
-4. For transport bring-up, use `nnrp.tools.smoke` and `nnrp-quic-smoke` rather than reimplementing ad hoc control packets.
+4. For transport bring-up, use `nnrp.tools.smoke`, `nnrp-quic-smoke`, or the tooling-only packet session helpers rather than reimplementing ad hoc control packets.
 
 ## Current Session Model
 
@@ -369,7 +370,7 @@ Extension frames remain the escape hatch for standardized or future protocol-sid
 
 The current transport-facing boundary is intentionally narrow.
 
-`nnrp-py` keeps the helpers that remain runtime-agnostic across different hosts and SDKs:
+`nnrp-py` keeps the helpers that remain runtime-agnostic across different hosts and SDKs. These helpers are intentionally positioned as tooling, diagnostics, or cross-SDK bring-up surfaces, not as the default host runtime API:
 
 1. QUIC connection/listener primitives in `nnrp.adapters`.
 2. TLS / ALPN configuration helpers such as `create_quic_client_configuration` and `create_quic_server_configuration`.

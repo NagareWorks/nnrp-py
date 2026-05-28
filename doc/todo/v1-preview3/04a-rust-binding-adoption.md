@@ -61,16 +61,16 @@
   - [x] Add native connection close/dispose FFI binding once exported.
   - [x] Add tests for use-after-close on native connection handles after FFI dispose exists.
 - [x] Map stable Rust error codes into Python exception hierarchies.
-- [ ] Keep pure-Python codec helpers limited to fixture inspection, diagnostics, and explicitly unsupported runtime combinations.
-  - [ ] Inventory pure-Python helpers used by runtime-facing public APIs.
-    - [ ] Inventory `nnrp.client.transport` connection/session helpers.
-    - [ ] Inventory `nnrp.tools.smoke` packet transport examples.
-    - [ ] Inventory README and package-level public imports that still lead with packet builders.
-    - [ ] Inventory benchmark runners that still measure Python-owned packet construction as runtime behavior.
-  - [ ] Move fixture-only helpers under test/tooling documentation.
-    - [ ] Mark packet builders as protocol fixture/diagnostic helpers in API docs.
-    - [ ] Keep raw packet examples out of default runtime quick-start paths.
-    - [ ] Keep smoke-only transport helpers outside the primary host API narrative.
+- [x] Keep pure-Python codec helpers limited to fixture inspection, diagnostics, and explicitly unsupported runtime combinations.
+  - [x] Inventory pure-Python helpers used by runtime-facing public APIs.
+    - [x] Inventory `nnrp.client.transport` connection/session helpers.
+    - [x] Inventory `nnrp.tools.smoke` packet transport examples.
+    - [x] Inventory README and package-level public imports that still lead with packet builders.
+    - [x] Inventory benchmark runners that still measure Python-owned packet construction as runtime behavior.
+  - [x] Move fixture-only helpers under test/tooling documentation.
+    - [x] Mark packet builders as protocol fixture/diagnostic helpers in API docs.
+    - [x] Keep raw packet examples out of default runtime quick-start paths.
+    - [x] Keep smoke-only transport helpers outside the primary host API narrative.
   - [x] Add explicit runtime fallback selection instead of implicit pure-Python execution.
   - [x] Add tests that default host runtime uses native artifacts when available.
 - [x] Add loader and probe tests for every supported platform tag using fake or fixture native artifacts where real artifacts are unavailable.

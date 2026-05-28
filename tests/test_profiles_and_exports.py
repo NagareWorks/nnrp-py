@@ -1,3 +1,7 @@
+import asyncio
+
+import pytest
+
 from nnrp import (
     CacheLeaseDescriptor,
     CacheObjectIdentity,
@@ -333,6 +337,8 @@ def test_connect_client_session_is_exported() -> None:
     assert ClientSession.__name__ == "ClientSession"
     assert callable(connect_client_session)
     assert callable(connect_client_session_with_probe)
+    assert "packet transport smoke/tooling" in (connect_client_session.__doc__ or "")
+    assert "packet transport smoke/tooling" in (connect_client_session_with_probe.__doc__ or "")
     assert NativeClientConnection.__name__ == "NativeClientConnection"
     assert NativeClientConnectionOptions.__name__ == "NativeClientConnectionOptions"
     assert NativeClientSessionOptions.__name__ == "NativeClientSessionOptions"
@@ -345,6 +351,16 @@ def test_connect_client_session_is_exported() -> None:
     assert callable(validate_session_recovery_ack)
     assert callable(validate_migration_recovery)
     assert callable(should_replay_frame_after_migration)
+
+
+def test_legacy_packet_session_helpers_warn_as_tooling_only() -> None:
+    async def enter_legacy_session() -> None:
+        async with connect_client_session("127.0.0.1"):
+            pass
+
+    with pytest.warns(RuntimeWarning, match="packet transport smoke/tooling helpers"):
+        with pytest.raises(ValueError, match="selected transport id is unspecified"):
+            asyncio.run(enter_legacy_session())
 
 
 def test_current_typed_models_are_exported() -> None:

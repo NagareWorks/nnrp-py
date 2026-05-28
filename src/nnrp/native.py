@@ -1642,7 +1642,20 @@ def _submit_result_from_ffi_event(
         diagnostic=diagnostic,
     )
     selected_state = (
-        NativeOperationLifecycle(state) if state is not None else _infer_lifecycle_from_event(runtime_event)
+        NativeOperationLifecycle(state)
+        if state is not None
+        else NativeOperationLifecycle.FAILED
+        if not status.succeeded or kind == EVENT_KIND_ERROR
+        else NativeOperationLifecycle.CANCELLED
+        if kind == EVENT_KIND_RESULT_DROPPED
+        else NativeOperationLifecycle.COMPLETED
+    )
+    structured_diagnostic = NativeStructuredDiagnostic(
+        status=status,
+        related_connection_id=diagnostic.related_connection_id,
+        related_session_id=diagnostic.related_session_id,
+        related_operation_id=diagnostic.related_operation_id,
+        related_frame_id=diagnostic.related_frame_id,
     )
     return NativeRuntimeResult(
         state=selected_state,
@@ -1650,7 +1663,7 @@ def _submit_result_from_ffi_event(
         frame_id=runtime_event.frame_id,
         payload=payload,
         event=runtime_event,
-        diagnostic=NativeStructuredDiagnostic.from_runtime_diagnostic(diagnostic),
+        diagnostic=structured_diagnostic,
     )
 
 
@@ -2339,19 +2352,28 @@ class NativeRuntimeSession:
         self._ensure_open()
         if max_events is not None and max_events < 0:
             raise ValueError("max_events must be non-negative")
-        submit_payload_view, _submit_payload_owner = self._submit_result_buffer_view(
-            payload,
-            "_submit_result_payload_cache",
-            "_submit_result_payload_view",
-            "_submit_result_payload_owner",
-        )
+        if isinstance(payload, bytes) and payload is self._submit_result_payload_cache:
+            submit_payload_view = self._submit_result_payload_view
+            _submit_payload_owner = self._submit_result_payload_owner
+        else:
+            submit_payload_view, _submit_payload_owner = _buffer_view_from_payload(payload)
+            if isinstance(payload, bytes):
+                object.__setattr__(self, "_submit_result_payload_cache", payload)
+                object.__setattr__(self, "_submit_result_payload_view", submit_payload_view)
+                object.__setattr__(self, "_submit_result_payload_owner", _submit_payload_owner)
         selected_result_payload = payload if result_payload is None else result_payload
-        result_payload_view, _result_payload_owner = self._submit_result_buffer_view(
-            selected_result_payload,
-            "_submit_result_result_payload_cache",
-            "_submit_result_result_payload_view",
-            "_submit_result_result_payload_owner",
-        )
+        if (
+            isinstance(selected_result_payload, bytes)
+            and selected_result_payload is self._submit_result_result_payload_cache
+        ):
+            result_payload_view = self._submit_result_result_payload_view
+            _result_payload_owner = self._submit_result_result_payload_owner
+        else:
+            result_payload_view, _result_payload_owner = _buffer_view_from_payload(selected_result_payload)
+            if isinstance(selected_result_payload, bytes):
+                object.__setattr__(self, "_submit_result_result_payload_cache", selected_result_payload)
+                object.__setattr__(self, "_submit_result_result_payload_view", result_payload_view)
+                object.__setattr__(self, "_submit_result_result_payload_owner", _result_payload_owner)
         request = self._submit_result_request
         if request is None:
             request = _NnrpClientSubmitResultRequest()
@@ -2375,8 +2397,8 @@ class NativeRuntimeSession:
             self._submit_result_out_operation_ref,
             self._submit_result_poll_result_ref,
         )
-        raise_for_native_status(status)
-        raise_for_native_status(poll_result.status)
+        _raise_for_native_ffi_status(status)
+        _raise_for_native_ffi_status(poll_result.status)
         if not poll_result.has_event:
             raise NativeWouldBlockError(NativeStatus(FFI_STATUS_WOULD_BLOCK))
         return _submit_result_from_ffi_event(
@@ -2385,22 +2407,6 @@ class NativeRuntimeSession:
             session=self.handle.handle,
             state=state,
         )
-
-    def _submit_result_buffer_view(
-        self,
-        payload: bytes | bytearray | memoryview,
-        cache_field: str,
-        view_field: str,
-        owner_field: str,
-    ) -> tuple[_NnrpBufferView, object | None]:
-        if isinstance(payload, bytes) and payload is getattr(self, cache_field):
-            return getattr(self, view_field), getattr(self, owner_field)
-        view, owner = _buffer_view_from_payload(payload)
-        if isinstance(payload, bytes):
-            object.__setattr__(self, cache_field, payload)
-            object.__setattr__(self, view_field, view)
-            object.__setattr__(self, owner_field, owner)
-        return view, owner
 
     def submit_and_poll_result(
         self,
@@ -2744,14 +2750,21 @@ def _bind_native_function(library: Any, name: str, restype: Any, argtypes: list[
 
 def raise_for_native_status(status: NativeStatus | _NnrpFfiStatus) -> None:
     if isinstance(status, _NnrpFfiStatus):
-        if status.status_code == FFI_STATUS_OK:
-            return
-        native_status = NativeStatus.from_ffi(status)
+        return _raise_for_native_ffi_status(status)
     else:
         native_status = status
     if native_status.succeeded:
         return
 
+    error_type = _STATUS_EXCEPTION_TYPES.get(native_status.status_code, NativeInternalError)
+    raise error_type(native_status)
+
+
+def _raise_for_native_ffi_status(status: _NnrpFfiStatus) -> None:
+    if status.status_code == FFI_STATUS_OK:
+        return
+
+    native_status = NativeStatus.from_ffi(status)
     error_type = _STATUS_EXCEPTION_TYPES.get(native_status.status_code, NativeInternalError)
     raise error_type(native_status)
 

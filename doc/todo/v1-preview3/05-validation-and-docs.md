@@ -42,13 +42,13 @@
   - [x] Add native connection/session quick-start.
   - [x] Add native submit/result/cancel/control examples.
   - [x] Add fallback/require-native behavior section.
-- [ ] Keep `doc/benchmarks/rs-native-artifacts-migration.md` updated with the native artifact plan, supported platform matrix, and pre/post migration benchmark results.
+- [x] Keep `doc/benchmarks/rs-native-artifacts-migration.md` updated with the native artifact plan, supported platform matrix, and pre/post migration benchmark results.
   - [x] Update pinned `nnrp-rs` tag/commit before release.
   - [x] Update benchmark scenario list after native-backed schema/recovery helpers land.
-  - [ ] Fill post-migration benchmark environment row.
-  - [ ] Fill post-migration latency table.
-  - [ ] Fill post-migration throughput table.
-  - [ ] Add interpretation notes for regressions or wins.
+  - [x] Fill post-migration benchmark environment row.
+  - [x] Fill post-migration latency table.
+  - [x] Fill post-migration throughput table.
+  - [x] Add interpretation notes for regressions or wins.
 - [x] Document the current connection/session model and how it replaces the earlier single-session host mental model.
   - [x] Document connection-owned session lifecycle.
   - [x] Document multiple sessions on one connection.

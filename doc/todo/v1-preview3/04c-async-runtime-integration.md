@@ -31,11 +31,17 @@
     - [x] Update docs/tests so packet builders are presented as protocol fixtures, not runtime execution.
 - [x] Run the pre-migration benchmark suite and record the baseline in `doc/benchmarks/rs-native-artifacts-migration.md`.
 - [ ] Run the same benchmark suite after native migration and record the deltas in `doc/benchmarks/rs-native-artifacts-migration.md`.
-  - [ ] Build/download matching `nnrp-rs` native artifacts for the benchmark host.
-  - [ ] Install artifacts into `src/nnrp/native_artifacts` using `scripts/prepare_native_artifacts.py`.
-  - [ ] Verify the installed artifact is accepted by `probe_native_artifact`.
-  - [ ] Run conformance benchmark plan against native-backed Python helpers.
+  - [x] Build/download matching `nnrp-rs` native artifacts for the benchmark host.
+  - [x] Install artifacts into `src/nnrp/native_artifacts` using `scripts/prepare_native_artifacts.py`.
+  - [x] Verify the installed artifact is accepted by `probe_native_artifact`.
+  - [x] Run conformance benchmark plan against native-backed Python helpers.
   - [ ] Run SDK-local benchmark plan against native-backed Python helpers.
-  - [ ] Record p50/p95/p99 latency deltas.
-  - [ ] Record throughput/CPU/memory deltas.
-  - [ ] Record artifact version, Python version, OS/arch, and CPU in the post-migration environment row.
+  - [x] Record p50/p95/p99 latency deltas.
+  - [x] Record raw throughput deltas.
+  - [ ] Record profiled CPU/memory baselines without mixing them into raw throughput comparisons.
+  - [x] Record artifact version, Python version, OS/arch, and CPU in the post-migration environment row.
+- [ ] Add a second-stage performance optimization pass for the native-glue runtime path.
+  - [ ] Run raw throughput benchmarks for native runtime scenarios separately from fixture/helper scenarios.
+  - [ ] Record profiled CPU/memory baselines for those native runtime scenarios after raw throughput is stable.
+  - [ ] Investigate any native runtime scenario that does not reach the expected 30%+ improvement target.
+  - [ ] Feed confirmed bottlenecks back into FFI batching, handle reuse, or zero-copy follow-up work.

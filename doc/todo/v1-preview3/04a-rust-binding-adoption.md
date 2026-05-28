@@ -23,6 +23,19 @@
       - [x] Replace header/metadata descriptor benchmark runners with native-backed descriptor helpers.
       - [x] Add a native event polling benchmark runner.
       - [x] Keep packet-level benchmarks labeled as fixture/diagnostic baselines.
+    - [ ] Add native-runtime benchmark scenarios that measure glued Rust execution instead of packet fixture helpers.
+      - [ ] Add `native_submit_result_loop` benchmark with connection/session prepared outside the measured loop.
+      - [ ] Add `native_batch_event_polling_throughput` benchmark that polls multiple events per FFI call.
+      - [ ] Add a benchmark result note that separates fixture/helper throughput from native runtime throughput.
+    - [ ] Optimize FFI call granularity until the native runtime path shows the expected migration win.
+      - [ ] Count Python-to-native calls per submit/result iteration.
+      - [ ] Batch submit plus result polling where one coarse native call can replace multiple fine-grained calls.
+      - [ ] Reuse native connection/session handles across hot benchmark iterations without rebuilding Python wrapper state.
+      - [ ] Compare raw throughput against the pre-migration baseline and target at least 30% improvement for the glued runtime path.
+    - [ ] Audit payload copy boundaries after native-runtime benchmarks land.
+      - [ ] Measure submit payload copy count on the native runtime benchmark path.
+      - [ ] Measure result/event payload snapshot count on the native runtime benchmark path.
+      - [ ] Decide whether borrowed result views become release-blocking if copy overhead dominates benchmark results.
 - [x] Pin the exact `nnrp-rs` commit, tag, or artifact version used by the Python package.
 - [x] Define the packaged native artifact layout for Windows, macOS, Linux, Android, and iOS.
 - [x] Add release packaging glue that normalizes `nnrp-rs` native artifact zips into platform wheel contents before publish.

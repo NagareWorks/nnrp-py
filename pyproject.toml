@@ -26,6 +26,7 @@ classifiers = [
 ]
 dependencies = [
   "aioquic>=1.2.0",
+  "cffi>=2.0.0",
 ]
 
 [project.urls]

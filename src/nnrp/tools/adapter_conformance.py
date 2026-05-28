@@ -188,7 +188,7 @@ class _AdapterCaseExecution:
         return self.backend.connect(
             connection_id=self._int_parameter("connection_id", 1),
             generation=self._int_parameter("connection_generation", 1),
-            transport_id=self._int_parameter("transport_id", 1),
+            transport_id=self._int_parameter("transport_id", 2),
         )
 
     def _open_session(self, connection):
@@ -243,10 +243,25 @@ class _AdapterCaseExecution:
         )
 
     def _execute_result_push_terminal(self) -> dict[str, Any]:
-        session = self._open_session(self._connect())
-        operation = self._submit_operation(session)
-        result = session.poll_result(operation, max_events=self._int_parameter("max_events", 1))
+        connection = self._connect()
+        session = self._open_session(connection)
+        self._drain_setup_events(connection)
         expected_state = self._optional_string_parameter("expected_result_state")
+        operation_id = self._int_parameter("operation_id", 99)
+        frame_id = self._int_parameter("frame_id", 7)
+        payload = self._payload_parameter("payload", b"adapter-payload")
+        if not isinstance(session, _AdapterSmokeSession):
+            result = session.submit_result(
+                operation_id=operation_id,
+                frame_id=frame_id,
+                payload=payload,
+                result_payload=payload,
+                max_events=self._int_parameter("max_events", 2),
+            )
+            operation = result
+        else:
+            operation = self._submit_operation(session)
+            result = session.poll_result(operation, max_events=self._int_parameter("max_events", 2))
         if expected_state is not None and getattr(result, "state", expected_state) != expected_state:
             raise ValueError(f"expected result state {expected_state!r}, got {getattr(result, 'state', None)!r}")
         session.close()
@@ -257,6 +272,23 @@ class _AdapterCaseExecution:
             frame_id=operation.frame_id,
             result_payload_bytes=len(getattr(result, "payload", b"")),
         )
+
+    def _drain_setup_events(self, connection: Any) -> None:
+        poll_events_batch = getattr(connection, "poll_events_batch", None)
+        if callable(poll_events_batch):
+            try:
+                while poll_events_batch(max_events=8):
+                    pass
+                return
+            except Exception:
+                return
+        poll_events = getattr(connection, "poll_events", None)
+        if callable(poll_events):
+            try:
+                while poll_events():
+                    pass
+            except Exception:
+                return
 
     def _evidence(self, action: str, **fields: Any) -> dict[str, Any]:
         return {
@@ -418,6 +450,21 @@ class _AdapterSmokeSession:
         del max_events
         self._ensure_open()
         return _AdapterSmokeResult(operation.operation_id, operation.frame_id, operation.payload)
+
+    def submit_result(
+        self,
+        *,
+        operation_id: int,
+        frame_id: int,
+        payload: bytes | bytearray | memoryview = b"",
+        result_payload: bytes | bytearray | memoryview | None = None,
+        max_events: int | None = None,
+    ) -> _AdapterSmokeResult:
+        del max_events
+        self._ensure_open()
+        selected_result_payload = payload if result_payload is None else result_payload
+        self.operations.append(_AdapterSmokeOperation(operation_id, frame_id, bytes(payload)))
+        return _AdapterSmokeResult(operation_id, frame_id, bytes(selected_result_payload))
 
     def cancel(self, *, frame_id: int) -> None:
         self._ensure_open()

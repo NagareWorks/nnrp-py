@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import gc
+import importlib.util
 import json
 import os
 import platform
@@ -34,9 +35,11 @@ from nnrp.core.packet import (
 from nnrp.native import (
     NativeArtifactError,
     NativeWouldBlockError,
+    default_artifact_root,
     load_native_client,
     load_native_schema_codec,
     probe_native_artifact,
+    resolve_native_artifact,
 )
 from nnrp.schema import (
     pack_schema_descriptor,
@@ -52,6 +55,7 @@ _RESULTS_SCHEMA_URL = "https://raw.githubusercontent.com/NagareWorks/nnrp-confor
 _DEFAULT_IMPLEMENTATION_NAME = "nnrp-py"
 _DEFAULT_SKIP_MESSAGE = "This benchmark scenario is not implemented in the current Python baseline runner."
 _NATIVE_SUBMIT_RESULT_ENTRYPOINTS = (
+    "client_submit_result_compact",
     "client_submit_result",
     "client_submit",
     "client_complete_operation",
@@ -439,6 +443,73 @@ def _run_native_submit_result_loop(scenario_id: str, workload: dict[str, Any]) -
         connection.close()
 
 
+def _run_native_submit_result_cffi_api_loop(scenario_id: str, workload: dict[str, Any]) -> dict[str, Any]:
+    duration_seconds = _positive_float(workload.get("duration_seconds"), default=10.0)
+    warmup_iterations = _non_negative_int(workload.get("warmup_iterations"), default=1_000)
+    payload_bytes = _positive_int(workload.get("payload_bytes"), default=1024)
+    profile = _bool(workload.get("profile"), default=False)
+    try:
+        artifact_path = resolve_native_artifact(default_artifact_root())
+        ffi, cffi_api = _load_cffi_api_submit_result_module()
+        connection = load_native_client(artifact_path).connect(
+            connection_id=1,
+            generation=1,
+            transport_id=2,
+        )
+    except (ImportError, NativeArtifactError, OSError, RuntimeError, Exception) as error:
+        return _skip_result(scenario_id, f"native cffi api submit/result loop unavailable: {error}")
+
+    session = connection.open_session(
+        requested_session_id=1,
+        generation=1,
+        profile_id=0,
+        schema_id=0,
+        schema_version=0,
+    )
+    _drain_native_setup_events(connection)
+    native_session = session.handle.handle
+    payload = b"x" * payload_bytes
+    payload_view = ffi.from_buffer(payload)
+    artifact_path_bytes = os.fsencode(artifact_path)
+    out_result = ffi.new("NnrpPyCompactResult *")
+    counter = 0
+
+    def operation() -> None:
+        nonlocal counter
+        counter += 1
+        status = cffi_api.nnrp_py_client_submit_result_compact(
+            artifact_path_bytes,
+            native_session.kind,
+            native_session.id,
+            native_session.generation,
+            native_session.flags,
+            counter,
+            counter,
+            payload_view,
+            payload_bytes,
+            out_result,
+        )
+        if status != 0 or out_result.status_code != 0 or not out_result.has_result:
+            raise RuntimeError(
+                f"cffi api submit/result failed: wrapper_status={status} "
+                f"ffi_status={out_result.status_code} has_result={int(out_result.has_result)}"
+            )
+
+    try:
+        for _ in range(warmup_iterations):
+            operation()
+
+        metrics = _measure_throughput_metrics(operation, duration_seconds, profile=profile, include_completed=True)
+        metrics["native_ffi_calls_per_op"] = 1.0
+        metrics["native_ffi_client_submit_result_compact_calls_per_op"] = 1.0
+        metrics["native_binding_mode"] = "cffi_api"
+        return _measured_throughput_result(scenario_id, metrics)
+    except RuntimeError as error:
+        return _skip_result(scenario_id, f"native cffi api submit/result loop unavailable: {error}")
+    finally:
+        connection.close()
+
+
 def _run_native_submit_result_allocation_smoke(scenario_id: str, workload: dict[str, Any]) -> dict[str, Any]:
     iterations = _positive_int(workload.get("iterations"), default=1_000)
     warmup_iterations = _non_negative_int(workload.get("warmup_iterations"), default=min(100, iterations))
@@ -558,11 +629,226 @@ def _add_native_submit_result_call_metrics(metrics: dict[str, float | int], comp
     if completed_operations <= 0:
         return
     metrics["native_ffi_calls_per_op"] = 1.0
-    metrics["native_ffi_client_submit_result_calls_per_op"] = 1.0
+    metrics["native_ffi_client_submit_result_compact_calls_per_op"] = 1.0
+    metrics["native_ffi_client_submit_result_calls_per_op"] = 0.0
     metrics["native_ffi_client_submit_calls_per_op"] = 0.0
     metrics["native_ffi_client_complete_operation_calls_per_op"] = 0.0
     metrics["native_ffi_client_await_event_calls_per_op"] = 0.0
     metrics["native_ffi_client_await_events_calls_per_op"] = 0.0
+
+
+def _load_cffi_api_submit_result_module() -> tuple[Any, Any]:  # pragma: no cover
+    try:
+        from cffi import FFI
+    except ImportError as exc:
+        raise ImportError("cffi is not installed") from exc
+
+    module_name = "_nnrp_cffi_api_submit_result"
+    build_dir = Path("artifacts") / "cffi-api"
+    build_dir.mkdir(parents=True, exist_ok=True)
+    existing = next(build_dir.glob(f"{module_name}*.pyd"), None)
+    if existing is None:
+        existing = next(build_dir.glob(f"{module_name}*.so"), None)
+    if existing is None:
+        builder = FFI()
+        builder.cdef(
+            """
+            typedef struct NnrpPyCompactResult {
+                unsigned int status_code;
+                unsigned int error_family;
+                unsigned int protocol_error_code;
+                unsigned int detail_code;
+                unsigned char has_result;
+                unsigned int event_kind;
+                unsigned int result_state;
+                unsigned long long operation_id;
+                unsigned int frame_id;
+                size_t payload_len;
+            } NnrpPyCompactResult;
+
+            int nnrp_py_client_submit_result_compact(
+                const char *library_path,
+                unsigned int session_kind,
+                unsigned long long session_id,
+                unsigned int session_generation,
+                unsigned int session_flags,
+                unsigned long long operation_id,
+                unsigned int frame_id,
+                const unsigned char *payload,
+                size_t payload_len,
+                NnrpPyCompactResult *out_result
+            );
+            """
+        )
+        builder.set_source(module_name, _CFFI_API_SUBMIT_RESULT_SOURCE)
+        existing = Path(builder.compile(tmpdir=str(build_dir), verbose=False))
+
+    spec = importlib.util.spec_from_file_location(module_name, existing)
+    if spec is None or spec.loader is None:
+        raise RuntimeError(f"failed to load compiled cffi api module: {existing}")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[module_name] = module
+    spec.loader.exec_module(module)
+    return module.ffi, module.lib
+
+
+_CFFI_API_SUBMIT_RESULT_SOURCE = r"""
+#include <stdint.h>
+#include <stddef.h>
+#include <string.h>
+
+#ifdef _WIN32
+#include <windows.h>
+static void *nnrp_py_load_symbol(const char *library_path, const char *symbol_name) {
+    static HMODULE library = NULL;
+    if (library == NULL) {
+        library = LoadLibraryA(library_path);
+        if (library == NULL) {
+            return NULL;
+        }
+    }
+    return (void *)GetProcAddress(library, symbol_name);
+}
+#else
+#include <dlfcn.h>
+static void *nnrp_py_load_symbol(const char *library_path, const char *symbol_name) {
+    static void *library = NULL;
+    if (library == NULL) {
+        library = dlopen(library_path, RTLD_NOW | RTLD_LOCAL);
+        if (library == NULL) {
+            return NULL;
+        }
+    }
+    return dlsym(library, symbol_name);
+}
+#endif
+
+typedef struct NnrpFfiStatus {
+    uint32_t status_code;
+    uint32_t error_family;
+    uint32_t protocol_error_code;
+    uint32_t detail_code;
+} NnrpFfiStatus;
+
+typedef struct NnrpHandle {
+    uint32_t kind;
+    uint64_t id;
+    uint32_t generation;
+    uint32_t flags;
+} NnrpHandle;
+
+typedef struct NnrpBufferView {
+    const uint8_t *ptr;
+    size_t len;
+} NnrpBufferView;
+
+typedef struct NnrpFfiDiagnostic {
+    NnrpFfiStatus status;
+    uint64_t related_connection_id;
+    uint32_t related_session_id;
+    uint64_t related_operation_id;
+    uint32_t related_frame_id;
+} NnrpFfiDiagnostic;
+
+typedef struct NnrpClientSubmitResultRequest {
+    NnrpHandle session;
+    uint64_t operation_id;
+    uint32_t frame_id;
+    NnrpBufferView submit_payload;
+    NnrpBufferView result_payload;
+    size_t max_events;
+} NnrpClientSubmitResultRequest;
+
+typedef struct NnrpCompactResult {
+    NnrpFfiStatus status;
+    uint8_t has_result;
+    uint32_t event_kind;
+    uint32_t result_state;
+    NnrpHandle operation;
+    uint64_t operation_id;
+    uint32_t frame_id;
+    NnrpBufferView payload;
+    NnrpFfiDiagnostic diagnostic;
+} NnrpCompactResult;
+
+typedef struct NnrpPyCompactResult {
+    unsigned int status_code;
+    unsigned int error_family;
+    unsigned int protocol_error_code;
+    unsigned int detail_code;
+    unsigned char has_result;
+    unsigned int event_kind;
+    unsigned int result_state;
+    unsigned long long operation_id;
+    unsigned int frame_id;
+    size_t payload_len;
+} NnrpPyCompactResult;
+
+typedef NnrpFfiStatus (*nnrp_client_submit_result_compact_fn)(
+    NnrpClientSubmitResultRequest request,
+    NnrpCompactResult *out_result
+);
+
+int nnrp_py_client_submit_result_compact(
+    const char *library_path,
+    unsigned int session_kind,
+    unsigned long long session_id,
+    unsigned int session_generation,
+    unsigned int session_flags,
+    unsigned long long operation_id,
+    unsigned int frame_id,
+    const unsigned char *payload,
+    size_t payload_len,
+    NnrpPyCompactResult *out_result
+) {
+    if (library_path == NULL || out_result == NULL) {
+        return -1;
+    }
+    nnrp_client_submit_result_compact_fn submit_result =
+        (nnrp_client_submit_result_compact_fn)nnrp_py_load_symbol(library_path, "nnrp_client_submit_result_compact");
+    if (submit_result == NULL) {
+        return -2;
+    }
+
+    NnrpClientSubmitResultRequest request;
+    memset(&request, 0, sizeof(request));
+    request.session.kind = (uint32_t)session_kind;
+    request.session.id = (uint64_t)session_id;
+    request.session.generation = (uint32_t)session_generation;
+    request.session.flags = (uint32_t)session_flags;
+    request.operation_id = (uint64_t)operation_id;
+    request.frame_id = (uint32_t)frame_id;
+    request.submit_payload.ptr = payload;
+    request.submit_payload.len = payload_len;
+    request.result_payload.ptr = payload;
+    request.result_payload.len = payload_len;
+    request.max_events = 2;
+
+    NnrpCompactResult native_result;
+    memset(&native_result, 0, sizeof(native_result));
+    NnrpFfiStatus status = submit_result(request, &native_result);
+    out_result->status_code = status.status_code;
+    out_result->error_family = status.error_family;
+    out_result->protocol_error_code = status.protocol_error_code;
+    out_result->detail_code = status.detail_code;
+    if (status.status_code != 0) {
+        out_result->has_result = 0;
+        return 0;
+    }
+
+    out_result->status_code = native_result.status.status_code;
+    out_result->error_family = native_result.status.error_family;
+    out_result->protocol_error_code = native_result.status.protocol_error_code;
+    out_result->detail_code = native_result.status.detail_code;
+    out_result->has_result = native_result.has_result;
+    out_result->event_kind = native_result.event_kind;
+    out_result->result_state = native_result.result_state;
+    out_result->operation_id = native_result.operation_id;
+    out_result->frame_id = native_result.frame_id;
+    out_result->payload_len = native_result.payload.len;
+    return 0;
+}
+"""
 
 
 def _run_native_artifact_probe(scenario_id: str, workload: dict[str, Any]) -> dict[str, Any]:
@@ -937,6 +1223,7 @@ _SCENARIO_RUNNERS: dict[str, Callable[[str, dict[str, Any]], dict[str, Any]]] = 
     "native_batch_event_polling_throughput": _run_native_batch_event_polling_throughput,
     "native_artifact_probe": _run_native_artifact_probe,
     "native_submit_result_loop": _run_native_submit_result_loop,
+    "native_submit_result_cffi_api_loop": _run_native_submit_result_cffi_api_loop,
     "native_submit_result_allocation_smoke": _run_native_submit_result_allocation_smoke,
     "runtime_probe": _run_runtime_probe,
     "session_lifecycle": _run_session_lifecycle,

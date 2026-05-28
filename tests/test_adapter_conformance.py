@@ -233,6 +233,82 @@ def test_adapter_result_state_validation_failure_is_reported() -> None:
     assert "expected result state" in report["results"][0]["message"]
 
 
+def test_adapter_result_terminal_prefers_native_submit_result_facade() -> None:
+    class NativeLikeResult:
+        def __init__(self, operation_id: int, frame_id: int, payload: bytes) -> None:
+            self.operation_id = operation_id
+            self.frame_id = frame_id
+            self.payload = payload
+            self.state = "completed"
+
+    class NativeLikeSession:
+        frame_id = 0
+
+        def __init__(self) -> None:
+            self.closed = False
+            self.submitted: list[tuple[int, int, bytes, bytes, int | None]] = []
+
+        def submit_result(
+            self,
+            *,
+            operation_id: int,
+            frame_id: int,
+            payload: bytes,
+            result_payload: bytes,
+            max_events: int | None = None,
+        ) -> NativeLikeResult:
+            self.submitted.append((operation_id, frame_id, bytes(payload), bytes(result_payload), max_events))
+            return NativeLikeResult(operation_id, frame_id, bytes(result_payload))
+
+        def close(self) -> None:
+            self.closed = True
+
+    class NativeLikeConnection:
+        def __init__(self) -> None:
+            self.session = NativeLikeSession()
+            self.batch_polls = 0
+
+        def open_session(self, **_kwargs):
+            return self.session
+
+        def poll_events_batch(self, *, max_events: int):
+            self.batch_polls += 1
+            assert max_events == 8
+            return ()
+
+    class NativeLikeBackend:
+        def __init__(self) -> None:
+            self.connection = NativeLikeConnection()
+
+        def connect(self, *, connection_id: int, generation: int, transport_id: int):
+            assert (connection_id, generation, transport_id) == (1, 1, 2)
+            return self.connection
+
+    backend = NativeLikeBackend()
+
+    report = build_adapter_case_results_report(
+        {
+            "protocol_version": "nnrp-1",
+            "cases": [
+                {
+                    "id": "l1.result_push.basic.terminal.validation",
+                    "parameters": {
+                        "operation_id": 9,
+                        "frame_id": 10,
+                        "payload": [1, 2, 3],
+                        "max_events": 2,
+                    },
+                }
+            ],
+        },
+        backend=backend,
+    )
+
+    assert report["results"][0]["outcome"] == "pass"
+    assert backend.connection.batch_polls == 1
+    assert backend.connection.session.submitted == [(9, 10, b"\x01\x02\x03", b"\x01\x02\x03", 2)]
+
+
 def test_adapter_runtime_helpers_read_native_handle_shapes() -> None:
     class Handle:
         def __init__(self) -> None:

@@ -33,6 +33,8 @@
       - [x] Count Python-to-native calls per submit/result iteration.
       - [x] Batch submit plus result polling where one coarse native call can replace multiple fine-grained calls.
       - [x] Reuse native connection/session handles across hot benchmark iterations without rebuilding Python wrapper state.
+      - [x] Bind compact submit/result ABI and skip repeated ctypes request field writes on the hot path.
+      - [x] Add a benchmark-only cffi API mode runner to compare binding overhead when a local C compiler is available.
       - [ ] Compare raw throughput against the pre-migration baseline and target at least 30% improvement for the glued runtime path.
     - [ ] Audit payload copy boundaries after native-runtime benchmarks land.
       - [ ] Measure submit payload copy count on the native runtime benchmark path.

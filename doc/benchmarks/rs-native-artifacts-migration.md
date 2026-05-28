@@ -26,12 +26,12 @@ The existing Python SDK owns helper-level packet construction, transport-oriente
 
 ## Pinned Native Contract
 
-The current preview3 binding work consumes `nnrp-rs` native artifact version `1.0.0-preview.3.4`.
+The current preview3 binding work consumes `nnrp-rs` native artifact version `1.0.0-preview.3.6`.
 
 This version is the native artifact contract pin for the current migration branch and includes:
 
 1. The `nnrp_runtime_capabilities` export.
-2. ABI version `1.2.0`.
+2. ABI version `1.5.0`.
 3. Protocol version `1/0`.
 4. Runtime feature flags for protocol core, client/server APIs, event polling, callback dispatch, cache/schema, recovery, typed payloads, and transport slots.
 5. Transport slot bits for TCP and optional QUIC.
@@ -65,7 +65,7 @@ Rules:
 | Run | Date | SDK commit | nnrp-rs artifact | Python | OS/arch | CPU | Notes |
 | --- | --- | --- | --- | --- | --- | --- | --- |
 | Pre-migration baseline | 2026-05-25 | b83dadb | N/A | 3.13.5 | windows/amd64 | Intel(R) Core(TM)2 Duo CPU T7700 @ 2.40GHz | Conformance benchmark runner selected and measured 9 scenarios. |
-| Post-migration native | 2026-05-28 | 6c9a067 | 1.0.0-preview.3.3 | 3.13.5 | windows/amd64 | Intel64 Family 6 Model 15 Stepping 11, GenuineIntel | Local `nnrp-rs` release artifact installed with `scripts/prepare_native_artifacts.py`; conformance benchmark plan selected and measured 9 scenarios. |
+| Post-migration native | 2026-05-28 | pending | 1.0.0-preview.3.6 | 3.13.5 | windows/amd64 | Intel64 Family 6 Model 15 Stepping 11, GenuineIntel | Local `nnrp-rs` release artifact installed with `scripts/prepare_native_artifacts.py`; native runtime benchmark plan measured compact submit/result and batch event polling. |
 
 ### Latency Benchmarks
 
@@ -82,7 +82,7 @@ Rules:
 
 | Benchmark | Payload | Duration | Pre throughput | Pre CPU | Pre peak memory | Post throughput | Post CPU | Post peak memory | Delta | Notes |
 | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |
-| Submit/result loop | inline tensor payload | 10 s | 95365.1 ops/s | TBD | TBD | 100471.2 ops/s | TBD | TBD | +5.4% | Measured by `l4.submit_result.inline_tensor.throughput` with raw throughput mode. |
+| Submit/result loop | inline tensor payload | 10 s | 95365.1 ops/s | TBD | TBD | 103051.6 ops/s | TBD | TBD | +8.1% | Measured by `l4.native.submit_result.throughput` with compact Rust submit/result ABI and raw throughput mode. |
 | TCP loopback | request/result stream | 10 s | 83973.0 ops/s | TBD | TBD | 91017.4 ops/s | TBD | TBD | +8.4% | Measured by `l4.transport.tcp.loopback.throughput` against the SDK local transport-probe loopback path with raw throughput mode. |
 | QUIC loopback | request/result stream | 10 s | 91296.2 ops/s | TBD | TBD | 89373.5 ops/s | TBD | TBD | -2.1% | Optional slot; measured by `l4.transport.quic.loopback.throughput` against the SDK local transport-probe loopback path with raw throughput mode. |
 

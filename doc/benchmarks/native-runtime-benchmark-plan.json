@@ -27,6 +27,24 @@
       }
     },
     {
+      "id": "l4.native.submit_result.cffi_api.throughput",
+      "category": "throughput",
+      "feature": "benchmark.native.submit_result.cffi_api.throughput",
+      "required_capabilities": [
+        "session.open_close",
+        "operation.submit",
+        "event.polling.batch"
+      ],
+      "description": "Measure native runtime submit/result throughput through an out-of-line cffi API wrapper.",
+      "workload": {
+        "operation": "native_submit_result_cffi_api_loop",
+        "payload": "inline_payload",
+        "payload_bytes": 1024,
+        "warmup_iterations": 1000,
+        "duration_seconds": 10
+      }
+    },
+    {
       "id": "l4.native.event_polling.throughput",
       "category": "throughput",
       "feature": "benchmark.native.event_polling.throughput",

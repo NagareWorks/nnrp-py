@@ -31,7 +31,7 @@
   - [x] Add typed payload descriptor view.
   - [x] Add registry assignment constants from `nnrp-doc`.
   - [x] Add tests for descriptor size/alignment pass-through.
-- [ ] Keep schema/profile interpretation Rust-owned; Python should expose stable descriptors and host-friendly wrappers only.
+- [x] Keep schema/profile interpretation Rust-owned; Python should expose stable descriptors and host-friendly wrappers only.
   - [x] Avoid body-specific schema decoding in Python helpers; native descriptor parse/write and binding validation delegate to Rust.
   - [x] Route `SchemaDescriptorHeader.pack/unpack` through native codec when a native runtime is selected.
   - [x] Route `Preview3TypedPayloadDescriptor.pack/unpack` through native codec when a native runtime is selected.
@@ -46,13 +46,13 @@
   - [x] Add tensor profile descriptor wrapper.
   - [x] Add token profile descriptor wrapper.
   - [x] Add tests that token profile does not depend on tensor defaults.
-- [ ] Treat `profile_id = 0` as `unspecified` on the Python public surface rather than an implicit tensor default.
+- [x] Treat `profile_id = 0` as `unspecified` on the Python public surface rather than an implicit tensor default.
   - [x] Add unspecified profile constant/wrapper.
-  - [ ] Audit public APIs for implicit tensor default behavior.
-    - [ ] Audit native session open defaults.
-    - [ ] Audit typed payload descriptor helper defaults.
-    - [ ] Audit benchmark scenario defaults.
-    - [ ] Audit README/API examples.
+  - [x] Audit public APIs for implicit tensor default behavior.
+    - [x] Audit native session open defaults.
+    - [x] Audit typed payload descriptor helper defaults.
+    - [x] Audit benchmark scenario defaults.
+    - [x] Audit README/API examples.
   - [x] Add tests for profile id 0 pass-through.
 - [x] Add token-profile wrappers against the frozen token minimum semantics and first-round registry assignments from `nnrp-doc`.
   - [x] Add token stream profile wrapper.

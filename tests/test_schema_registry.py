@@ -169,6 +169,25 @@ def test_standard_profile_helpers_keep_unspecified_tensor_and_token_distinct() -
     assert token_delta_schema_descriptor().default_stream_semantics == StreamSemantics.APPEND
 
 
+def test_public_typed_payload_helper_defaults_do_not_treat_unspecified_as_tensor() -> None:
+    unspecified = unspecified_payload_descriptor(offset=0, length=1)
+    tensor = tensor_payload_descriptor(offset=1, length=1)
+    token = token_delta_payload_descriptor(offset=2, length=1)
+
+    assert unspecified.profile_id == StandardProfile.UNSPECIFIED
+    assert unspecified.schema_id == 0
+    assert unspecified.schema_version == 0
+    assert unspecified.stream_semantics == StreamSemantics.UNSPECIFIED
+    assert unspecified.pack()[0:2] == int(StandardProfile.UNSPECIFIED).to_bytes(2, "little")
+    assert tensor.profile_id == StandardProfile.TENSOR
+    assert token.profile_id == StandardProfile.TOKEN
+    assert {unspecified.profile_id, tensor.profile_id, token.profile_id} == {
+        StandardProfile.UNSPECIFIED,
+        StandardProfile.TENSOR,
+        StandardProfile.TOKEN,
+    }
+
+
 def test_structured_event_and_tool_delta_remain_payload_families_not_standard_profiles() -> None:
     standard_profile_values = {int(profile) for profile in StandardProfile}
 

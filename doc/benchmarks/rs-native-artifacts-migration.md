@@ -31,9 +31,9 @@ The current preview3 binding work consumes `nnrp-rs` native artifact version `1.
 This version is the native artifact contract pin for the current migration branch and includes:
 
 1. The `nnrp_runtime_capabilities` export.
-2. ABI version `1.2.0`.
+2. ABI version `1.3.0`.
 3. Protocol version `1/0`.
-4. Runtime feature flags for protocol core, client/server APIs, event polling, callback dispatch, cache/schema, recovery, typed payloads, and transport slots.
+4. Runtime feature flags for protocol core, client/server APIs, event polling, callback dispatch, cache/schema, recovery, typed payloads, transport slots, batch polling, cache lease operations, schema registry handles, buffer handles, executable resume, and client completion helpers.
 5. Transport slot bits for TCP and optional QUIC.
 
 If a later `nnrp-rs` release changes exported symbol names, ABI struct layout, required feature flags, or transport-slot meanings, update this pin and rerun the pre/post migration benchmark table before accepting the new artifact.
@@ -65,7 +65,7 @@ Rules:
 | Run | Date | SDK commit | nnrp-rs artifact | Python | OS/arch | CPU | Notes |
 | --- | --- | --- | --- | --- | --- | --- | --- |
 | Pre-migration baseline | 2026-05-25 | b83dadb | N/A | 3.13.5 | windows/amd64 | Intel(R) Core(TM)2 Duo CPU T7700 @ 2.40GHz | Conformance benchmark runner selected and measured 9 scenarios. |
-| Post-migration native | 2026-05-28 | 6c9a067 | 1.0.0-preview.3.3 | 3.13.5 | windows/amd64 | Intel64 Family 6 Model 15 Stepping 11, GenuineIntel | Local `nnrp-rs` release artifact installed with `scripts/prepare_native_artifacts.py`; conformance benchmark plan selected and measured 9 scenarios. |
+| Post-migration native | 2026-05-28 | 81557c7 | 1.0.0-preview.3.4 | 3.13.5 | windows/amd64 | Intel64 Family 6 Model 15 Stepping 11, GenuineIntel | `nnrp-rs` release asset `nnrp-ffi-native-windows-x86_64-1.0.0-preview.3.4.zip` installed with `scripts/prepare_native_artifacts.py`; conformance benchmark plan measured 9 scenarios and SDK-local native runtime plan measured 2 scenarios. |
 
 ### Latency Benchmarks
 
@@ -82,7 +82,8 @@ Rules:
 
 | Benchmark | Payload | Duration | Pre throughput | Pre CPU | Pre peak memory | Post throughput | Post CPU | Post peak memory | Delta | Notes |
 | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |
-| Submit/result loop | inline tensor payload | 10 s | 95365.1 ops/s | TBD | TBD | 100471.2 ops/s | TBD | TBD | +5.4% | Measured by `l4.submit_result.inline_tensor.throughput` with raw throughput mode. |
+| Submit/result loop | inline tensor payload | 10 s | 95365.1 ops/s | TBD | TBD | 10299.1 ops/s | TBD | TBD | -89.2% | Post value measured by `l4.native.submit_result.throughput` through `submit_operation`, `client_complete_operation`, and result polling. This replaces the earlier packet fixture post value so the table reflects the glued native runtime path. |
+| Batch event polling | empty batch | 10 s | N/A | TBD | TBD | 159330.5 ops/s | TBD | TBD | N/A | Measured by `l4.native.event_polling.throughput`; no queued events after setup drain. |
 | TCP loopback | request/result stream | 10 s | 83973.0 ops/s | TBD | TBD | 91017.4 ops/s | TBD | TBD | +8.4% | Measured by `l4.transport.tcp.loopback.throughput` against the SDK local transport-probe loopback path with raw throughput mode. |
 | QUIC loopback | request/result stream | 10 s | 91296.2 ops/s | TBD | TBD | 89373.5 ops/s | TBD | TBD | -2.1% | Optional slot; measured by `l4.transport.quic.loopback.throughput` against the SDK local transport-probe loopback path with raw throughput mode. |
 
@@ -90,7 +91,9 @@ Rules:
 
 Latency rows are effectively flat on p50 and improve on most tail measurements, so the native-backed binding did not introduce visible per-operation latency regression on this host.
 
-Raw throughput improves on submit/result and TCP loopback while QUIC loopback is within a small negative band on this host. CPU and peak-memory tracing remain available through the benchmark runner's profiled throughput mode, but those numbers are intentionally kept out of the raw pre/post comparison because tracing adds measurable per-iteration overhead.
+Raw throughput improves on TCP loopback while QUIC loopback is within a small negative band on this host. CPU and peak-memory tracing remain available through the benchmark runner's profiled throughput mode, but those numbers are intentionally kept out of the raw pre/post comparison because tracing adds measurable per-iteration overhead.
+
+The native runtime submit/result loop is substantially slower than the pre-migration packet fixture submit/result row. That result is a release-relevant optimization signal rather than a blocker for ABI correctness: the current path performs multiple Python-to-native calls per iteration and still snapshots event payloads through Python-owned objects. The next optimization pass should first count native call boundaries, then batch submit/completion/poll where the ABI can support a coarser operation.
 
 ## Migration Phases
 

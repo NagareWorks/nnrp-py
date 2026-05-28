@@ -404,6 +404,7 @@ def _run_native_submit_result_loop(scenario_id: str, workload: dict[str, Any]) -
         schema_id=0,
         schema_version=0,
     )
+    _drain_native_setup_events(connection)
     payload = b"x" * payload_bytes
     counter = 0
 
@@ -450,6 +451,7 @@ def _run_native_submit_result_allocation_smoke(scenario_id: str, workload: dict[
         schema_id=0,
         schema_version=0,
     )
+    _drain_native_setup_events(connection)
     payload = b"x" * payload_bytes
     counter = 0
 
@@ -478,6 +480,25 @@ def _run_native_submit_result_allocation_smoke(scenario_id: str, workload: dict[
         return _skip_result(scenario_id, f"native submit/result allocation smoke unavailable: {error}")
     finally:
         connection.close()
+
+
+def _drain_native_setup_events(connection: Any) -> None:
+    poll_events = getattr(connection, "poll_events", None)
+    if callable(poll_events):
+        try:
+            poll_events()
+        except NativeWouldBlockError:
+            pass
+        return
+
+    poll_events_batch = getattr(connection, "poll_events_batch", None)
+    if not callable(poll_events_batch):
+        return
+    try:
+        while poll_events_batch(max_events=8):
+            pass
+    except NativeWouldBlockError:
+        pass
 
 
 def _run_native_artifact_probe(scenario_id: str, workload: dict[str, Any]) -> dict[str, Any]:

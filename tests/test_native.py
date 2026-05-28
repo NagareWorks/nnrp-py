@@ -27,6 +27,7 @@ from nnrp.native import (
     EVENT_KIND_RESULT_DROPPED,
     EVENT_KIND_RESULT_HINT,
     EVENT_KIND_RESULT_PUSHED,
+    EVENT_KIND_SUBMIT_ACCEPTED,
     FFI_STATUS_CALLBACK_REJECTED,
     FFI_STATUS_INTERNAL_ERROR,
     FFI_STATUS_INVALID_ARGUMENT,
@@ -2117,6 +2118,173 @@ def test_native_runtime_session_submits_and_polls_result(tmp_path: Path) -> None
     assert result.payload == b"result"
     assert async_result.state is NativeOperationLifecycle.COMPLETED
     assert async_result.payload == b"result"
+
+
+def test_native_runtime_session_polls_result_with_batch_when_event_budget_allows(tmp_path: Path) -> None:
+    artifact = tmp_path / "nnrp_ffi.dll"
+    artifact.write_bytes(b"fake")
+    library = FakeRuntimeLibrary(event_payload=b"result")
+    session = (
+        load_native_client(artifact, library=library)
+        .connect(connection_id=12, generation=2, transport_id=TRANSPORT_SLOT_TCP)
+        .open_session(
+            requested_session_id=41,
+            generation=3,
+            profile_id=4,
+            schema_id=5,
+            schema_version=6,
+        )
+    )
+
+    operation = session.submit_operation(operation_id=99, frame_id=7)
+    result = session.poll_result(operation, max_events=2)
+    second_result = session.poll_result(operation, max_events=2)
+
+    assert result.payload == b"result"
+    assert second_result.payload == b"result"
+    assert library.nnrp_client_await_events.calls[0][2] == 2
+    assert library.nnrp_client_await_event.calls == []
+
+
+def test_native_runtime_session_batch_poll_reports_would_block_when_no_result(tmp_path: Path) -> None:
+    artifact = tmp_path / "nnrp_ffi.dll"
+    artifact.write_bytes(b"fake")
+    library = FakeRuntimeLibrary()
+    session = (
+        load_native_client(artifact, library=library)
+        .connect(connection_id=12, generation=2, transport_id=TRANSPORT_SLOT_TCP)
+        .open_session(
+            requested_session_id=41,
+            generation=3,
+            profile_id=4,
+            schema_id=5,
+            schema_version=6,
+        )
+    )
+
+    operation = session.submit_operation(operation_id=99, frame_id=7)
+
+    with pytest.raises(NativeWouldBlockError):
+        session.poll_result(operation, max_events=2)
+
+
+def test_native_runtime_session_batch_poll_skips_mismatched_events(tmp_path: Path) -> None:
+    class MismatchedRuntimeLibrary(FakeRuntimeLibrary):
+        def _await_events(
+            self,
+            handle: _NnrpHandle,
+            out_events: object,
+            event_capacity: int,
+            out_event_count: object,
+        ) -> _NnrpFfiStatus:
+            count_target = getattr(out_event_count, "_obj", None)
+            if count_target is None:
+                count_target = ctypes.cast(out_event_count, ctypes.POINTER(ctypes.c_size_t)).contents
+            events = ctypes.cast(out_events, ctypes.POINTER(_NnrpEvent))
+            events[0].kind = EVENT_KIND_RESULT_PUSHED
+            events[0].connection = handle
+            events[0].session = _NnrpHandle(HANDLE_KIND_SESSION, 42, 3, 0)
+            events[0].operation = _NnrpHandle(HANDLE_KIND_OPERATION, 99, 1, 0)
+            events[0].frame_id = 7
+            events[0].payload = _NnrpBufferView(
+                ctypes.cast(self._event_payload_owner, ctypes.c_void_p),
+                len(self._event_payload_owner.raw),
+            )
+            events[0].diagnostic.status = NativeStatus.ok().to_ffi()
+            count_target.value = 1
+            return self.status
+
+    artifact = tmp_path / "nnrp_ffi.dll"
+    artifact.write_bytes(b"fake")
+    library = MismatchedRuntimeLibrary(event_payload=b"result")
+    session = (
+        load_native_client(artifact, library=library)
+        .connect(connection_id=12, generation=2, transport_id=TRANSPORT_SLOT_TCP)
+        .open_session(
+            requested_session_id=41,
+            generation=3,
+            profile_id=4,
+            schema_id=5,
+            schema_version=6,
+        )
+    )
+
+    operation = session.submit_operation(operation_id=99, frame_id=7)
+
+    with pytest.raises(NativeWouldBlockError):
+        session.poll_result(operation, max_events=2)
+
+
+def test_native_runtime_session_batch_poll_skips_submit_accepted_events(tmp_path: Path) -> None:
+    class MixedEventRuntimeLibrary(FakeRuntimeLibrary):
+        def _await_events(
+            self,
+            handle: _NnrpHandle,
+            out_events: object,
+            event_capacity: int,
+            out_event_count: object,
+        ) -> _NnrpFfiStatus:
+            if event_capacity < 2:
+                return _NnrpFfiStatus(FFI_STATUS_INVALID_ARGUMENT, 0, 0, 0)
+            count_target = getattr(out_event_count, "_obj", None)
+            if count_target is None:
+                count_target = ctypes.cast(out_event_count, ctypes.POINTER(ctypes.c_size_t)).contents
+            events = ctypes.cast(out_events, ctypes.POINTER(_NnrpEvent))
+            for index, kind in enumerate((EVENT_KIND_SUBMIT_ACCEPTED, EVENT_KIND_RESULT_PUSHED)):
+                events[index].kind = kind
+                events[index].connection = handle
+                events[index].session = _NnrpHandle(HANDLE_KIND_SESSION, 41, 3, 0)
+                events[index].operation = _NnrpHandle(HANDLE_KIND_OPERATION, 99, 1, 0)
+                events[index].frame_id = 7
+                events[index].payload = _NnrpBufferView(
+                    ctypes.cast(self._event_payload_owner, ctypes.c_void_p),
+                    len(self._event_payload_owner.raw),
+                )
+                events[index].diagnostic.status = NativeStatus.ok().to_ffi()
+            count_target.value = 2
+            return self.status
+
+    artifact = tmp_path / "nnrp_ffi.dll"
+    artifact.write_bytes(b"fake")
+    library = MixedEventRuntimeLibrary(event_payload=b"result")
+    session = (
+        load_native_client(artifact, library=library)
+        .connect(connection_id=12, generation=2, transport_id=TRANSPORT_SLOT_TCP)
+        .open_session(
+            requested_session_id=41,
+            generation=3,
+            profile_id=4,
+            schema_id=5,
+            schema_version=6,
+        )
+    )
+
+    operation = session.submit_operation(operation_id=99, frame_id=7)
+    result = session.poll_result(operation, max_events=2)
+
+    assert result.state is NativeOperationLifecycle.COMPLETED
+    assert result.payload == b"result"
+
+
+def test_native_runtime_session_accepts_read_only_memoryview_payloads(tmp_path: Path) -> None:
+    artifact = tmp_path / "nnrp_ffi.dll"
+    artifact.write_bytes(b"fake")
+    library = FakeRuntimeLibrary()
+    session = (
+        load_native_client(artifact, library=library)
+        .connect(connection_id=12, generation=2, transport_id=TRANSPORT_SLOT_TCP)
+        .open_session(
+            requested_session_id=41,
+            generation=3,
+            profile_id=4,
+            schema_id=5,
+            schema_version=6,
+        )
+    )
+
+    session.submit_operation(operation_id=99, frame_id=7, payload=memoryview(b"payload"))
+
+    assert library.submitted_payloads[-1] == b"payload"
 
 
 def test_native_runtime_session_completes_and_drops_operations_through_client_abi(tmp_path: Path) -> None:

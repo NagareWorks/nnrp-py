@@ -2067,6 +2067,9 @@ class NativeRuntimeSession:
     handle: NativeSessionHandle
     priority_class: NativeSessionPriorityClass = NativeSessionPriorityClass.BALANCED
     _closed: bool = field(default=False, init=False, repr=False, compare=False)
+    _poll_event_buffer: Any = field(default=None, init=False, repr=False, compare=False)
+    _poll_event_buffer_capacity: int = field(default=0, init=False, repr=False, compare=False)
+    _poll_event_count: Any = field(default=None, init=False, repr=False, compare=False)
 
     def submit(
         self,
@@ -2154,6 +2157,11 @@ class NativeRuntimeSession:
         self._ensure_open()
         if max_events is not None and max_events < 0:
             raise ValueError("max_events must be non-negative")
+        if max_events is not None and max_events > 1:
+            result = self._poll_result_batch(operation, state=state, max_events=max_events)
+            if result is not None:
+                return result
+            raise NativeWouldBlockError(NativeStatus(FFI_STATUS_WOULD_BLOCK))
 
         seen_events = 0
         while max_events is None or seen_events < max_events:
@@ -2166,10 +2174,51 @@ class NativeRuntimeSession:
             if event is None:
                 break
             seen_events += 1
-            if _event_matches_operation(event, operation):
+            if _event_is_result_event(event) and _event_matches_operation(event, operation):
                 return NativeRuntimeResult.from_event(event, state=state)
 
         raise NativeWouldBlockError(NativeStatus(FFI_STATUS_WOULD_BLOCK))
+
+    def _poll_result_batch(
+        self,
+        operation: NativeRuntimeOperation,
+        *,
+        state: NativeOperationLifecycle | str | None,
+        max_events: int,
+    ) -> NativeRuntimeResult | None:
+        event_buffer, event_count = self._borrow_poll_event_buffer(max_events)
+        status = self.entrypoints.client_await_events(
+            self.connection.to_ffi(),
+            event_buffer,
+            max_events,
+            ctypes.byref(event_count),
+        )
+        native_status = NativeStatus.from_ffi(status)
+        if native_status.status_code == FFI_STATUS_WOULD_BLOCK:
+            return None
+        raise_for_native_status(native_status)
+
+        for index in range(int(event_count.value)):
+            raw_event = event_buffer[index]
+            if not _raw_event_is_result_event(raw_event) or not _raw_event_matches_operation(raw_event, operation):
+                continue
+            event = NativeRuntimeEvent.from_ffi(raw_event)
+            return NativeRuntimeResult.from_event(event, state=state)
+        return None
+
+    def _borrow_poll_event_buffer(self, max_events: int) -> tuple[Any, ctypes.c_size_t]:
+        event_buffer = self._poll_event_buffer
+        if event_buffer is None or self._poll_event_buffer_capacity < max_events:
+            event_buffer = (_NnrpEvent * max_events)()
+            object.__setattr__(self, "_poll_event_buffer", event_buffer)
+            object.__setattr__(self, "_poll_event_buffer_capacity", max_events)
+        event_count = self._poll_event_count
+        if event_count is None:
+            event_count = ctypes.c_size_t()
+            object.__setattr__(self, "_poll_event_count", event_count)
+        else:
+            event_count.value = 0
+        return event_buffer, event_count
 
     def complete_operation(
         self,
@@ -2273,6 +2322,30 @@ def _event_matches_operation(event: NativeRuntimeEvent, operation: NativeRuntime
         event.operation.id == operation.handle.handle.id
         or event.operation.id == operation.operation_id
         or event.frame_id == operation.frame_id
+    )
+
+
+def _event_is_result_event(event: NativeRuntimeEvent) -> bool:
+    return event.kind in {EVENT_KIND_RESULT_PUSHED, EVENT_KIND_RESULT_DROPPED, EVENT_KIND_ERROR}
+
+
+def _raw_event_is_result_event(event: _NnrpEvent) -> bool:
+    return int(event.kind) in {EVENT_KIND_RESULT_PUSHED, EVENT_KIND_RESULT_DROPPED, EVENT_KIND_ERROR}
+
+
+def _raw_event_matches_operation(event: _NnrpEvent, operation: NativeRuntimeOperation) -> bool:
+    session = operation.session.handle
+    if (
+        int(event.session.kind) != session.kind
+        or int(event.session.id) != session.id
+        or int(event.session.generation) != session.generation
+        or int(event.session.flags) != session.flags
+    ):
+        return False
+    return (
+        int(event.operation.id) == operation.handle.handle.id
+        or int(event.operation.id) == operation.operation_id
+        or int(event.frame_id) == operation.frame_id
     )
 
 
@@ -2562,7 +2635,13 @@ def _buffer_view_from_payload(payload: bytes | bytearray | memoryview) -> tuple[
         return _NnrpBufferView(None, 0), None
     if not view.contiguous:
         raise NativeHandleError("native submit payload must be contiguous")
-    buffer = ctypes.create_string_buffer(view.tobytes(), view.nbytes)
+    if isinstance(payload, bytes):
+        buffer = ctypes.c_char_p(payload)
+        return _NnrpBufferView(ctypes.cast(buffer, ctypes.c_void_p), view.nbytes), buffer
+    try:
+        buffer = (ctypes.c_char * view.nbytes).from_buffer(view)
+    except TypeError:
+        buffer = ctypes.c_char_p(view.tobytes())
     return _NnrpBufferView(ctypes.cast(buffer, ctypes.c_void_p), view.nbytes), buffer
 
 

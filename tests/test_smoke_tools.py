@@ -27,10 +27,9 @@ from nnrp.client import (
     SubmitRequest,
     connect_client_control,
     connect_client_control_with_probe,
-    connect_client_session,
-    connect_client_session_with_probe,
     probe_client_transport,
 )
+from nnrp.client.transport import connect_client_session, connect_client_session_with_probe
 from nnrp.core import (
     CLIENT_HELLO_TRANSPORT_POLICY_EXTENSION,
     SERVER_HELLO_ACK_TRANSPORT_POLICY_EXTENSION,

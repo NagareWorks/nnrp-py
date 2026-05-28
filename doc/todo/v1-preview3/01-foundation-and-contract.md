@@ -2,21 +2,21 @@
 
 ## Canonical Ownership And Public Surface
 
-- [ ] Lock Python preview3 onto the frozen Rust-owned protocol contract rather than another pure-Python hot path.
+- [x] Lock Python preview3 onto the frozen Rust-owned protocol contract rather than another pure-Python hot path.
   - [x] Add native artifact loading, ABI/protocol probing, and deterministic rejection for mismatched Rust libraries.
   - [x] Add Rust-backed connection, session, operation, event, and result facades.
   - [x] Route adapter smoke execution through the Rust-backed facade or the explicit SDK-local fallback.
-  - [ ] Route public host helpers that still execute packet/session hot paths in Python through Rust-backed facades.
-  - [ ] Move remaining pure-Python packet/session hot-path code behind fixture, diagnostic, or unsupported-runtime boundaries.
-- [ ] Finalize which Python surfaces remain first-class host APIs and which move behind Rust FFI handles.
+  - [x] Route public host helpers that still execute packet/session hot paths in Python through Rust-backed facades.
+  - [x] Move remaining pure-Python packet/session hot-path code behind fixture, diagnostic, or unsupported-runtime boundaries.
+- [x] Finalize which Python surfaces remain first-class host APIs and which move behind Rust FFI handles.
   - [x] Keep native connection/session context helpers as first-class host APIs.
   - [x] Keep operation lifecycle/result wrappers as first-class host APIs.
-  - [ ] Decide whether legacy transport smoke helpers remain public runtime APIs or move to tooling-only status.
-  - [ ] Decide whether cache/schema/profile helpers expose handles directly or host-friendly descriptor wrappers only.
-- [ ] Finalize the public Python surface on top of the current major-version boundary without carrying superseded preview-era shims.
-  - [ ] Audit public imports for superseded helper names.
-  - [ ] Remove or rename superseded helper names before release packaging.
-  - [ ] Update README/API docs to describe only the current Rust-backed public surface.
+  - [x] Decide whether legacy transport smoke helpers remain public runtime APIs or move to tooling-only status.
+  - [x] Decide whether cache/schema/profile helpers expose handles directly or host-friendly descriptor wrappers only.
+- [x] Finalize the public Python surface on top of the current major-version boundary without carrying superseded preview-era shims.
+  - [x] Audit public imports for superseded helper names.
+  - [x] Remove or rename superseded helper names before release packaging.
+  - [x] Update README/API docs to describe only the current Rust-backed public surface.
 
 ## FFI Consumption
 

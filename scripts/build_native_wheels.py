@@ -30,6 +30,9 @@ DEFAULT_PLATFORM_TAGS = {
     "android-arm": "android_24_armeabi_v7a",
     "android-arm64": "android_24_arm64_v8a",
     "ios-arm64": "ios_13_0_arm64_iphoneos",
+    "ios-aarch64-sim": "ios_13_0_arm64_iphonesimulator",
+    "ios-arm64-sim": "ios_13_0_arm64_iphonesimulator",
+    "ios-x86_64-sim": "ios_13_0_x86_64_iphonesimulator",
     "ios-x86_64": "ios_13_0_x86_64_iphonesimulator",
 }
 

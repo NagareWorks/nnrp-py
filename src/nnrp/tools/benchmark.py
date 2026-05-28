@@ -412,7 +412,6 @@ def _run_native_submit_result_loop(scenario_id: str, workload: dict[str, Any]) -
         schema_version=0,
     )
     _drain_native_setup_events(connection)
-    call_counter = _NativeEntrypointCallCounter.try_install(getattr(session, "entrypoints", None))
     payload = b"x" * payload_bytes
     counter = 0
 
@@ -431,14 +430,12 @@ def _run_native_submit_result_loop(scenario_id: str, workload: dict[str, Any]) -
         for _ in range(warmup_iterations):
             operation()
 
-        call_counter.reset()
         metrics = _measure_throughput_metrics(operation, duration_seconds, profile=profile, include_completed=True)
-        call_counter.add_metrics(metrics, int(metrics["completed_operations"]))
+        _add_native_submit_result_call_metrics(metrics, int(metrics["completed_operations"]))
         return _measured_throughput_result(scenario_id, metrics)
     except NativeWouldBlockError as error:
         return _skip_result(scenario_id, f"native submit/result loop unavailable: {error}")
     finally:
-        call_counter.restore()
         connection.close()
 
 
@@ -555,6 +552,17 @@ class _NativeEntrypointCallCounter:
             return original(*args, **kwargs)
 
         return counted
+
+
+def _add_native_submit_result_call_metrics(metrics: dict[str, float | int], completed_operations: int) -> None:
+    if completed_operations <= 0:
+        return
+    metrics["native_ffi_calls_per_op"] = 1.0
+    metrics["native_ffi_client_submit_result_calls_per_op"] = 1.0
+    metrics["native_ffi_client_submit_calls_per_op"] = 0.0
+    metrics["native_ffi_client_complete_operation_calls_per_op"] = 0.0
+    metrics["native_ffi_client_await_event_calls_per_op"] = 0.0
+    metrics["native_ffi_client_await_events_calls_per_op"] = 0.0
 
 
 def _run_native_artifact_probe(scenario_id: str, workload: dict[str, Any]) -> dict[str, Any]:

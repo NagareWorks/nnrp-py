@@ -1659,33 +1659,39 @@ def _submit_result_from_ffi_event(
             related_operation_id=diagnostic.related_operation_id,
             related_frame_id=diagnostic.related_frame_id,
         )
-    operation = _native_handle_from_trusted_ffi(event.operation)
-    runtime_event = NativeRuntimeEvent(
-        kind=kind,
-        connection=connection,
-        session=session,
-        operation=operation,
-        frame_id=int(event.frame_id),
-        payload=payload,
-        diagnostic=diagnostic,
-    )
-    selected_state = (
-        NativeOperationLifecycle(state)
-        if state is not None
-        else NativeOperationLifecycle.FAILED
-        if status.status_code != FFI_STATUS_OK or kind == EVENT_KIND_ERROR
-        else NativeOperationLifecycle.CANCELLED
-        if kind == EVENT_KIND_RESULT_DROPPED
-        else NativeOperationLifecycle.COMPLETED
-    )
-    return NativeRuntimeResult(
-        state=selected_state,
-        operation_id=operation.id,
-        frame_id=runtime_event.frame_id,
-        payload=payload,
-        event=runtime_event,
-        diagnostic=structured_diagnostic,
-    )
+    raw_operation = event.operation
+    operation = object.__new__(NativeHandle)
+    object.__setattr__(operation, "kind", int(raw_operation.kind))
+    object.__setattr__(operation, "id", int(raw_operation.id))
+    object.__setattr__(operation, "generation", int(raw_operation.generation))
+    object.__setattr__(operation, "flags", int(raw_operation.flags))
+    frame_id = int(event.frame_id)
+    runtime_event = object.__new__(NativeRuntimeEvent)
+    object.__setattr__(runtime_event, "kind", kind)
+    object.__setattr__(runtime_event, "connection", connection)
+    object.__setattr__(runtime_event, "session", session)
+    object.__setattr__(runtime_event, "operation", operation)
+    object.__setattr__(runtime_event, "frame_id", frame_id)
+    object.__setattr__(runtime_event, "payload", payload)
+    object.__setattr__(runtime_event, "diagnostic", diagnostic)
+    if state is not None:
+        selected_state = NativeOperationLifecycle(state)
+    elif status.status_code == FFI_STATUS_OK and kind != EVENT_KIND_ERROR:
+        selected_state = (
+            NativeOperationLifecycle.CANCELLED
+            if kind == EVENT_KIND_RESULT_DROPPED
+            else NativeOperationLifecycle.COMPLETED
+        )
+    else:
+        selected_state = NativeOperationLifecycle.FAILED
+    result = object.__new__(NativeRuntimeResult)
+    object.__setattr__(result, "state", selected_state)
+    object.__setattr__(result, "operation_id", operation.id)
+    object.__setattr__(result, "frame_id", frame_id)
+    object.__setattr__(result, "payload", payload)
+    object.__setattr__(result, "event", runtime_event)
+    object.__setattr__(result, "diagnostic", structured_diagnostic)
+    return result
 
 
 @dataclass(frozen=True)

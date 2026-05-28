@@ -23,6 +23,11 @@ jobs:
           head_ref="${{ github.head_ref }}"
           base_ref="${{ github.base_ref }}"
 
+          if [[ "$head_ref" == "develop" && "$base_ref" == "main" ]]; then
+            echo "Develop-to-main integration PR detected; multi-commit history is allowed."
+            exit 0
+          fi
+
           if [[ "$head_ref" =~ ^release/ ]] || [[ "$base_ref" =~ ^release/ ]]; then
             echo "Release/version branch PR detected; multi-commit history is allowed when needed."
             exit 0

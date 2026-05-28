@@ -191,11 +191,20 @@ class NativeClientConnection:
         operation_id: int,
         frame_id: int,
         payload: bytes | bytearray | memoryview = b"",
+        result_payload: bytes | bytearray | memoryview | None = None,
         parent_operation_id: int | None = None,
         operation_group_id: int | None = None,
         max_events: int | None = None,
     ) -> NativeRuntimeResult:
         self._ensure_open()
+        if parent_operation_id is None and operation_group_id is None:
+            return session.submit_result(
+                operation_id=operation_id,
+                frame_id=frame_id,
+                payload=payload,
+                result_payload=result_payload,
+                max_events=max_events,
+            )
         operation = session.submit_operation(
             operation_id=operation_id,
             frame_id=frame_id,

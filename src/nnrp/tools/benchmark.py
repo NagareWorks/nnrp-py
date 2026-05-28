@@ -52,6 +52,7 @@ _RESULTS_SCHEMA_URL = "https://raw.githubusercontent.com/NagareWorks/nnrp-confor
 _DEFAULT_IMPLEMENTATION_NAME = "nnrp-py"
 _DEFAULT_SKIP_MESSAGE = "This benchmark scenario is not implemented in the current Python baseline runner."
 _NATIVE_SUBMIT_RESULT_ENTRYPOINTS = (
+    "client_submit_result",
     "client_submit",
     "client_complete_operation",
     "client_await_event",
@@ -418,13 +419,13 @@ def _run_native_submit_result_loop(scenario_id: str, workload: dict[str, Any]) -
     def operation() -> None:
         nonlocal counter
         counter += 1
-        submitted = session.submit_operation(
+        session.submit_result(
             operation_id=counter,
             frame_id=counter,
             payload=payload,
+            result_payload=payload,
+            max_events=2,
         )
-        session.complete_operation(submitted, payload)
-        session.poll_result(submitted, max_events=2)
 
     try:
         for _ in range(warmup_iterations):
@@ -468,13 +469,13 @@ def _run_native_submit_result_allocation_smoke(scenario_id: str, workload: dict[
     def operation() -> None:
         nonlocal counter
         counter += 1
-        submitted = session.submit_operation(
+        session.submit_result(
             operation_id=counter,
             frame_id=counter,
             payload=payload,
+            result_payload=payload,
+            max_events=2,
         )
-        session.complete_operation(submitted, payload)
-        session.poll_result(submitted, max_events=2)
 
     try:
         for _ in range(warmup_iterations):

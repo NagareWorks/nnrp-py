@@ -244,6 +244,7 @@ class FakeRuntimeLibrary(FakeEntrypointLibrary):
         self.nnrp_cache_touch.handler = self._cache_touch
         self.nnrp_cache_prefetch.handler = self._cache_prefetch
         self.nnrp_cache_release.handler = self._cache_release
+        self.submitted_payloads: list[bytes] = []
         self._schema_registry: dict[tuple[int, int], SchemaDescriptorHeader] = {}
         self._buffers: dict[int, ctypes.Array[ctypes.c_char]] = {}
         self._cache_leases: dict[tuple[int, int, int, int], _NnrpHandle] = {}
@@ -275,6 +276,7 @@ class FakeRuntimeLibrary(FakeEntrypointLibrary):
         return self.status
 
     def _submit(self, request: _NnrpSubmitRequest, out_handle: object) -> _NnrpFfiStatus:
+        self.submitted_payloads.append(_read_buffer_view(request.payload))
         _write_handle(out_handle, _NnrpHandle(HANDLE_KIND_OPERATION, request.operation_id, 1, 0))
         return self.status
 
@@ -1497,6 +1499,30 @@ def test_native_runtime_event_snapshot_survives_native_buffer_reuse(tmp_path: Pa
     library._event_payload_owner.value = b"reuse!"
 
     assert result.event.payload == b"result"
+
+
+def test_native_submit_payload_boundary_snapshots_mutable_inputs(tmp_path: Path) -> None:
+    artifact = tmp_path / "nnrp_ffi.dll"
+    artifact.write_bytes(b"fake")
+    library = FakeRuntimeLibrary()
+    connection = load_native_client(artifact, library=library).connect(
+        connection_id=12,
+        generation=2,
+        transport_id=TRANSPORT_SLOT_TCP,
+    )
+    session = connection.open_session(
+        requested_session_id=42,
+        generation=3,
+        profile_id=0,
+        schema_id=0,
+        schema_version=0,
+    )
+    payload = bytearray(b"before")
+
+    session.submit_operation(operation_id=99, frame_id=7, payload=payload)
+    payload[:] = b"after!"
+
+    assert library.submitted_payloads == [b"before"]
 
 
 def test_native_runtime_result_preserves_lifecycle_surface(tmp_path: Path) -> None:

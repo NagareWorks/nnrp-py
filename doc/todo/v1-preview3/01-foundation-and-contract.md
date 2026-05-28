@@ -22,44 +22,44 @@
 
 - [ ] Consume the frozen handle families for connection, session, operation, schema, and buffer views.
   - [x] Wrap connection, session, operation, event pump, and buffer value handles.
-  - [ ] Wrap schema registry handles once exported by the ABI.
+  - [x] Wrap schema registry handles.
   - [x] Wrap current immutable/mutable buffer-view value structs.
-  - [ ] Wrap borrowed buffer handles once exported by the ABI.
+  - [ ] Decide whether borrowed buffer handles are release-required or post-release zero-copy optimization.
 - [ ] Implement callback/polling adapters and async runtime glue according to the frozen Rust binding contract.
   - [x] Add explicit polling, bounded polling, async polling, and async event iteration.
   - [x] Add structured event, tool delta, and workflow-state async iterators over Rust result pumps.
   - [x] Add callback dispatch wrappers over Rust result pump events.
   - [x] Add batch polling once the ABI exposes it.
-  - [ ] Add borrowed-buffer delivery once the ABI exposes stable borrowed handles.
+  - [ ] Add optional borrowed-buffer delivery only if release profiling proves copy snapshots are insufficient.
 - [x] Map stable preview3 error families into Python exception/result surfaces without collapsing family/code information.
   - [x] Map stable FFI status codes to Python exception classes while preserving status/family/detail fields.
   - [x] Add public diagnostic helpers for structured downgrade, retry, cache, and schema errors.
 - [ ] Enforce buffer ownership and bounded-copy rules on Python views and async iterators.
   - [x] Snapshot polled native event payloads into Python-owned bytes.
-  - [ ] Document and test copy boundaries for submit payloads, result payloads, and future borrowed views.
+  - [x] Document and test copy boundaries for submit payloads and result payloads.
   - [ ] Add zero-copy guard tests once borrowed views are available.
 
 ## Protocol Contract Adoption
 
-- [ ] Implement `SESSION_OPEN` / `SESSION_OPEN_ACK`, explicit session-close, and recovery semantics exactly as frozen in `nnrp-doc`.
+- [x] Implement `SESSION_OPEN` / `SESSION_OPEN_ACK`, explicit session-close, and recovery semantics exactly as frozen in `nnrp-doc`.
   - [x] Expose explicit open-session and close-session helpers through native handles.
   - [x] Support multiple sessions on one native connection facade.
   - [x] Add connection-level host helper that opens and closes multiple native sessions.
   - [x] Add recovery validation helpers after the Rust recovery object boundary freezes.
-  - [ ] Add executable resume/open-with-token helpers once Rust exposes the FFI operation.
-- [ ] Implement session priority classes, operation lifecycle states, cancellation scopes, and `FLOW_UPDATE` semantics from frozen protocol enums and metadata tables.
+  - [x] Add executable resume/open-with-token helpers over the native FFI operation.
+- [x] Implement session priority classes, operation lifecycle states, cancellation scopes, and `FLOW_UPDATE` semantics from frozen protocol enums and metadata tables.
   - [x] Preserve operation lifecycle states on Python result wrappers.
   - [x] Add operation cancellation helpers on native sessions and operations.
   - [x] Add priority and scheduling hint wrappers.
   - [x] Add `FLOW_UPDATE`/credit wrappers over Rust control/event delivery.
-- [ ] Implement cache lease, schema registry, and typed payload descriptor wrappers against the frozen 32B / 24B layouts and standard error behavior.
+- [x] Implement cache lease, schema registry, and typed payload descriptor wrappers against the frozen 32B / 24B layouts and standard error behavior.
   - [x] Add cache lease descriptor wrappers.
   - [x] Add schema/profile descriptor wrappers.
   - [x] Add typed payload descriptor view wrappers.
   - [x] Add standard schema/profile error mapping tests.
-  - [ ] Add standard cache runtime error mapping tests once Rust exposes cache lease FFI operations.
-- [ ] Consume Rust-generated conformance fixtures as the only canonical preview3 protocol baseline.
+  - [x] Add standard cache runtime error mapping tests over native cache lease FFI operations.
+- [x] Consume Rust-generated conformance fixtures as the only canonical preview3 protocol baseline.
   - [x] Remove SDK-local vector exporters.
   - [x] Use adapter execution plans instead of SDK-owned vector manifests.
-  - [ ] Extend adapter execution from smoke coverage to full suite-selected behavior.
-  - [ ] Remove any remaining Python-owned canonical fixture generation paths.
+  - [x] Extend adapter execution from smoke coverage to full suite-selected behavior.
+  - [x] Remove any remaining Python-owned canonical fixture generation paths.

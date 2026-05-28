@@ -1,19 +1,19 @@
 # Python Preview3 Rust Binding Adoption
 
-- [ ] Consume the frozen Rust FFI surface from `nnrp-rs`.
+- [x] Consume the frozen Rust FFI surface from `nnrp-rs`.
   - [x] Bind and load the frozen preview3 runtime entrypoint table and request/event structs behind the native backend module.
   - [x] Add a native-backed facade for connect, bootstrap, open-session, submit, cancel, control, event polling, close, schema descriptors, typed payload binding validation, and recovery validation.
-  - [ ] Replace SDK runtime calls with the bound native entrypoints.
+  - [x] Replace SDK runtime calls with the bound native entrypoints.
     - [x] Route adapter conformance smoke execution through the native backend selector.
     - [x] Route new client connection/session helpers through native backend handles.
     - [x] Route public submit/result helper paths through native session operations.
     - [x] Route public cancellation/control helper paths through native session/operation control calls.
-    - [ ] Route cache/schema/profile helper paths through native calls where the ABI exposes execution helpers.
+    - [x] Route cache/schema/profile helper paths through native calls where the ABI exposes execution helpers.
       - [x] Bind native schema descriptor parse/write and typed payload binding validation.
       - [x] Add native schema codec selection to schema/profile helper entry points.
       - [x] Preserve pure-Python schema catalog as fixture/diagnostic fallback only.
       - [x] Add tests proving schema mismatch diagnostics come from native status fields.
-      - [x] Route cache lease query/touch/prefetch/release through native calls once Rust exposes cache lease FFI operations.
+      - [x] Route cache lease query/touch/prefetch/release through native cache lease FFI operations.
     - [x] Route recovery helper paths through native calls.
       - [x] Bind native recovery request/ack and migration validation helpers.
       - [x] Add public recovery helper functions that call `NativeRecoveryCodec`.
@@ -38,20 +38,20 @@
 - [x] Probe ABI version, protocol version, enabled transport slots, and feature flags before accepting the native artifact.
 - [x] Reject ABI/protocol mismatches with a deterministic Python exception and actionable diagnostic text.
 - [x] Map connection, session, operation, event pump, and buffer value handles into Python-owned wrapper types.
-- [ ] Map schema registry handles and stable borrowed buffer handles into Python-owned wrapper types once those handles are exposed by the frozen ABI.
-  - [x] Add schema registry handle wrapper once Rust exposes a `NNRP_HANDLE_SCHEMA`-style handle.
-  - [x] Add borrowed immutable buffer handle wrapper once Rust exposes acquire/release ownership.
-  - [ ] Add borrowed mutable buffer handle wrapper once Rust exposes acquire/release ownership.
+- [ ] Separate release-required native handle wrappers from optional zero-copy borrowed-buffer wrappers.
+  - [x] Add schema registry handle wrapper over the native schema registry handle.
+  - [x] Add native-owned immutable buffer handle wrapper over acquire-copy/view/release.
+  - [ ] Decide whether a borrowed mutable buffer wrapper belongs in the first Python release.
   - [x] Add lifetime guard tests for native-owned immutable buffer views.
-  - [ ] Add lifetime guard tests for borrowed mutable views.
+  - [ ] Add lifetime guard tests before exposing any borrowed mutable view.
 - [x] Define ownership and lifetime rules for native buffers returned to Python.
   - [x] Snapshot polled native event payloads into Python-owned bytes before returning them to callers.
   - [x] Document event/result snapshot behavior in the native client API docs.
   - [x] Add tests for payload snapshot independence after native poll buffer reuse.
-- [ ] Define borrowed-buffer rules for future zero-copy result/body views.
+- [ ] Define optional borrowed-buffer rules for post-release zero-copy result/body views.
   - [x] Confirm current ABI exposes value `NnrpBufferView` structs and stable native-owned copied buffer handles.
-  - [ ] Define when borrowed handles may be exposed from sync polling after Rust adds acquire/release APIs.
-  - [ ] Define when borrowed handles may be exposed from async polling after Rust adds acquire/release APIs.
+  - [ ] Define whether borrowed handles may be exposed from sync polling without weakening lifetime safety.
+  - [ ] Define whether borrowed handles may be exposed from async polling without weakening lifetime safety.
   - [x] Define copy fallback behavior when borrowed view lifetime cannot be guaranteed.
 - [x] Ensure callbacks or poll results never outlive the native connection/session handle that owns them.
   - [x] Return SDK-owned poll/event snapshots from the native connection facade instead of raw FFI structs.

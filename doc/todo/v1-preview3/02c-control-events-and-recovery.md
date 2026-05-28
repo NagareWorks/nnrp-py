@@ -3,23 +3,23 @@
 - [x] Add async-friendly wrappers for result/event pump delivery.
 - [ ] Add async-friendly wrappers for `FLOW_UPDATE` and current control-event result hints.
   - [x] Add `FLOW_UPDATE` event wrapper over Rust poll results.
-  - [ ] Keep `RESULT_HINT` blocked until Rust exposes a distinct event kind rather than generic control events.
+  - [ ] Add host-facing `RESULT_HINT` wrapper over the native `NNRP_EVENT_RESULT_HINT` event kind.
   - [x] Add async iterator helpers for control-event filtering.
   - [x] Add cancellation behavior tests for control-event iterators.
 - [x] Keep Python event delivery aligned with Rust-native semantics rather than inventing a second Python session-pump contract.
-- [ ] Add resume/recovery helpers only after the recovery object boundary freezes upstream.
+- [ ] Add resume/recovery helpers for all native recovery entrypoints.
   - [ ] Add opaque recovery-token wrapper.
     - [x] Confirm the current Rust ABI exposes metadata validation and replay decisions but no opaque token handle.
-    - [ ] Keep token wrapper blocked until Rust exposes an opaque token handle or executable resume operation.
+    - [ ] Decide whether Python needs a first-class token wrapper or should keep token bytes entirely native-owned.
   - [x] Add resume-window wrapper.
-  - [ ] Add connection/session resume helper once Rust exposes the operation.
+  - [x] Add connection/session resume helper over the native resume operation.
     - [x] Define public helper inputs around existing session-open/session-open-ack metadata bytes.
     - [x] Route helper validation through `NativeRecoveryCodec`.
-    - [ ] Keep actual resume operation blocked until Rust exposes session resume/open-with-token execution.
+    - [x] Route actual resume operation through Rust session resume/open-with-token execution.
   - [x] Add tests for invalid/expired recovery diagnostics.
-- [ ] Keep resume tokens and windows opaque Rust-owned data on the Python host surface.
-  - [ ] Ensure token/window wrappers expose identity and diagnostic metadata only.
+- [x] Keep resume tokens and windows opaque Rust-owned data on the Python host surface.
+  - [x] Ensure token/window wrappers expose identity and diagnostic metadata only.
     - [x] Ensure resume outcome wrapper exposes only outcome code/name and resume window.
     - [x] Ensure migration replay helper exposes boolean replay decision without parsing migration policy.
-  - [ ] Add tests preventing Python-side token parsing.
-  - [ ] Add docs that recovery validation is native-owned and Python does not infer policy locally.
+  - [x] Add tests preventing Python-side token parsing.
+  - [x] Add docs that recovery validation is native-owned and Python does not infer policy locally.

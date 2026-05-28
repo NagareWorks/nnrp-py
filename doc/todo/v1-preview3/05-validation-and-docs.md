@@ -16,13 +16,13 @@
 - [x] Add Python integration tests that exercise multiple native preview3 sessions on one live connection facade.
 - [x] Add Python integration tests that exercise routed multi-session preview3 result delivery on one live connection.
 - [ ] Add Python integration tests for cache lease expiry, schema mismatch, operation cancellation, priority-aware flow updates, and resume paths.
-  - [x] Add cache lease expiry integration test once Rust exposes cache lease operations.
-  - [x] Add schema mismatch integration test once Rust exposes schema registry operations.
+  - [x] Add cache lease expiry integration test through native cache lease operations.
+  - [x] Add schema mismatch integration test through native schema registry operations.
     - [x] Add native typed payload binding mismatch test through `NativeSchemaCodec`.
     - [x] Add public schema helper mismatch test once helper routing is native-backed.
   - [x] Add operation cancellation integration test through native session/operation helpers.
-  - [ ] Add priority-aware flow update integration test once Rust exposes priority/credit events.
-  - [x] Add resume-path integration test once Rust exposes recovery/resume operations.
+  - [ ] Add priority-aware flow update integration test over native credit events and Python scheduling hint routing.
+  - [x] Add resume-path integration test through native recovery/resume operations.
     - [x] Add recovery validation integration test through `NativeRecoveryCodec`.
     - [x] Add full resume operation integration test after Rust exposes executable resume/open helper.
 - [x] Keep the active Python preview regression suite green while preview3 Rust-backed helpers replace the prior preview surface.
@@ -64,9 +64,9 @@
   - [x] Map old packet/session examples to native host API examples.
   - [x] Move packet builder examples into protocol fixture/diagnostic sections.
   - [x] Remove obsolete SDK-owned vector-generation wording.
-- [ ] Document PR merge gates for freeze-dependent work so GitHub reviewers can reject Python-side protocol invention.
-  - [ ] List required upstream Rust/doc freeze references for cache/schema/recovery work.
-  - [ ] List required native ABI tag or artifact version for each native helper PR.
-  - [ ] List required conformance adapter coverage for public API changes.
-  - [ ] List required coverage/benchmark gates for hot-path changes.
-  - [ ] List release-wheel checks required before publishing native artifacts to PyPI.
+- [x] Document PR merge gates for freeze-dependent work so GitHub reviewers can reject Python-side protocol invention.
+  - [x] List required upstream Rust/doc freeze references for cache/schema/recovery work.
+  - [x] List required native ABI tag or artifact version for each native helper PR.
+  - [x] List required conformance adapter coverage for public API changes.
+  - [x] List required coverage/benchmark gates for hot-path changes.
+  - [x] List release-wheel checks required before publishing native artifacts to PyPI.

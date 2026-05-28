@@ -1387,6 +1387,16 @@ class NativeStructuredDiagnostic:
         }
 
 
+_NATIVE_RUNTIME_DIAGNOSTIC_OK = NativeRuntimeDiagnostic(
+    status=_NATIVE_STATUS_OK,
+    related_connection_id=0,
+    related_session_id=0,
+    related_operation_id=0,
+    related_frame_id=0,
+)
+_NATIVE_STRUCTURED_DIAGNOSTIC_OK = NativeStructuredDiagnostic(status=_NATIVE_STATUS_OK)
+
+
 @dataclass(frozen=True)
 class NativeRuntimeEvent:
     kind: int
@@ -1623,14 +1633,32 @@ def _submit_result_from_ffi_event(
 ) -> NativeRuntimeResult:
     kind = int(event.kind)
     payload = _copy_buffer_view(event.payload)
-    status = NativeStatus.from_ffi(event.diagnostic.status)
-    diagnostic = NativeRuntimeDiagnostic(
-        status=status,
-        related_connection_id=int(event.diagnostic.related_connection_id),
-        related_session_id=int(event.diagnostic.related_session_id),
-        related_operation_id=int(event.diagnostic.related_operation_id),
-        related_frame_id=int(event.diagnostic.related_frame_id),
-    )
+    raw_diagnostic = event.diagnostic
+    status = NativeStatus.from_ffi(raw_diagnostic.status)
+    if (
+        status is _NATIVE_STATUS_OK
+        and raw_diagnostic.related_connection_id == 0
+        and raw_diagnostic.related_session_id == 0
+        and raw_diagnostic.related_operation_id == 0
+        and raw_diagnostic.related_frame_id == 0
+    ):
+        diagnostic = _NATIVE_RUNTIME_DIAGNOSTIC_OK
+        structured_diagnostic = _NATIVE_STRUCTURED_DIAGNOSTIC_OK
+    else:
+        diagnostic = NativeRuntimeDiagnostic(
+            status=status,
+            related_connection_id=int(raw_diagnostic.related_connection_id),
+            related_session_id=int(raw_diagnostic.related_session_id),
+            related_operation_id=int(raw_diagnostic.related_operation_id),
+            related_frame_id=int(raw_diagnostic.related_frame_id),
+        )
+        structured_diagnostic = NativeStructuredDiagnostic(
+            status=status,
+            related_connection_id=diagnostic.related_connection_id,
+            related_session_id=diagnostic.related_session_id,
+            related_operation_id=diagnostic.related_operation_id,
+            related_frame_id=diagnostic.related_frame_id,
+        )
     operation = _native_handle_from_trusted_ffi(event.operation)
     runtime_event = NativeRuntimeEvent(
         kind=kind,
@@ -1645,17 +1673,10 @@ def _submit_result_from_ffi_event(
         NativeOperationLifecycle(state)
         if state is not None
         else NativeOperationLifecycle.FAILED
-        if not status.succeeded or kind == EVENT_KIND_ERROR
+        if status.status_code != FFI_STATUS_OK or kind == EVENT_KIND_ERROR
         else NativeOperationLifecycle.CANCELLED
         if kind == EVENT_KIND_RESULT_DROPPED
         else NativeOperationLifecycle.COMPLETED
-    )
-    structured_diagnostic = NativeStructuredDiagnostic(
-        status=status,
-        related_connection_id=diagnostic.related_connection_id,
-        related_session_id=diagnostic.related_session_id,
-        related_operation_id=diagnostic.related_operation_id,
-        related_frame_id=diagnostic.related_frame_id,
     )
     return NativeRuntimeResult(
         state=selected_state,

@@ -2231,6 +2231,48 @@ def test_native_runtime_session_submit_result_reports_would_block_when_no_event(
         session.submit_result(operation_id=99, frame_id=7, max_events=-1)
 
 
+def test_native_runtime_session_submit_result_preserves_related_diagnostic_ids(tmp_path: Path) -> None:
+    class RelatedDiagnosticRuntimeLibrary(FakeRuntimeLibrary):
+        def _submit_result(
+            self,
+            request: _NnrpClientSubmitResultRequest,
+            out_operation: object,
+            out_result: object,
+        ) -> _NnrpFfiStatus:
+            status = super()._submit_result(request, out_operation, out_result)
+            result_target = getattr(out_result, "_obj", None)
+            if result_target is None:
+                result_target = ctypes.cast(out_result, ctypes.POINTER(_NnrpPollResult)).contents
+            result_target.event.diagnostic.related_connection_id = 12
+            result_target.event.diagnostic.related_session_id = 41
+            result_target.event.diagnostic.related_operation_id = request.operation_id
+            result_target.event.diagnostic.related_frame_id = request.frame_id
+            return status
+
+    artifact = tmp_path / "nnrp_ffi.dll"
+    artifact.write_bytes(b"fake")
+    library = RelatedDiagnosticRuntimeLibrary(event_payload=b"result")
+    session = (
+        load_native_client(artifact, library=library)
+        .connect(connection_id=12, generation=2, transport_id=TRANSPORT_SLOT_TCP)
+        .open_session(
+            requested_session_id=41,
+            generation=3,
+            profile_id=4,
+            schema_id=5,
+            schema_version=6,
+        )
+    )
+
+    result = session.submit_result(operation_id=99, frame_id=7, payload=b"payload", result_payload=b"result")
+
+    assert result.diagnostic.related_connection_id == 12
+    assert result.diagnostic.related_session_id == 41
+    assert result.diagnostic.related_operation_id == 99
+    assert result.diagnostic.related_frame_id == 7
+    assert result.event.diagnostic.related_operation_id == 99
+
+
 def test_native_runtime_session_batch_poll_reports_would_block_when_no_result(tmp_path: Path) -> None:
     artifact = tmp_path / "nnrp_ffi.dll"
     artifact.write_bytes(b"fake")

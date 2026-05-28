@@ -51,7 +51,9 @@ from nnrp.schema import (
     validate_typed_payload_binding,
 )
 
-_RESULTS_SCHEMA_URL = "https://raw.githubusercontent.com/NagareWorks/nnrp-conformance/main/schemas/benchmark-results.schema.json"
+_RESULTS_SCHEMA_URL = (
+    "https://raw.githubusercontent.com/NagareWorks/nnrp-conformance/main/schemas/benchmark-results.schema.json"
+)
 _DEFAULT_IMPLEMENTATION_NAME = "nnrp-py"
 _DEFAULT_SKIP_MESSAGE = "This benchmark scenario is not implemented in the current Python baseline runner."
 _NATIVE_SUBMIT_RESULT_ENTRYPOINTS = (
@@ -436,6 +438,7 @@ def _run_native_submit_result_loop(scenario_id: str, workload: dict[str, Any]) -
 
         metrics = _measure_throughput_metrics(operation, duration_seconds, profile=profile, include_completed=True)
         _add_native_submit_result_call_metrics(metrics, int(metrics["completed_operations"]))
+        metrics["native_binding_mode"] = _native_binding_mode(session)
         return _measured_throughput_result(scenario_id, metrics)
     except NativeWouldBlockError as error:
         return _skip_result(scenario_id, f"native submit/result loop unavailable: {error}")
@@ -635,6 +638,13 @@ def _add_native_submit_result_call_metrics(metrics: dict[str, float | int], comp
     metrics["native_ffi_client_complete_operation_calls_per_op"] = 0.0
     metrics["native_ffi_client_await_event_calls_per_op"] = 0.0
     metrics["native_ffi_client_await_events_calls_per_op"] = 0.0
+    metrics.setdefault("native_binding_mode", "unknown")
+
+
+def _native_binding_mode(owner: Any) -> str:
+    entrypoints = getattr(owner, "entrypoints", None)
+    mode = getattr(entrypoints, "binding_mode", None)
+    return mode if isinstance(mode, str) and mode else "unknown"
 
 
 def _load_cffi_api_submit_result_module() -> tuple[Any, Any]:  # pragma: no cover

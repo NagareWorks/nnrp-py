@@ -371,6 +371,7 @@ def test_build_benchmark_results_report_measures_native_scenarios_when_artifacts
     assert native_submit_result["metrics"]["native_ffi_client_submit_calls_per_op"] == 0
     assert native_submit_result["metrics"]["native_ffi_client_complete_operation_calls_per_op"] == 0
     assert native_submit_result["metrics"]["native_ffi_client_await_events_calls_per_op"] == 0
+    assert native_submit_result["metrics"]["native_binding_mode"] == "ctypes"
     allocation_result = results["l4.native.submit_result.allocations"]
     assert allocation_result["outcome"] == "measured"
     assert allocation_result["metrics"]["allocated_blocks_delta_per_op"] >= 0
@@ -774,6 +775,7 @@ class FakeNativeSession:
 class FakeNativeEntrypoints:
     def __init__(self, session: FakeNativeSession) -> None:
         self.session = session
+        self.binding_mode = "ctypes"
 
     def client_submit(self, payload: bytes | bytearray | memoryview) -> None:
         self.session.connection.submitted_payloads.append(bytes(payload))

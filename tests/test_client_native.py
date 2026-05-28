@@ -246,6 +246,21 @@ def test_connect_native_client_session_opens_and_closes_host_session() -> None:
     assert backend.connections[0].sessions[0].closed is True
 
 
+def test_native_session_open_defaults_keep_profile_unspecified() -> None:
+    backend = FakeBackend()
+
+    with connect_native_client_session(backend=backend) as session:
+        assert session.profile_id == 0
+        assert session.schema_id == 0
+        assert session.schema_version == 0
+
+    with connect_native_client_connection(backend=backend) as connection:
+        session = connection.open_session()
+        assert session.profile_id == 0
+        assert session.schema_id == 0
+        assert session.schema_version == 0
+
+
 def test_connect_native_client_connection_routes_results_for_multiple_sessions() -> None:
     backend = FakeBackend()
     with connect_native_client_connection(

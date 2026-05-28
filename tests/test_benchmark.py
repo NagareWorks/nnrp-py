@@ -249,6 +249,7 @@ def test_build_benchmark_results_report_measures_native_scenarios_when_artifacts
     assert results["l4.native.schema_descriptor.latency"]["outcome"] == "measured"
     assert results["l4.native.event_polling.latency"]["outcome"] == "measured"
     assert schema_codec.validations == 4
+    assert schema_codec.descriptor.profile_id == token_delta_schema_descriptor().profile_id
     assert native_client.connection.polled_batches == [2, 2, 2, 2]
     assert native_client.connection.closed is True
 

@@ -378,6 +378,60 @@ def test_build_benchmark_results_report_measures_native_scenarios_when_artifacts
     assert native_probe.calls == [(None, None)] * 5
 
 
+def test_drain_native_setup_events_ignores_single_poll_would_block() -> None:
+    class SinglePollConnection:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def poll_events(self):
+            self.calls += 1
+            raise NativeWouldBlockError(NativeStatus(FFI_STATUS_WOULD_BLOCK))
+
+    connection = SinglePollConnection()
+
+    benchmark._drain_native_setup_events(connection)
+
+    assert connection.calls == 1
+
+
+def test_drain_native_setup_events_supports_batch_only_connections() -> None:
+    class BatchOnlyConnection:
+        def __init__(self) -> None:
+            self.calls: list[int] = []
+            self.remaining = 2
+
+        def poll_events_batch(self, *, max_events: int):
+            self.calls.append(max_events)
+            if self.remaining == 0:
+                return ()
+            self.remaining -= 1
+            return ("event",)
+
+    connection = BatchOnlyConnection()
+
+    benchmark._drain_native_setup_events(connection)
+
+    assert connection.calls == [8, 8, 8]
+
+
+def test_drain_native_setup_events_ignores_batch_would_block_and_missing_pollers() -> None:
+    class WouldBlockBatchConnection:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def poll_events_batch(self, *, max_events: int):
+            self.calls += 1
+            assert max_events == 8
+            raise NativeWouldBlockError(NativeStatus(FFI_STATUS_WOULD_BLOCK))
+
+    batch_connection = WouldBlockBatchConnection()
+
+    benchmark._drain_native_setup_events(object())
+    benchmark._drain_native_setup_events(batch_connection)
+
+    assert batch_connection.calls == 1
+
+
 def test_build_benchmark_results_report_skips_native_scenarios_without_artifacts(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -594,6 +648,9 @@ class FakeNativeConnection:
 
     def poll_events_batch(self, *, max_events: int):
         self.polled_batches.append(max_events)
+        return ()
+
+    def poll_events(self):
         return ()
 
     def close(self) -> None:

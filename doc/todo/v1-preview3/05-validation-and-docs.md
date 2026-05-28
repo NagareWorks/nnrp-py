@@ -27,8 +27,8 @@
     - [x] Add full resume operation integration test after Rust exposes executable resume/open helper.
 - [x] Keep the active Python preview regression suite green while preview3 Rust-backed helpers replace the prior preview surface.
 - [ ] Add performance smoke checks that verify Python preview3 hot paths do not regress into full payload copies by default.
-  - [ ] Add submit/result allocation-count smoke.
-  - [ ] Add payload-copy boundary smoke.
+  - [x] Add submit/result allocation-count smoke.
+  - [x] Add payload-copy boundary smoke.
   - [ ] Add native artifact load/probe latency smoke.
   - [x] Add native batch event polling latency smoke.
   - [x] Add schema descriptor native parse/write latency smoke.

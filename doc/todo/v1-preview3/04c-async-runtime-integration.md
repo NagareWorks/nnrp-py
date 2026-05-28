@@ -4,18 +4,18 @@
 - [x] Choose one default Python delivery model for preview3: async iterator, callback registration, or explicit polling.
 - [x] Keep backend selection behind an internal interface so tests can run against pure-Python fixtures and native artifacts.
 - [ ] Avoid per-frame Python object churn on the hot submit/result path; batch or borrow native buffers where the ABI allows it.
-  - [ ] Measure object allocation count for native submit/result loop.
-    - [ ] Add a local benchmark mode that records allocated Python objects per submit/result iteration.
-    - [ ] Capture baseline allocation count before changing payload ownership behavior.
+  - [x] Measure object allocation count for native submit/result loop.
+    - [x] Add a local benchmark mode that records allocated Python objects per submit/result iteration.
+    - [x] Capture baseline allocation count before changing payload ownership behavior.
   - [x] Add batch poll helper once Rust exposes batched event polling.
   - [ ] Add borrowed result payload helper once Rust exposes stable borrowed views.
     - [x] Confirm current Rust ABI exposes borrowed-view-shaped value structs but no stable acquire/release ownership.
     - [ ] Confirm borrowed buffer handle lifetime owner and release semantics upstream.
     - [ ] Add Python lifetime guard wrapper before exposing any borrowed view.
-  - [ ] Add regression test that hot-path payloads are not copied more than the documented boundary.
-    - [ ] Add submit payload copy-boundary test.
-    - [ ] Add result payload copy-boundary test.
-    - [ ] Add callback payload copy-boundary test.
+  - [x] Add regression test that hot-path payloads are not copied more than the documented boundary.
+    - [x] Add submit payload copy-boundary test.
+    - [x] Add result payload copy-boundary test.
+    - [x] Add callback payload copy-boundary test.
 - [x] Define cancellation behavior when a Python task is cancelled while a native operation is active.
 - [x] Expose structured event, tool delta, and workflow-state updates through Python-native async iterators or callbacks backed by Rust result pumps.
   - [x] Add structured-event async iterator over native result pump events.

@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 import argparse
+import gc
 import json
 import os
 import platform
 import statistics
+import sys
 import time
+import tracemalloc
 from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import Any
@@ -346,6 +349,53 @@ def _run_native_event_polling(scenario_id: str, workload: dict[str, Any]) -> dic
     return _measured_latency_result(scenario_id, samples)
 
 
+def _run_native_submit_result_allocation_smoke(scenario_id: str, workload: dict[str, Any]) -> dict[str, Any]:
+    iterations = _positive_int(workload.get("iterations"), default=1_000)
+    warmup_iterations = _non_negative_int(workload.get("warmup_iterations"), default=min(100, iterations))
+    payload_bytes = _positive_int(workload.get("payload_bytes"), default=1024)
+    try:
+        connection = load_native_client().connect(
+            connection_id=1,
+            generation=1,
+            transport_id=2,
+        )
+    except NativeArtifactError as error:
+        return _skip_result(scenario_id, f"native client unavailable: {error}")
+
+    session = connection.open_session(
+        requested_session_id=1,
+        generation=1,
+        profile_id=0,
+        schema_id=0,
+        schema_version=0,
+    )
+    payload = b"x" * payload_bytes
+    counter = 0
+
+    def operation() -> None:
+        nonlocal counter
+        counter += 1
+        session.submit_and_poll_result(
+            operation_id=counter,
+            frame_id=counter,
+            payload=payload,
+            max_events=1,
+        )
+
+    try:
+        for _ in range(warmup_iterations):
+            operation()
+
+        metrics = _measure_allocation_smoke(operation, iterations)
+        return {
+            "id": scenario_id,
+            "outcome": "measured",
+            "metrics": metrics,
+        }
+    finally:
+        connection.close()
+
+
 def _run_session_lifecycle(scenario_id: str, workload: dict[str, Any]) -> dict[str, Any]:
     iterations = _positive_int(workload.get("iterations"), default=100_000)
     warmup_iterations = _non_negative_int(workload.get("warmup_iterations"), default=min(10_000, iterations))
@@ -534,6 +584,25 @@ def _measure_throughput_ops_per_second(operation: Callable[[], None], duration_s
     return completed / duration_seconds
 
 
+def _measure_allocation_smoke(operation: Callable[[], None], iterations: int) -> dict[str, float]:
+    gc.collect()
+    before_blocks = sys.getallocatedblocks()
+    tracemalloc.start()
+    try:
+        for _ in range(iterations):
+            operation()
+        _, peak_bytes = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+    gc.collect()
+    after_blocks = sys.getallocatedblocks()
+    allocated_block_delta = max(0, after_blocks - before_blocks)
+    return {
+        "allocated_blocks_delta_per_op": allocated_block_delta / iterations,
+        "peak_traced_bytes_per_op": peak_bytes / iterations,
+    }
+
+
 def _measured_latency_result(scenario_id: str, samples: list[float]) -> dict[str, Any]:
     return {
         "id": scenario_id,
@@ -636,6 +705,7 @@ _SCENARIO_RUNNERS: dict[str, Callable[[str, dict[str, Any]], dict[str, Any]]] = 
     "typed_payload_pack_unpack": _run_typed_payload_pack_unpack,
     "native_schema_descriptor_roundtrip": _run_native_schema_descriptor_roundtrip,
     "native_event_polling": _run_native_event_polling,
+    "native_submit_result_allocation_smoke": _run_native_submit_result_allocation_smoke,
     "runtime_probe": _run_runtime_probe,
     "session_lifecycle": _run_session_lifecycle,
     "submit_result_loop": _run_submit_result_loop,

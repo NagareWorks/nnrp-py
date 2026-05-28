@@ -140,6 +140,20 @@ def _plan_document() -> dict[str, object]:
                 },
             },
             {
+                "id": "l4.native.submit_result.allocations",
+                "category": "memory",
+                "feature": "benchmark.native.submit_result.allocations",
+                "required_capabilities": ["session.open_close", "operation.submit", "event.polling.batch"],
+                "description": "Native submit/result Python allocation smoke.",
+                "workload": {
+                    "operation": "native_submit_result_allocation_smoke",
+                    "payload": "inline_payload",
+                    "iterations": 3,
+                    "warmup_iterations": 1,
+                    "payload_bytes": 8,
+                },
+            },
+            {
                 "id": "l4.session.lifecycle.latency",
                 "category": "latency",
                 "feature": "benchmark.session_lifecycle",
@@ -205,6 +219,7 @@ def test_build_benchmark_results_report_measures_configured_scenarios(monkeypatc
     assert results["l4.runtime.probe.latency"]["outcome"] == "measured"
     assert results["l4.native.schema_descriptor.latency"]["outcome"] == "skip"
     assert results["l4.native.event_polling.latency"]["outcome"] == "skip"
+    assert results["l4.native.submit_result.allocations"]["outcome"] == "skip"
     assert results["l4.session.lifecycle.latency"]["outcome"] == "measured"
     assert results["l4.transport.tcp.loopback.throughput"]["outcome"] == "measured"
 
@@ -248,9 +263,14 @@ def test_build_benchmark_results_report_measures_native_scenarios_when_artifacts
     results = {result["id"]: result for result in report["results"]}
     assert results["l4.native.schema_descriptor.latency"]["outcome"] == "measured"
     assert results["l4.native.event_polling.latency"]["outcome"] == "measured"
+    allocation_result = results["l4.native.submit_result.allocations"]
+    assert allocation_result["outcome"] == "measured"
+    assert allocation_result["metrics"]["allocated_blocks_delta_per_op"] >= 0
+    assert allocation_result["metrics"]["peak_traced_bytes_per_op"] >= 0
     assert schema_codec.validations == 4
     assert schema_codec.descriptor.profile_id == token_delta_schema_descriptor().profile_id
     assert native_client.connection.polled_batches == [2, 2, 2, 2]
+    assert native_client.connection.submitted_payloads == [b"x" * 8] * 4
     assert native_client.connection.closed is True
 
 
@@ -267,6 +287,8 @@ def test_build_benchmark_results_report_skips_native_scenarios_without_artifacts
     assert "missing schema artifact" in results["l4.native.schema_descriptor.latency"]["message"]
     assert results["l4.native.event_polling.latency"]["outcome"] == "skip"
     assert "missing client artifact" in results["l4.native.event_polling.latency"]["message"]
+    assert results["l4.native.submit_result.allocations"]["outcome"] == "skip"
+    assert "missing client artifact" in results["l4.native.submit_result.allocations"]["message"]
 
 
 def test_build_benchmark_results_report_supports_single_sample_header_measurement() -> None:
@@ -323,7 +345,7 @@ def test_main_reads_paths_from_environment_and_writes_report(tmp_path: Path, mon
 
     report = json.loads(output_path.read_text(encoding="utf-8"))
     assert report["protocol_version"] == "nnrp-1"
-    assert len(report["results"]) == 11
+    assert len(report["results"]) == 12
 
 
 def test_main_accepts_explicit_cli_paths_and_creates_parent_directory(tmp_path: Path) -> None:
@@ -411,6 +433,10 @@ class FakeNativeClient:
     def __init__(self) -> None:
         self.connection = FakeNativeConnection()
 
+    def connect(self, *, connection_id: int, generation: int, transport_id: int):
+        assert (connection_id, generation, transport_id) == (1, 1, 2)
+        return self.connection
+
     def bootstrap_connection(self, *, connection_id: int, generation: int, transport_id: int):
         assert (connection_id, generation, transport_id) == (1, 1, 2)
         return self.connection
@@ -419,7 +445,20 @@ class FakeNativeClient:
 class FakeNativeConnection:
     def __init__(self) -> None:
         self.polled_batches: list[int] = []
+        self.submitted_payloads: list[bytes] = []
         self.closed = False
+
+    def open_session(
+        self,
+        *,
+        requested_session_id: int,
+        generation: int,
+        profile_id: int,
+        schema_id: int,
+        schema_version: int,
+    ):
+        assert (requested_session_id, generation, profile_id, schema_id, schema_version) == (1, 1, 0, 0, 0)
+        return FakeNativeSession(self)
 
     def poll_events_batch(self, *, max_events: int):
         self.polled_batches.append(max_events)
@@ -427,6 +466,24 @@ class FakeNativeConnection:
 
     def close(self) -> None:
         self.closed = True
+
+
+class FakeNativeSession:
+    def __init__(self, connection: FakeNativeConnection) -> None:
+        self.connection = connection
+
+    def submit_and_poll_result(
+        self,
+        *,
+        operation_id: int,
+        frame_id: int,
+        payload: bytes | bytearray | memoryview = b"",
+        max_events: int | None = None,
+    ):
+        assert operation_id == frame_id
+        assert max_events == 1
+        self.connection.submitted_payloads.append(bytes(payload))
+        return object()
 
 
 def _missing_native_schema_codec() -> object:

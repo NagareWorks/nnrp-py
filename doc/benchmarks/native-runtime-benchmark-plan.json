@@ -1,0 +1,46 @@
+{
+  "$schema": "../../schemas/benchmark-execution-plan.schema.json",
+  "protocol_version": "nnrp-1-preview3",
+  "suite_version": "python-native-runtime",
+  "implementation_name": "nnrp-py",
+  "artifacts": {
+    "results_path": "artifacts/native-runtime-benchmark-results.json",
+    "evidence_dir": "artifacts/native-runtime-benchmark-evidence"
+  },
+  "scenarios": [
+    {
+      "id": "l4.native.submit_result.throughput",
+      "category": "throughput",
+      "feature": "benchmark.native.submit_result.throughput",
+      "required_capabilities": [
+        "session.open_close",
+        "operation.submit",
+        "event.polling.batch"
+      ],
+      "description": "Measure native runtime submit/result throughput with connection and session setup outside the measured loop.",
+      "workload": {
+        "operation": "native_submit_result_loop",
+        "payload": "inline_payload",
+        "payload_bytes": 1024,
+        "warmup_iterations": 1000,
+        "duration_seconds": 10
+      }
+    },
+    {
+      "id": "l4.native.event_polling.throughput",
+      "category": "throughput",
+      "feature": "benchmark.native.event_polling.throughput",
+      "required_capabilities": [
+        "event.polling.batch"
+      ],
+      "description": "Measure native batch event polling throughput with connection setup outside the measured loop.",
+      "workload": {
+        "operation": "native_batch_event_polling_throughput",
+        "payload": "empty_batch",
+        "max_events": 8,
+        "warmup_iterations": 1000,
+        "duration_seconds": 10
+      }
+    }
+  ]
+}

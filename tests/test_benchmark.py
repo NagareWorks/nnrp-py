@@ -147,6 +147,34 @@ def _plan_document() -> dict[str, object]:
                 },
             },
             {
+                "id": "l4.native.event_polling.throughput",
+                "category": "throughput",
+                "feature": "benchmark.native.event_polling.throughput",
+                "required_capabilities": ["event.polling.batch"],
+                "description": "Native batch event polling throughput.",
+                "workload": {
+                    "operation": "native_batch_event_polling_throughput",
+                    "payload": "empty_batch",
+                    "duration_seconds": 0.01,
+                    "warmup_iterations": 1,
+                    "max_events": 2,
+                },
+            },
+            {
+                "id": "l4.native.submit_result.throughput",
+                "category": "throughput",
+                "feature": "benchmark.native.submit_result.throughput",
+                "required_capabilities": ["session.open_close", "operation.submit", "event.polling.batch"],
+                "description": "Native submit/result runtime throughput.",
+                "workload": {
+                    "operation": "native_submit_result_loop",
+                    "payload": "inline_payload",
+                    "duration_seconds": 0.01,
+                    "warmup_iterations": 1,
+                    "payload_bytes": 8,
+                },
+            },
+            {
                 "id": "l4.native.submit_result.allocations",
                 "category": "memory",
                 "feature": "benchmark.native.submit_result.allocations",
@@ -244,6 +272,8 @@ def test_build_benchmark_results_report_measures_configured_scenarios(monkeypatc
     assert results["l4.runtime.probe.latency"]["outcome"] == "measured"
     assert results["l4.native.schema_descriptor.latency"]["outcome"] == "skip"
     assert results["l4.native.event_polling.latency"]["outcome"] == "skip"
+    assert results["l4.native.event_polling.throughput"]["outcome"] == "skip"
+    assert results["l4.native.submit_result.throughput"]["outcome"] == "skip"
     assert results["l4.native.submit_result.allocations"]["outcome"] == "skip"
     assert results["l4.native.artifact_probe.latency"]["outcome"] == "skip"
     assert results["l4.session.lifecycle.latency"]["outcome"] == "measured"
@@ -263,7 +293,12 @@ def test_build_benchmark_results_report_can_profile_throughput_metrics(
         assert isinstance(scenario, dict)
         workload = scenario.get("workload")
         assert isinstance(workload, dict)
-        if workload.get("operation") in {"submit_result_loop", "transport_loopback"}:
+        if workload.get("operation") in {
+            "submit_result_loop",
+            "transport_loopback",
+            "native_batch_event_polling_throughput",
+            "native_submit_result_loop",
+        }:
             workload["profile"] = True
 
     report = build_benchmark_results_report(plan)
@@ -322,6 +357,12 @@ def test_build_benchmark_results_report_measures_native_scenarios_when_artifacts
     results = {result["id"]: result for result in report["results"]}
     assert results["l4.native.schema_descriptor.latency"]["outcome"] == "measured"
     assert results["l4.native.event_polling.latency"]["outcome"] == "measured"
+    native_event_throughput_result = results["l4.native.event_polling.throughput"]
+    assert native_event_throughput_result["outcome"] == "measured"
+    assert native_event_throughput_result["metrics"]["throughput_ops_per_sec"] > 0
+    native_submit_result = results["l4.native.submit_result.throughput"]
+    assert native_submit_result["outcome"] == "measured"
+    assert native_submit_result["metrics"]["throughput_ops_per_sec"] > 0
     allocation_result = results["l4.native.submit_result.allocations"]
     assert allocation_result["outcome"] == "measured"
     assert allocation_result["metrics"]["allocated_blocks_delta_per_op"] >= 0
@@ -329,8 +370,10 @@ def test_build_benchmark_results_report_measures_native_scenarios_when_artifacts
     assert results["l4.native.artifact_probe.latency"]["outcome"] == "measured"
     assert schema_codec.validations == 4
     assert schema_codec.descriptor.profile_id == token_delta_schema_descriptor().profile_id
-    assert native_client.connection.polled_batches == [2, 2, 2, 2]
-    assert native_client.connection.submitted_payloads == [b"x" * 8] * 4
+    assert len(native_client.connection.polled_batches) >= 4
+    assert set(native_client.connection.polled_batches) == {2}
+    assert len(native_client.connection.submitted_payloads) >= 4
+    assert set(native_client.connection.submitted_payloads) == {b"x" * 8}
     assert native_client.connection.closed is True
     assert native_probe.calls == [(None, None)] * 5
 
@@ -349,6 +392,10 @@ def test_build_benchmark_results_report_skips_native_scenarios_without_artifacts
     assert "missing schema artifact" in results["l4.native.schema_descriptor.latency"]["message"]
     assert results["l4.native.event_polling.latency"]["outcome"] == "skip"
     assert "missing client artifact" in results["l4.native.event_polling.latency"]["message"]
+    assert results["l4.native.event_polling.throughput"]["outcome"] == "skip"
+    assert "missing client artifact" in results["l4.native.event_polling.throughput"]["message"]
+    assert results["l4.native.submit_result.throughput"]["outcome"] == "skip"
+    assert "missing client artifact" in results["l4.native.submit_result.throughput"]["message"]
     assert results["l4.native.submit_result.allocations"]["outcome"] == "skip"
     assert "missing client artifact" in results["l4.native.submit_result.allocations"]["message"]
     assert results["l4.native.artifact_probe.latency"]["outcome"] == "skip"
@@ -428,7 +475,7 @@ def test_main_reads_paths_from_environment_and_writes_report(tmp_path: Path, mon
 
     report = json.loads(output_path.read_text(encoding="utf-8"))
     assert report["protocol_version"] == "nnrp-1"
-    assert len(report["results"]) == 13
+    assert len(report["results"]) == 15
 
 
 def test_main_accepts_explicit_cli_paths_and_creates_parent_directory(tmp_path: Path) -> None:

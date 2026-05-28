@@ -177,10 +177,17 @@ class NativeStatus:
 
     @classmethod
     def ok(cls) -> NativeStatus:
-        return cls(FFI_STATUS_OK)
+        return _NATIVE_STATUS_OK
 
     @classmethod
     def from_ffi(cls, status: _NnrpFfiStatus) -> NativeStatus:
+        if (
+            status.status_code == FFI_STATUS_OK
+            and status.error_family == ERROR_FAMILY_NONE
+            and status.protocol_error_code == 0
+            and status.detail_code == 0
+        ):
+            return _NATIVE_STATUS_OK
         return cls(
             int(status.status_code),
             int(status.error_family),
@@ -230,6 +237,13 @@ class NativeStatus:
 
     def to_ffi(self) -> _NnrpFfiStatus:
         return _NnrpFfiStatus(self.status_code, self.error_family, self.protocol_error_code, self.detail_code)
+
+
+_NATIVE_STATUS_OK = object.__new__(NativeStatus)
+object.__setattr__(_NATIVE_STATUS_OK, "status_code", FFI_STATUS_OK)
+object.__setattr__(_NATIVE_STATUS_OK, "error_family", ERROR_FAMILY_NONE)
+object.__setattr__(_NATIVE_STATUS_OK, "protocol_error_code", 0)
+object.__setattr__(_NATIVE_STATUS_OK, "detail_code", 0)
 
 
 class NativeRuntimeError(RuntimeError):
@@ -305,6 +319,15 @@ class NativeHandle:
 
     def to_ffi(self) -> _NnrpHandle:
         return _NnrpHandle(self.kind, self.id, self.generation, self.flags)
+
+
+def _native_handle_from_trusted_ffi(handle: _NnrpHandle) -> NativeHandle:
+    native_handle = object.__new__(NativeHandle)
+    object.__setattr__(native_handle, "kind", int(handle.kind))
+    object.__setattr__(native_handle, "id", int(handle.id))
+    object.__setattr__(native_handle, "generation", int(handle.generation))
+    object.__setattr__(native_handle, "flags", int(handle.flags))
+    return native_handle
 
 
 @dataclass(frozen=True)
@@ -1378,9 +1401,9 @@ class NativeRuntimeEvent:
     def from_ffi(cls, event: _NnrpEvent) -> NativeRuntimeEvent:
         return cls(
             kind=int(event.kind),
-            connection=NativeHandle.from_ffi(event.connection),
-            session=NativeHandle.from_ffi(event.session),
-            operation=NativeHandle.from_ffi(event.operation),
+            connection=_native_handle_from_trusted_ffi(event.connection),
+            session=_native_handle_from_trusted_ffi(event.session),
+            operation=_native_handle_from_trusted_ffi(event.operation),
             frame_id=int(event.frame_id),
             payload=_copy_buffer_view(event.payload),
             diagnostic=NativeRuntimeDiagnostic.from_ffi(event.diagnostic),
@@ -2089,6 +2112,11 @@ class NativeRuntimeSession:
     _poll_event_buffer: Any = field(default=None, init=False, repr=False, compare=False)
     _poll_event_buffer_capacity: int = field(default=0, init=False, repr=False, compare=False)
     _poll_event_count: Any = field(default=None, init=False, repr=False, compare=False)
+    _submit_result_request: Any = field(default=None, init=False, repr=False, compare=False)
+    _submit_result_out_operation: Any = field(default=None, init=False, repr=False, compare=False)
+    _submit_result_poll_result: Any = field(default=None, init=False, repr=False, compare=False)
+    _submit_result_out_operation_ref: Any = field(default=None, init=False, repr=False, compare=False)
+    _submit_result_poll_result_ref: Any = field(default=None, init=False, repr=False, compare=False)
 
     def submit(
         self,
@@ -2267,23 +2295,33 @@ class NativeRuntimeSession:
         submit_payload_view, _submit_payload_owner = _buffer_view_from_payload(payload)
         selected_result_payload = payload if result_payload is None else result_payload
         result_payload_view, _result_payload_owner = _buffer_view_from_payload(selected_result_payload)
-        request = _NnrpClientSubmitResultRequest(
-            self.handle.to_ffi(),
-            operation_id,
-            frame_id,
-            submit_payload_view,
-            result_payload_view,
-            0 if max_events is None else max_events,
+        request = self._submit_result_request
+        if request is None:
+            request = _NnrpClientSubmitResultRequest()
+            out_operation = _NnrpHandle()
+            poll_result = _NnrpPollResult()
+            object.__setattr__(self, "_submit_result_request", request)
+            object.__setattr__(self, "_submit_result_out_operation", out_operation)
+            object.__setattr__(self, "_submit_result_poll_result", poll_result)
+            object.__setattr__(self, "_submit_result_out_operation_ref", ctypes.byref(out_operation))
+            object.__setattr__(self, "_submit_result_poll_result_ref", ctypes.byref(poll_result))
+        request.session = self.handle.to_ffi()
+        request.operation_id = operation_id
+        request.frame_id = frame_id
+        request.submit_payload = submit_payload_view
+        request.result_payload = result_payload_view
+        request.max_events = 0 if max_events is None else max_events
+        poll_result = self._submit_result_poll_result
+        status = self.entrypoints.client_submit_result(
+            request,
+            self._submit_result_out_operation_ref,
+            self._submit_result_poll_result_ref,
         )
-        out_operation = _NnrpHandle()
-        poll_result = _NnrpPollResult()
-        status = self.entrypoints.client_submit_result(request, ctypes.byref(out_operation), ctypes.byref(poll_result))
         raise_for_native_status(status)
         raise_for_native_status(poll_result.status)
-        native_poll_result = NativeRuntimePollResult.from_ffi(poll_result)
-        if native_poll_result.event is None:
+        if not poll_result.has_event:
             raise NativeWouldBlockError(NativeStatus(FFI_STATUS_WOULD_BLOCK))
-        return NativeRuntimeResult.from_event(native_poll_result.event, state=state)
+        return NativeRuntimeResult.from_event(NativeRuntimeEvent.from_ffi(poll_result.event), state=state)
 
     def submit_and_poll_result(
         self,
@@ -2626,7 +2664,12 @@ def _bind_native_function(library: Any, name: str, restype: Any, argtypes: list[
 
 
 def raise_for_native_status(status: NativeStatus | _NnrpFfiStatus) -> None:
-    native_status = status if isinstance(status, NativeStatus) else NativeStatus.from_ffi(status)
+    if isinstance(status, _NnrpFfiStatus):
+        if status.status_code == FFI_STATUS_OK:
+            return
+        native_status = NativeStatus.from_ffi(status)
+    else:
+        native_status = status
     if native_status.succeeded:
         return
 

@@ -1614,6 +1614,46 @@ class NativeRuntimeResult:
         )
 
 
+def _submit_result_from_ffi_event(
+    event: _NnrpEvent,
+    *,
+    connection: NativeHandle,
+    session: NativeHandle,
+    state: NativeOperationLifecycle | str | None,
+) -> NativeRuntimeResult:
+    kind = int(event.kind)
+    payload = _copy_buffer_view(event.payload)
+    status = NativeStatus.from_ffi(event.diagnostic.status)
+    diagnostic = NativeRuntimeDiagnostic(
+        status=status,
+        related_connection_id=int(event.diagnostic.related_connection_id),
+        related_session_id=int(event.diagnostic.related_session_id),
+        related_operation_id=int(event.diagnostic.related_operation_id),
+        related_frame_id=int(event.diagnostic.related_frame_id),
+    )
+    operation = _native_handle_from_trusted_ffi(event.operation)
+    runtime_event = NativeRuntimeEvent(
+        kind=kind,
+        connection=connection,
+        session=session,
+        operation=operation,
+        frame_id=int(event.frame_id),
+        payload=payload,
+        diagnostic=diagnostic,
+    )
+    selected_state = (
+        NativeOperationLifecycle(state) if state is not None else _infer_lifecycle_from_event(runtime_event)
+    )
+    return NativeRuntimeResult(
+        state=selected_state,
+        operation_id=operation.id,
+        frame_id=runtime_event.frame_id,
+        payload=payload,
+        event=runtime_event,
+        diagnostic=NativeStructuredDiagnostic.from_runtime_diagnostic(diagnostic),
+    )
+
+
 @dataclass(frozen=True)
 class NativeRuntimeOperation:
     entrypoints: NativeRuntimeEntrypoints
@@ -2339,7 +2379,12 @@ class NativeRuntimeSession:
         raise_for_native_status(poll_result.status)
         if not poll_result.has_event:
             raise NativeWouldBlockError(NativeStatus(FFI_STATUS_WOULD_BLOCK))
-        return NativeRuntimeResult.from_event(NativeRuntimeEvent.from_ffi(poll_result.event), state=state)
+        return _submit_result_from_ffi_event(
+            poll_result.event,
+            connection=self.connection.handle,
+            session=self.handle.handle,
+            state=state,
+        )
 
     def _submit_result_buffer_view(
         self,

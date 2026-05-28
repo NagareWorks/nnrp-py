@@ -2,6 +2,7 @@ import asyncio
 
 import pytest
 
+import nnrp.client as client_module
 from nnrp import (
     CacheLeaseDescriptor,
     CacheObjectIdentity,
@@ -45,8 +46,6 @@ from nnrp.client import (
     build_client_hello_packet,
     connect_client_control,
     connect_client_control_with_probe,
-    connect_client_session,
-    connect_client_session_with_probe,
     connect_native_client_connection,
     connect_native_client_session,
     plan_client_transport,
@@ -54,6 +53,7 @@ from nnrp.client import (
     resolve_client_hello_transport_policy,
     select_client_native_backend,
 )
+from nnrp.client.transport import connect_client_session, connect_client_session_with_probe
 from nnrp.core import (
     BODY_REGION_PRELUDE_LENGTH,
     CLIENT_HELLO_LOSS_TOLERANCE_EXTENSION,
@@ -335,6 +335,10 @@ def test_connect_client_control_is_exported() -> None:
 
 def test_connect_client_session_is_exported() -> None:
     assert ClientSession.__name__ == "ClientSession"
+    assert "connect_client_session" not in client_module.__all__
+    assert "connect_client_session_with_probe" not in client_module.__all__
+    assert not hasattr(client_module, "connect_client_session")
+    assert not hasattr(client_module, "connect_client_session_with_probe")
     assert callable(connect_client_session)
     assert callable(connect_client_session_with_probe)
     assert "packet transport smoke/tooling" in (connect_client_session.__doc__ or "")

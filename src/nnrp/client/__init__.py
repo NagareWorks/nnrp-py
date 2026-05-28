@@ -36,8 +36,6 @@ from nnrp.client.transport import (
     build_client_hello_packet,
     connect_client_control,
     connect_client_control_with_probe,
-    connect_client_session,
-    connect_client_session_with_probe,
     plan_client_transport,
     probe_client_transport,
 )
@@ -70,8 +68,6 @@ __all__ = [
     "build_client_hello_packet",
     "connect_client_control",
     "connect_client_control_with_probe",
-    "connect_client_session",
-    "connect_client_session_with_probe",
     "connect_native_client_connection",
     "connect_native_client_session",
     "probe_client_transport",

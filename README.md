@@ -134,7 +134,7 @@ with connect_native_client_connection(require_native=True) as connection:
 ## Public Wire API
 
 The public wire surface remains available for protocol fixtures, diagnostics, and tooling. It should not be treated as the primary host runtime path when native artifacts are available.
-The legacy `connect_client_session()` and `connect_client_session_with_probe()` helpers remain available only for packet transport smoke tests and adapter bring-up. Production host integrations should use the Rust-backed native connection/session helpers from `nnrp.client`.
+The legacy `connect_client_session()` and `connect_client_session_with_probe()` helpers remain available from `nnrp.client.transport` only for packet transport smoke tests and adapter bring-up. Production host integrations should use the Rust-backed native connection/session helpers from `nnrp.client`.
 
 ### Schema And Profile Constants
 

@@ -79,6 +79,11 @@ class FakeConnection:
         callback("credit")
         return 1
 
+    def dispatch_result_hints(self, callback, *, max_events: int | None = None) -> int:
+        self.dispatch_calls.append(("result_hints", max_events, None))
+        callback("hint")
+        return 1
+
     def dispatch_payload_family_events(
         self,
         payload_family: str,
@@ -313,6 +318,7 @@ def test_native_client_connection_delegates_callback_dispatch() -> None:
     with connect_native_client_connection(backend=backend) as connection:
         assert connection.dispatch_events(callbacks.append, max_events=2, event_kind=6) == 1
         assert connection.dispatch_credit_updates(callbacks.append, max_events=3) == 1
+        assert connection.dispatch_result_hints(callbacks.append, max_events=8) == 1
         assert connection.dispatch_structured_events(callbacks.append, max_events=4) == 1
         assert connection.dispatch_tool_deltas(callbacks.append, max_events=5) == 1
         assert connection.dispatch_workflow_states(callbacks.append, max_events=6) == 1
@@ -329,6 +335,7 @@ def test_native_client_connection_delegates_callback_dispatch() -> None:
     assert callbacks == [
         "event",
         "credit",
+        "hint",
         "structured_event",
         "tool_delta",
         "workflow_state",
@@ -337,6 +344,7 @@ def test_native_client_connection_delegates_callback_dispatch() -> None:
     assert backend.connections[0].dispatch_calls == [
         ("events", 2, 6),
         ("credit_updates", 3, None),
+        ("result_hints", 8, None),
         ("structured_event", 4, None),
         ("tool_delta", 5, None),
         ("workflow_state", 6, None),

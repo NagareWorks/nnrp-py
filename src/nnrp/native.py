@@ -1375,6 +1375,37 @@ class NativeCreditUpdateEvent:
 
 
 @dataclass(frozen=True)
+class NativeResultHintEvent:
+    connection: NativeHandle
+    session: NativeHandle
+    operation: NativeHandle
+    frame_id: int
+    payload: bytes
+    event: NativeRuntimeEvent
+    diagnostic: NativeStructuredDiagnostic
+
+    @classmethod
+    def from_event(cls, event: NativeRuntimeEvent) -> NativeResultHintEvent:
+        if event.kind != EVENT_KIND_RESULT_HINT:
+            raise NativeHandleError(f"expected native result hint event, got {event.kind_name}")
+        return cls(
+            connection=event.connection,
+            session=event.session,
+            operation=event.operation,
+            frame_id=event.frame_id,
+            payload=event.payload,
+            event=event,
+            diagnostic=NativeStructuredDiagnostic.from_runtime_diagnostic(event.diagnostic),
+        )
+
+    @property
+    def metadata(self) -> Any:
+        from nnrp.core.messages.control import ResultHintMetadata
+
+        return ResultHintMetadata.unpack(self.payload)
+
+
+@dataclass(frozen=True)
 class NativePayloadFamilyEvent:
     payload_family: str
     connection: NativeHandle
@@ -1418,6 +1449,7 @@ class NativePayloadFamilyEvent:
 
 NativeRuntimeEventCallback = Callable[[NativeRuntimeEvent], None]
 NativeCreditUpdateCallback = Callable[[NativeCreditUpdateEvent], None]
+NativeResultHintCallback = Callable[[NativeResultHintEvent], None]
 NativePayloadFamilyCallback = Callable[[NativePayloadFamilyEvent], None]
 
 
@@ -1825,6 +1857,12 @@ class NativeRuntimeConnection:
             for event in self.poll_events(max_events=max_events, event_kind=EVENT_KIND_FLOW_UPDATED)
         )
 
+    def poll_result_hints(self, *, max_events: int | None = None) -> tuple[NativeResultHintEvent, ...]:
+        return tuple(
+            NativeResultHintEvent.from_event(event)
+            for event in self.poll_events(max_events=max_events, event_kind=EVENT_KIND_RESULT_HINT)
+        )
+
     def poll_payload_family_events(
         self,
         payload_family: str,
@@ -1865,6 +1903,14 @@ class NativeRuntimeConnection:
         max_events: int | None = None,
     ) -> int:
         return _dispatch_callback_batch(self.poll_credit_updates(max_events=max_events), callback)
+
+    def dispatch_result_hints(
+        self,
+        callback: NativeResultHintCallback,
+        *,
+        max_events: int | None = None,
+    ) -> int:
+        return _dispatch_callback_batch(self.poll_result_hints(max_events=max_events), callback)
 
     def dispatch_payload_family_events(
         self,
@@ -1918,6 +1964,10 @@ class NativeRuntimeConnection:
     async def iter_credit_updates(self, *, max_events: int | None = None) -> AsyncIterator[NativeCreditUpdateEvent]:
         for update in await asyncio.to_thread(self.poll_credit_updates, max_events=max_events):
             yield update
+
+    async def iter_result_hints(self, *, max_events: int | None = None) -> AsyncIterator[NativeResultHintEvent]:
+        for hint in await asyncio.to_thread(self.poll_result_hints, max_events=max_events):
+            yield hint
 
     async def iter_payload_family_events(
         self,

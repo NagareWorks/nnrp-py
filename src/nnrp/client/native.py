@@ -13,6 +13,7 @@ from nnrp.native import (
     NativeCreditUpdateCallback,
     NativePayloadFamilyCallback,
     NativePlatform,
+    NativeResultHintCallback,
     NativeRuntimeBackend,
     NativeRuntimeConnection,
     NativeRuntimeEventCallback,
@@ -124,6 +125,15 @@ class NativeClientConnection:
     ) -> int:
         self._ensure_open()
         return self.connection.dispatch_credit_updates(callback, max_events=max_events)
+
+    def dispatch_result_hints(
+        self,
+        callback: NativeResultHintCallback,
+        *,
+        max_events: int | None = None,
+    ) -> int:
+        self._ensure_open()
+        return self.connection.dispatch_result_hints(callback, max_events=max_events)
 
     def dispatch_payload_family_events(
         self,

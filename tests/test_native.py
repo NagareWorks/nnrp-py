@@ -8,7 +8,13 @@ from pathlib import Path
 import pytest
 
 from nnrp.cache import CacheLeaseOutcome, CacheObjectIdentity
-from nnrp.core.messages.control import SessionMigrateAckMetadata
+from nnrp.core.messages.control import (
+    ResultHintBudgetPolicy,
+    ResultHintCongestionState,
+    ResultHintMetadata,
+    ResultHintReason,
+    SessionMigrateAckMetadata,
+)
 from nnrp.native import (
     CACHE_ERROR_DEPENDENCY_INVALID,
     CACHE_ERROR_MISS,
@@ -18,6 +24,7 @@ from nnrp.native import (
     ERROR_FAMILY_SESSION,
     EVENT_KIND_CONTROL,
     EVENT_KIND_FLOW_UPDATED,
+    EVENT_KIND_RESULT_HINT,
     EVENT_KIND_RESULT_PUSHED,
     FFI_STATUS_CALLBACK_REJECTED,
     FFI_STATUS_INTERNAL_ERROR,
@@ -63,6 +70,7 @@ from nnrp.native import (
     NativePlatform,
     NativeProtocolError,
     NativeRecoveryCodec,
+    NativeResultHintEvent,
     NativeRuntimeBackend,
     NativeRuntimeClient,
     NativeRuntimeConnection,
@@ -1618,6 +1626,46 @@ def test_native_runtime_event_classifies_control_and_credit_updates() -> None:
         control_event.to_credit_update()
 
 
+def test_native_runtime_event_wraps_result_hint_metadata() -> None:
+    metadata = ResultHintMetadata(
+        applied_budget_policy=ResultHintBudgetPolicy.PARTIAL,
+        congestion_state=ResultHintCongestionState.ELEVATED,
+        reason=ResultHintReason.SERVER_BUSY,
+        retry_after_ms=125,
+    )
+    hint_event = NativeRuntimeEvent(
+        kind=EVENT_KIND_RESULT_HINT,
+        connection=NativeHandle(HANDLE_KIND_CONNECTION, 12, 2),
+        session=NativeHandle(HANDLE_KIND_SESSION, 41, 3),
+        operation=NativeHandle(HANDLE_KIND_OPERATION, 99, 1),
+        frame_id=7,
+        payload=metadata.pack(),
+        diagnostic=NativeRuntimeDiagnostic(NativeStatus.ok(), 12, 41, 99, 7),
+    )
+    control_event = NativeRuntimeEvent(
+        kind=EVENT_KIND_CONTROL,
+        connection=NativeHandle(HANDLE_KIND_CONNECTION, 12, 2),
+        session=NativeHandle(HANDLE_KIND_SESSION, 41, 3),
+        operation=NativeHandle(HANDLE_KIND_OPERATION, 99, 1),
+        frame_id=8,
+        payload=b"opaque-control-state",
+        diagnostic=NativeRuntimeDiagnostic(NativeStatus.ok(), 12, 41, 99, 8),
+    )
+
+    hint = NativeResultHintEvent.from_event(hint_event)
+
+    assert hint.connection.id == 12
+    assert hint.session.id == 41
+    assert hint.operation.id == 99
+    assert hint.frame_id == 7
+    assert hint.payload == metadata.pack()
+    assert hint.event is hint_event
+    assert hint.diagnostic.related_operation_id == 99
+    assert hint.metadata == metadata
+    with pytest.raises(NativeHandleError, match="expected native result hint event"):
+        NativeResultHintEvent.from_event(control_event)
+
+
 def test_native_runtime_connection_polls_event_delivery_model(tmp_path: Path) -> None:
     artifact = tmp_path / "nnrp_ffi.dll"
     artifact.write_bytes(b"fake")
@@ -1729,6 +1777,35 @@ def test_native_runtime_connection_filters_credit_update_events(tmp_path: Path) 
     assert not hasattr(updates[0], "credits")
 
 
+def test_native_runtime_connection_filters_result_hint_events(tmp_path: Path) -> None:
+    artifact = tmp_path / "nnrp_ffi.dll"
+    artifact.write_bytes(b"fake")
+    metadata = ResultHintMetadata(
+        applied_budget_policy=ResultHintBudgetPolicy.PARTIAL,
+        congestion_state=ResultHintCongestionState.SATURATED,
+        reason=ResultHintReason.BUDGET_EXCEEDED,
+        retry_after_ms=250,
+    )
+    library = FakeRuntimeLibrary(event_payload=metadata.pack(), event_kind=EVENT_KIND_RESULT_HINT)
+    connection = load_native_client(artifact, library=library).connect(
+        connection_id=12,
+        generation=2,
+        transport_id=TRANSPORT_SLOT_TCP,
+    )
+
+    hints = connection.poll_result_hints(max_events=1)
+    async_hints = asyncio.run(_collect_async_result_hints(connection))
+
+    assert len(hints) == 1
+    assert hints[0].metadata == metadata
+    assert hints[0].connection.id == 12
+    assert hints[0].session.id == 41
+    assert hints[0].operation.id == 99
+    assert hints[0].frame_id == 7
+    assert len(async_hints) == 1
+    assert async_hints[0].metadata.retry_after_ms == 250
+
+
 def test_native_runtime_connection_wraps_payload_family_events(tmp_path: Path) -> None:
     artifact = tmp_path / "nnrp_ffi.dll"
     artifact.write_bytes(b"fake")
@@ -1781,6 +1858,7 @@ def test_native_runtime_connection_dispatches_callbacks(tmp_path: Path) -> None:
     structured_payloads: list[bytes] = []
     tool_payloads: list[bytes] = []
     credit_frames: list[int] = []
+    hint_retries: list[int] = []
 
     raw_count = result_connection.dispatch_events(lambda event: raw_payloads.append(event.payload), max_events=1)
     structured_count = result_connection.dispatch_structured_events(
@@ -1795,15 +1873,30 @@ def test_native_runtime_connection_dispatches_callbacks(tmp_path: Path) -> None:
         lambda update: credit_frames.append(update.frame_id),
         max_events=1,
     )
+    hint_library = FakeRuntimeLibrary(
+        event_payload=ResultHintMetadata(retry_after_ms=75).pack(),
+        event_kind=EVENT_KIND_RESULT_HINT,
+    )
+    hint_connection = load_native_client(artifact, library=hint_library).connect(
+        connection_id=12,
+        generation=2,
+        transport_id=TRANSPORT_SLOT_TCP,
+    )
+    hint_count = hint_connection.dispatch_result_hints(
+        lambda hint: hint_retries.append(hint.metadata.retry_after_ms),
+        max_events=1,
+    )
 
     assert raw_count == 1
     assert structured_count == 1
     assert tool_count == 1
     assert credit_count == 1
+    assert hint_count == 1
     assert raw_payloads == [b'{"delta":"ok"}']
     assert structured_payloads == [b'{"delta":"ok"}']
     assert tool_payloads == [b'{"delta":"ok"}']
     assert credit_frames == [7]
+    assert hint_retries == [75]
 
 
 def test_native_runtime_connection_dispatches_payload_family_callbacks_by_event_kind(tmp_path: Path) -> None:
@@ -2096,6 +2189,10 @@ async def _collect_async_events_by_kind(
 
 async def _collect_async_credit_updates(connection: NativeRuntimeConnection) -> list[NativeCreditUpdateEvent]:
     return [event async for event in connection.iter_credit_updates(max_events=1)]
+
+
+async def _collect_async_result_hints(connection: NativeRuntimeConnection) -> list[NativeResultHintEvent]:
+    return [event async for event in connection.iter_result_hints(max_events=1)]
 
 
 async def _collect_async_structured_events(connection: NativeRuntimeConnection) -> list[NativePayloadFamilyEvent]:

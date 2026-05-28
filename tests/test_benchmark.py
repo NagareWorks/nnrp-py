@@ -154,6 +154,19 @@ def _plan_document() -> dict[str, object]:
                 },
             },
             {
+                "id": "l4.native.artifact_probe.latency",
+                "category": "latency",
+                "feature": "benchmark.native.artifact_probe",
+                "required_capabilities": ["native.artifact.probe"],
+                "description": "Native artifact load/probe latency smoke.",
+                "workload": {
+                    "operation": "native_artifact_probe",
+                    "payload": "version_capability_query",
+                    "iterations": 3,
+                    "warmup_iterations": 1,
+                },
+            },
+            {
                 "id": "l4.session.lifecycle.latency",
                 "category": "latency",
                 "feature": "benchmark.session_lifecycle",
@@ -188,6 +201,7 @@ def _plan_document() -> dict[str, object]:
 def test_build_benchmark_results_report_measures_configured_scenarios(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(benchmark, "load_native_schema_codec", _missing_native_schema_codec)
     monkeypatch.setattr(benchmark, "load_native_client", _missing_native_client)
+    monkeypatch.setattr(benchmark, "probe_native_artifact", _missing_native_probe)
 
     report = build_benchmark_results_report(_plan_document())
 
@@ -220,6 +234,7 @@ def test_build_benchmark_results_report_measures_configured_scenarios(monkeypatc
     assert results["l4.native.schema_descriptor.latency"]["outcome"] == "skip"
     assert results["l4.native.event_polling.latency"]["outcome"] == "skip"
     assert results["l4.native.submit_result.allocations"]["outcome"] == "skip"
+    assert results["l4.native.artifact_probe.latency"]["outcome"] == "skip"
     assert results["l4.session.lifecycle.latency"]["outcome"] == "measured"
     assert results["l4.transport.tcp.loopback.throughput"]["outcome"] == "measured"
 
@@ -255,8 +270,10 @@ def test_build_benchmark_results_report_measures_native_scenarios_when_artifacts
 ) -> None:
     schema_codec = FakeNativeSchemaCodec()
     native_client = FakeNativeClient()
+    native_probe = FakeNativeProbe()
     monkeypatch.setattr(benchmark, "load_native_schema_codec", lambda: schema_codec)
     monkeypatch.setattr(benchmark, "load_native_client", lambda: native_client)
+    monkeypatch.setattr(benchmark, "probe_native_artifact", native_probe)
 
     report = build_benchmark_results_report(_plan_document())
 
@@ -267,11 +284,13 @@ def test_build_benchmark_results_report_measures_native_scenarios_when_artifacts
     assert allocation_result["outcome"] == "measured"
     assert allocation_result["metrics"]["allocated_blocks_delta_per_op"] >= 0
     assert allocation_result["metrics"]["peak_traced_bytes_per_op"] >= 0
+    assert results["l4.native.artifact_probe.latency"]["outcome"] == "measured"
     assert schema_codec.validations == 4
     assert schema_codec.descriptor.profile_id == token_delta_schema_descriptor().profile_id
     assert native_client.connection.polled_batches == [2, 2, 2, 2]
     assert native_client.connection.submitted_payloads == [b"x" * 8] * 4
     assert native_client.connection.closed is True
+    assert native_probe.calls == [(None, None)] * 5
 
 
 def test_build_benchmark_results_report_skips_native_scenarios_without_artifacts(
@@ -279,6 +298,7 @@ def test_build_benchmark_results_report_skips_native_scenarios_without_artifacts
 ) -> None:
     monkeypatch.setattr(benchmark, "load_native_schema_codec", _missing_native_schema_codec)
     monkeypatch.setattr(benchmark, "load_native_client", _missing_native_client)
+    monkeypatch.setattr(benchmark, "probe_native_artifact", _missing_native_probe)
 
     report = build_benchmark_results_report(_plan_document())
 
@@ -289,6 +309,8 @@ def test_build_benchmark_results_report_skips_native_scenarios_without_artifacts
     assert "missing client artifact" in results["l4.native.event_polling.latency"]["message"]
     assert results["l4.native.submit_result.allocations"]["outcome"] == "skip"
     assert "missing client artifact" in results["l4.native.submit_result.allocations"]["message"]
+    assert results["l4.native.artifact_probe.latency"]["outcome"] == "skip"
+    assert "missing probe artifact" in results["l4.native.artifact_probe.latency"]["message"]
 
 
 def test_build_benchmark_results_report_supports_single_sample_header_measurement() -> None:
@@ -320,6 +342,7 @@ def test_build_benchmark_results_report_supports_single_sample_header_measuremen
         ),
         ({"operation": "submit_result_loop", "duration_seconds": 0}, "positive number"),
         ({"operation": "transport_loopback", "probe_payload_bytes": 0}, "positive integer"),
+        ({"operation": "native_artifact_probe", "artifact_path": []}, "artifact_path must be a string"),
     ],
 )
 def test_build_benchmark_results_report_rejects_invalid_workload_shapes(workload: object, match: str) -> None:
@@ -345,7 +368,7 @@ def test_main_reads_paths_from_environment_and_writes_report(tmp_path: Path, mon
 
     report = json.loads(output_path.read_text(encoding="utf-8"))
     assert report["protocol_version"] == "nnrp-1"
-    assert len(report["results"]) == 12
+    assert len(report["results"]) == 13
 
 
 def test_main_accepts_explicit_cli_paths_and_creates_parent_directory(tmp_path: Path) -> None:
@@ -486,9 +509,22 @@ class FakeNativeSession:
         return object()
 
 
+class FakeNativeProbe:
+    def __init__(self) -> None:
+        self.calls: list[tuple[str | None, str | None]] = []
+
+    def __call__(self, artifact_path=None, *, root=None):
+        self.calls.append((artifact_path, root))
+        return object()
+
+
 def _missing_native_schema_codec() -> object:
     raise NativeArtifactError("missing schema artifact")
 
 
 def _missing_native_client() -> object:
     raise NativeArtifactError("missing client artifact")
+
+
+def _missing_native_probe(*_args: object, **_kwargs: object) -> object:
+    raise NativeArtifactError("missing probe artifact")

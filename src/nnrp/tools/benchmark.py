@@ -51,6 +51,12 @@ from nnrp.schema import (
 _RESULTS_SCHEMA_URL = "https://raw.githubusercontent.com/NagareWorks/nnrp-conformance/main/schemas/benchmark-results.schema.json"
 _DEFAULT_IMPLEMENTATION_NAME = "nnrp-py"
 _DEFAULT_SKIP_MESSAGE = "This benchmark scenario is not implemented in the current Python baseline runner."
+_NATIVE_SUBMIT_RESULT_ENTRYPOINTS = (
+    "client_submit",
+    "client_complete_operation",
+    "client_await_event",
+    "client_await_events",
+)
 
 
 def build_benchmark_results_report(
@@ -405,6 +411,7 @@ def _run_native_submit_result_loop(scenario_id: str, workload: dict[str, Any]) -
         schema_version=0,
     )
     _drain_native_setup_events(connection)
+    call_counter = _NativeEntrypointCallCounter.try_install(getattr(session, "entrypoints", None))
     payload = b"x" * payload_bytes
     counter = 0
 
@@ -423,11 +430,14 @@ def _run_native_submit_result_loop(scenario_id: str, workload: dict[str, Any]) -
         for _ in range(warmup_iterations):
             operation()
 
-        metrics = _measure_throughput_metrics(operation, duration_seconds, profile=profile)
+        call_counter.reset()
+        metrics = _measure_throughput_metrics(operation, duration_seconds, profile=profile, include_completed=True)
+        call_counter.add_metrics(metrics, int(metrics["completed_operations"]))
         return _measured_throughput_result(scenario_id, metrics)
     except NativeWouldBlockError as error:
         return _skip_result(scenario_id, f"native submit/result loop unavailable: {error}")
     finally:
+        call_counter.restore()
         connection.close()
 
 
@@ -499,6 +509,51 @@ def _drain_native_setup_events(connection: Any) -> None:
             pass
     except NativeWouldBlockError:
         pass
+
+
+class _NativeEntrypointCallCounter:
+    def __init__(self, entrypoints: Any, names: Sequence[str]) -> None:
+        self._entrypoints = entrypoints
+        self._originals: dict[str, Callable[..., Any]] = {}
+        self._counts: dict[str, int] = {}
+        for name in names:
+            candidate = getattr(entrypoints, name, None)
+            if callable(candidate):
+                self._originals[name] = candidate
+                self._counts[name] = 0
+
+    @classmethod
+    def try_install(cls, entrypoints: Any) -> _NativeEntrypointCallCounter:
+        counter = cls(entrypoints, _NATIVE_SUBMIT_RESULT_ENTRYPOINTS) if entrypoints is not None else cls(None, ())
+        counter.install()
+        return counter
+
+    def install(self) -> None:
+        for name, original in self._originals.items():
+            setattr(self._entrypoints, name, self._wrap(name, original))
+
+    def reset(self) -> None:
+        for name in self._counts:
+            self._counts[name] = 0
+
+    def add_metrics(self, metrics: dict[str, float | int], completed_operations: int) -> None:
+        if completed_operations <= 0 or not self._counts:
+            return
+        total_calls = sum(self._counts.values())
+        metrics["native_ffi_calls_per_op"] = total_calls / completed_operations
+        for name, count in self._counts.items():
+            metrics[f"native_ffi_{name}_calls_per_op"] = count / completed_operations
+
+    def restore(self) -> None:
+        for name, original in self._originals.items():
+            setattr(self._entrypoints, name, original)
+
+    def _wrap(self, name: str, original: Callable[..., Any]) -> Callable[..., Any]:
+        def counted(*args: Any, **kwargs: Any) -> Any:
+            self._counts[name] += 1
+            return original(*args, **kwargs)
+
+        return counted
 
 
 def _run_native_artifact_probe(scenario_id: str, workload: dict[str, Any]) -> dict[str, Any]:
@@ -711,6 +766,7 @@ def _measure_throughput_metrics(
     duration_seconds: float,
     *,
     profile: bool,
+    include_completed: bool = False,
 ) -> dict[str, float | int]:
     if profile:
         gc.collect()
@@ -723,17 +779,23 @@ def _measure_throughput_metrics(
             operation()
             completed += 1
         if not profile:
-            return {"throughput_ops_per_sec": completed / duration_seconds}
+            metrics: dict[str, float | int] = {"throughput_ops_per_sec": completed / duration_seconds}
+            if include_completed:
+                metrics["completed_operations"] = completed
+            return metrics
         _, peak_bytes = tracemalloc.get_traced_memory()
     finally:
         if profile:
             tracemalloc.stop()
     process_seconds = time.process_time() - process_start
-    return {
+    metrics = {
         "throughput_ops_per_sec": completed / duration_seconds,
         "cpu_percent": (process_seconds / duration_seconds) * 100,
         "peak_memory_bytes": int(peak_bytes),
     }
+    if include_completed:
+        metrics["completed_operations"] = completed
+    return metrics
 
 
 def _measure_allocation_smoke(operation: Callable[[], None], iterations: int) -> dict[str, float]:

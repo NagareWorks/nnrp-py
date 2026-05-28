@@ -30,7 +30,7 @@
       - [x] Add a benchmark plan that separates fixture/helper throughput from native runtime throughput.
       - [x] Route native submit/result benchmark scenarios through explicit submit, client completion, and result polling calls.
     - [ ] Optimize FFI call granularity until the native runtime path shows the expected migration win.
-      - [ ] Count Python-to-native calls per submit/result iteration.
+      - [x] Count Python-to-native calls per submit/result iteration.
       - [ ] Batch submit plus result polling where one coarse native call can replace multiple fine-grained calls.
       - [ ] Reuse native connection/session handles across hot benchmark iterations without rebuilding Python wrapper state.
       - [ ] Compare raw throughput against the pre-migration baseline and target at least 30% improvement for the glued runtime path.

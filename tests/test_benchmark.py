@@ -363,6 +363,11 @@ def test_build_benchmark_results_report_measures_native_scenarios_when_artifacts
     native_submit_result = results["l4.native.submit_result.throughput"]
     assert native_submit_result["outcome"] == "measured"
     assert native_submit_result["metrics"]["throughput_ops_per_sec"] > 0
+    assert native_submit_result["metrics"]["completed_operations"] > 0
+    assert native_submit_result["metrics"]["native_ffi_calls_per_op"] == 3
+    assert native_submit_result["metrics"]["native_ffi_client_submit_calls_per_op"] == 1
+    assert native_submit_result["metrics"]["native_ffi_client_complete_operation_calls_per_op"] == 1
+    assert native_submit_result["metrics"]["native_ffi_client_await_events_calls_per_op"] == 1
     allocation_result = results["l4.native.submit_result.allocations"]
     assert allocation_result["outcome"] == "measured"
     assert allocation_result["metrics"]["allocated_blocks_delta_per_op"] >= 0
@@ -660,6 +665,7 @@ class FakeNativeConnection:
 class FakeNativeSession:
     def __init__(self, connection: FakeNativeConnection) -> None:
         self.connection = connection
+        self.entrypoints = FakeNativeEntrypoints(self)
 
     def submit_operation(
         self,
@@ -669,7 +675,7 @@ class FakeNativeSession:
         payload: bytes | bytearray | memoryview = b"",
     ):
         assert operation_id == frame_id
-        self.connection.submitted_payloads.append(bytes(payload))
+        self.entrypoints.client_submit(payload)
         return FakeNativeOperation(operation_id, frame_id)
 
     def complete_operation(
@@ -677,13 +683,27 @@ class FakeNativeSession:
         operation: "FakeNativeOperation",
         payload: bytes | bytearray | memoryview = b"",
     ) -> None:
-        self.connection.completed_payloads.append(bytes(payload))
+        self.entrypoints.client_complete_operation(payload)
 
     def poll_result(self, operation: "FakeNativeOperation", *, max_events: int | None = None):
-        self.connection.polled_results.append(max_events)
+        self.entrypoints.client_await_events(max_events)
         assert operation.operation_id == operation.frame_id
         assert max_events == 2
         return object()
+
+
+class FakeNativeEntrypoints:
+    def __init__(self, session: FakeNativeSession) -> None:
+        self.session = session
+
+    def client_submit(self, payload: bytes | bytearray | memoryview) -> None:
+        self.session.connection.submitted_payloads.append(bytes(payload))
+
+    def client_complete_operation(self, payload: bytes | bytearray | memoryview) -> None:
+        self.session.connection.completed_payloads.append(bytes(payload))
+
+    def client_await_events(self, max_events: int | None) -> None:
+        self.session.connection.polled_results.append(max_events)
 
 
 class FakeNativeOperation:

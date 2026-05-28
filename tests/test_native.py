@@ -2199,6 +2199,9 @@ def test_native_runtime_session_submits_and_polls_result(tmp_path: Path) -> None
     assert result.operation_id == 99
     assert result.frame_id == 7
     assert result.payload == b"result"
+    assert result.event is result.event
+    assert result.event.operation.id == 99
+    assert result.event.payload == b"result"
     assert async_result.state is NativeOperationLifecycle.COMPLETED
     assert async_result.payload == b"result"
     assert library.nnrp_client_submit_result_compact.calls[0][0].operation_id == 99

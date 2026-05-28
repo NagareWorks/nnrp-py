@@ -1493,15 +1493,26 @@ _NATIVE_RUNTIME_DIAGNOSTIC_OK = NativeRuntimeDiagnostic(
 _NATIVE_STRUCTURED_DIAGNOSTIC_OK = NativeStructuredDiagnostic(status=_NATIVE_STATUS_OK)
 
 
-@dataclass(frozen=True, slots=True)
 class NativeRuntimeEvent:
-    kind: int
-    connection: NativeHandle
-    session: NativeHandle
-    operation: NativeHandle
-    frame_id: int
-    payload: bytes
-    diagnostic: NativeRuntimeDiagnostic
+    __slots__ = ("connection", "diagnostic", "frame_id", "kind", "operation", "payload", "session")
+
+    def __init__(
+        self,
+        kind: int,
+        connection: NativeHandle,
+        session: NativeHandle,
+        operation: NativeHandle,
+        frame_id: int,
+        payload: bytes,
+        diagnostic: NativeRuntimeDiagnostic,
+    ) -> None:
+        self.kind = kind
+        self.connection = connection
+        self.session = session
+        self.operation = operation
+        self.frame_id = frame_id
+        self.payload = payload
+        self.diagnostic = diagnostic
 
     @classmethod
     def from_ffi(cls, event: _NnrpEvent) -> NativeRuntimeEvent:
@@ -1693,14 +1704,84 @@ class NativeOperationSchedulingHint:
         return self.parent_operation_id is not None or self.operation_group_id is not None
 
 
-@dataclass(frozen=True, slots=True)
 class NativeRuntimeResult:
-    state: NativeOperationLifecycle
-    operation_id: int
-    frame_id: int
-    payload: bytes
-    event: NativeRuntimeEvent
-    diagnostic: NativeStructuredDiagnostic
+    __slots__ = (
+        "_event",
+        "_event_connection",
+        "_event_diagnostic",
+        "_event_kind",
+        "_event_operation_flags",
+        "_event_operation_generation",
+        "_event_operation_id",
+        "_event_operation_kind",
+        "_event_session",
+        "diagnostic",
+        "frame_id",
+        "operation_id",
+        "payload",
+        "state",
+    )
+
+    def __init__(
+        self,
+        state: NativeOperationLifecycle,
+        operation_id: int,
+        frame_id: int,
+        payload: bytes,
+        event: NativeRuntimeEvent | None,
+        diagnostic: NativeStructuredDiagnostic,
+        *,
+        event_kind: int = EVENT_KIND_RESULT_PUSHED,
+        event_connection: NativeHandle | None = None,
+        event_session: NativeHandle | None = None,
+        event_operation_kind: int = HANDLE_KIND_OPERATION,
+        event_operation_id: int | None = None,
+        event_operation_generation: int = 0,
+        event_operation_flags: int = 0,
+        event_diagnostic: NativeRuntimeDiagnostic = _NATIVE_RUNTIME_DIAGNOSTIC_OK,
+    ) -> None:
+        self.state = state
+        self.operation_id = operation_id
+        self.frame_id = frame_id
+        self.payload = payload
+        self.diagnostic = diagnostic
+        self._event = event
+        self._event_kind = event.kind if event is not None else event_kind
+        self._event_connection = event.connection if event is not None else event_connection
+        self._event_session = event.session if event is not None else event_session
+        self._event_operation_kind = event.operation.kind if event is not None else event_operation_kind
+        self._event_operation_id = (
+            event.operation.id
+            if event is not None
+            else (operation_id if event_operation_id is None else event_operation_id)
+        )
+        self._event_operation_generation = (
+            event.operation.generation if event is not None else event_operation_generation
+        )
+        self._event_operation_flags = event.operation.flags if event is not None else event_operation_flags
+        self._event_diagnostic = event.diagnostic if event is not None else event_diagnostic
+
+    @property
+    def event(self) -> NativeRuntimeEvent:
+        event = self._event
+        if event is not None:
+            return event
+        operation = object.__new__(NativeHandle)
+        object.__setattr__(operation, "kind", self._event_operation_kind)
+        object.__setattr__(operation, "id", self._event_operation_id)
+        object.__setattr__(operation, "generation", self._event_operation_generation)
+        object.__setattr__(operation, "flags", self._event_operation_flags)
+        event = NativeRuntimeEvent(
+            self._event_kind,
+            self._event_connection,
+            self._event_session,
+            operation,
+            self.frame_id,
+            self.payload,
+            self._event_diagnostic,
+        )
+        self._event = event
+        return event
 
     @classmethod
     def from_event(
@@ -1762,14 +1843,7 @@ def _submit_result_from_ffi_event(
     object.__setattr__(operation, "generation", int(raw_operation.generation))
     object.__setattr__(operation, "flags", int(raw_operation.flags))
     frame_id = int(event.frame_id)
-    runtime_event = object.__new__(NativeRuntimeEvent)
-    object.__setattr__(runtime_event, "kind", kind)
-    object.__setattr__(runtime_event, "connection", connection)
-    object.__setattr__(runtime_event, "session", session)
-    object.__setattr__(runtime_event, "operation", operation)
-    object.__setattr__(runtime_event, "frame_id", frame_id)
-    object.__setattr__(runtime_event, "payload", payload)
-    object.__setattr__(runtime_event, "diagnostic", diagnostic)
+    runtime_event = NativeRuntimeEvent(kind, connection, session, operation, frame_id, payload, diagnostic)
     if state is not None:
         selected_state = NativeOperationLifecycle(state)
     elif status.status_code == FFI_STATUS_OK and kind != EVENT_KIND_ERROR:
@@ -1780,14 +1854,7 @@ def _submit_result_from_ffi_event(
         )
     else:
         selected_state = NativeOperationLifecycle.FAILED
-    result = object.__new__(NativeRuntimeResult)
-    object.__setattr__(result, "state", selected_state)
-    object.__setattr__(result, "operation_id", operation.id)
-    object.__setattr__(result, "frame_id", frame_id)
-    object.__setattr__(result, "payload", payload)
-    object.__setattr__(result, "event", runtime_event)
-    object.__setattr__(result, "diagnostic", structured_diagnostic)
-    return result
+    return NativeRuntimeResult(selected_state, operation.id, frame_id, payload, runtime_event, structured_diagnostic)
 
 
 def _submit_result_from_ok_result_pushed_ffi_event(
@@ -1804,22 +1871,23 @@ def _submit_result_from_ok_result_pushed_ffi_event(
     object.__setattr__(operation, "generation", int(raw_operation.generation))
     object.__setattr__(operation, "flags", int(raw_operation.flags))
     frame_id = int(event.frame_id)
-    runtime_event = object.__new__(NativeRuntimeEvent)
-    object.__setattr__(runtime_event, "kind", EVENT_KIND_RESULT_PUSHED)
-    object.__setattr__(runtime_event, "connection", connection)
-    object.__setattr__(runtime_event, "session", session)
-    object.__setattr__(runtime_event, "operation", operation)
-    object.__setattr__(runtime_event, "frame_id", frame_id)
-    object.__setattr__(runtime_event, "payload", payload)
-    object.__setattr__(runtime_event, "diagnostic", _NATIVE_RUNTIME_DIAGNOSTIC_OK)
-    result = object.__new__(NativeRuntimeResult)
-    object.__setattr__(result, "state", NativeOperationLifecycle.COMPLETED)
-    object.__setattr__(result, "operation_id", operation.id)
-    object.__setattr__(result, "frame_id", frame_id)
-    object.__setattr__(result, "payload", payload)
-    object.__setattr__(result, "event", runtime_event)
-    object.__setattr__(result, "diagnostic", _NATIVE_STRUCTURED_DIAGNOSTIC_OK)
-    return result
+    runtime_event = NativeRuntimeEvent(
+        EVENT_KIND_RESULT_PUSHED,
+        connection,
+        session,
+        operation,
+        frame_id,
+        payload,
+        _NATIVE_RUNTIME_DIAGNOSTIC_OK,
+    )
+    return NativeRuntimeResult(
+        NativeOperationLifecycle.COMPLETED,
+        operation.id,
+        frame_id,
+        payload,
+        runtime_event,
+        _NATIVE_STRUCTURED_DIAGNOSTIC_OK,
+    )
 
 
 def _submit_result_from_compact_ffi_result(
@@ -1859,31 +1927,26 @@ def _submit_result_from_compact_ffi_result(
         )
 
     raw_operation = compact.operation
-    operation = object.__new__(NativeHandle)
-    object.__setattr__(operation, "kind", int(raw_operation.kind))
-    object.__setattr__(operation, "id", int(raw_operation.id or compact.operation_id))
-    object.__setattr__(operation, "generation", int(raw_operation.generation))
-    object.__setattr__(operation, "flags", int(raw_operation.flags))
+    operation_id = int(raw_operation.id or compact.operation_id)
     frame_id = int(compact.frame_id)
     payload = _compact_result_payload(compact.payload, result_payload)
     event_kind = int(compact.event_kind)
-    runtime_event = object.__new__(NativeRuntimeEvent)
-    object.__setattr__(runtime_event, "kind", event_kind)
-    object.__setattr__(runtime_event, "connection", connection)
-    object.__setattr__(runtime_event, "session", session)
-    object.__setattr__(runtime_event, "operation", operation)
-    object.__setattr__(runtime_event, "frame_id", frame_id)
-    object.__setattr__(runtime_event, "payload", payload)
-    object.__setattr__(runtime_event, "diagnostic", diagnostic)
-
-    result = object.__new__(NativeRuntimeResult)
-    object.__setattr__(result, "state", _compact_result_state(compact, status=status, state=state))
-    object.__setattr__(result, "operation_id", int(compact.operation_id or operation.id))
-    object.__setattr__(result, "frame_id", frame_id)
-    object.__setattr__(result, "payload", payload)
-    object.__setattr__(result, "event", runtime_event)
-    object.__setattr__(result, "diagnostic", structured_diagnostic)
-    return result
+    return NativeRuntimeResult(
+        _compact_result_state(compact, status=status, state=state),
+        int(compact.operation_id or operation_id),
+        frame_id,
+        payload,
+        None,
+        structured_diagnostic,
+        event_kind=event_kind,
+        event_connection=connection,
+        event_session=session,
+        event_operation_kind=int(raw_operation.kind),
+        event_operation_id=operation_id,
+        event_operation_generation=int(raw_operation.generation),
+        event_operation_flags=int(raw_operation.flags),
+        event_diagnostic=diagnostic,
+    )
 
 
 def _submit_result_from_ok_compact_ffi_result(
@@ -1894,28 +1957,28 @@ def _submit_result_from_ok_compact_ffi_result(
     result_payload: bytes | bytearray | memoryview,
 ) -> NativeRuntimeResult:
     raw_operation = compact.operation
-    operation = object.__new__(NativeHandle)
-    object.__setattr__(operation, "kind", int(raw_operation.kind))
-    object.__setattr__(operation, "id", int(raw_operation.id or compact.operation_id))
-    object.__setattr__(operation, "generation", int(raw_operation.generation))
-    object.__setattr__(operation, "flags", int(raw_operation.flags))
+    operation_id = int(raw_operation.id or compact.operation_id)
     frame_id = int(compact.frame_id)
-    payload = _compact_result_payload(compact.payload, result_payload)
-    runtime_event = object.__new__(NativeRuntimeEvent)
-    object.__setattr__(runtime_event, "kind", EVENT_KIND_RESULT_PUSHED)
-    object.__setattr__(runtime_event, "connection", connection)
-    object.__setattr__(runtime_event, "session", session)
-    object.__setattr__(runtime_event, "operation", operation)
-    object.__setattr__(runtime_event, "frame_id", frame_id)
-    object.__setattr__(runtime_event, "payload", payload)
-    object.__setattr__(runtime_event, "diagnostic", _NATIVE_RUNTIME_DIAGNOSTIC_OK)
+    payload_view = compact.payload
+    if isinstance(result_payload, bytes) and int(payload_view.len) == len(result_payload):
+        payload = result_payload
+    else:
+        payload = _copy_buffer_view(payload_view)
     result = object.__new__(NativeRuntimeResult)
-    object.__setattr__(result, "state", NativeOperationLifecycle.COMPLETED)
-    object.__setattr__(result, "operation_id", int(compact.operation_id or operation.id))
-    object.__setattr__(result, "frame_id", frame_id)
-    object.__setattr__(result, "payload", payload)
-    object.__setattr__(result, "event", runtime_event)
-    object.__setattr__(result, "diagnostic", _NATIVE_STRUCTURED_DIAGNOSTIC_OK)
+    result.state = NativeOperationLifecycle.COMPLETED
+    result.operation_id = int(compact.operation_id or operation_id)
+    result.frame_id = frame_id
+    result.payload = payload
+    result.diagnostic = _NATIVE_STRUCTURED_DIAGNOSTIC_OK
+    result._event = None
+    result._event_kind = EVENT_KIND_RESULT_PUSHED
+    result._event_connection = connection
+    result._event_session = session
+    result._event_operation_kind = int(raw_operation.kind)
+    result._event_operation_id = operation_id
+    result._event_operation_generation = int(raw_operation.generation)
+    result._event_operation_flags = int(raw_operation.flags)
+    result._event_diagnostic = _NATIVE_RUNTIME_DIAGNOSTIC_OK
     return result
 
 
@@ -1944,35 +2007,26 @@ def _submit_result_from_cffi_api_result(
         if diagnostic is _NATIVE_RUNTIME_DIAGNOSTIC_OK
         else NativeStructuredDiagnostic.from_runtime_diagnostic(diagnostic)
     )
-    operation = object.__new__(NativeHandle)
-    object.__setattr__(operation, "kind", HANDLE_KIND_OPERATION)
-    object.__setattr__(operation, "id", int(compact.operation_id))
-    object.__setattr__(operation, "generation", 0)
-    object.__setattr__(operation, "flags", 0)
+    operation_id = int(compact.operation_id)
     frame_id = int(compact.frame_id)
     payload = _cffi_api_result_payload(int(compact.payload_len), result_payload)
     event_kind = int(compact.event_kind)
-    runtime_event = object.__new__(NativeRuntimeEvent)
-    object.__setattr__(runtime_event, "kind", event_kind)
-    object.__setattr__(runtime_event, "connection", connection)
-    object.__setattr__(runtime_event, "session", session)
-    object.__setattr__(runtime_event, "operation", operation)
-    object.__setattr__(runtime_event, "frame_id", frame_id)
-    object.__setattr__(runtime_event, "payload", payload)
-    object.__setattr__(runtime_event, "diagnostic", diagnostic)
-
-    result = object.__new__(NativeRuntimeResult)
-    object.__setattr__(
-        result,
-        "state",
+    return NativeRuntimeResult(
         _compact_result_state(compact, status=status, state=state),
+        operation_id,
+        frame_id,
+        payload,
+        None,
+        structured_diagnostic,
+        event_kind=event_kind,
+        event_connection=connection,
+        event_session=session,
+        event_operation_kind=HANDLE_KIND_OPERATION,
+        event_operation_id=operation_id,
+        event_operation_generation=0,
+        event_operation_flags=0,
+        event_diagnostic=diagnostic,
     )
-    object.__setattr__(result, "operation_id", operation.id)
-    object.__setattr__(result, "frame_id", frame_id)
-    object.__setattr__(result, "payload", payload)
-    object.__setattr__(result, "event", runtime_event)
-    object.__setattr__(result, "diagnostic", structured_diagnostic)
-    return result
 
 
 def _compact_result_payload(view: _NnrpBufferView, result_payload: bytes | bytearray | memoryview) -> bytes:
@@ -2729,7 +2783,15 @@ class NativeRuntimeSession:
                 object.__setattr__(self, "_submit_result_payload_view", submit_payload_view)
                 object.__setattr__(self, "_submit_result_payload_owner", _submit_payload_owner)
         selected_result_payload = payload if result_payload is None else result_payload
-        if (
+        if selected_result_payload is payload:
+            result_payload_view = submit_payload_view
+            _result_payload_owner = _submit_payload_owner
+            assign_result_payload = selected_result_payload is not self._submit_result_result_payload_cache
+            if assign_result_payload and isinstance(selected_result_payload, bytes):
+                object.__setattr__(self, "_submit_result_result_payload_cache", selected_result_payload)
+                object.__setattr__(self, "_submit_result_result_payload_view", result_payload_view)
+                object.__setattr__(self, "_submit_result_result_payload_owner", _result_payload_owner)
+        elif (
             isinstance(selected_result_payload, bytes)
             and selected_result_payload is self._submit_result_result_payload_cache
         ):
@@ -2778,16 +2840,19 @@ class NativeRuntimeSession:
             object.__setattr__(self, "_submit_result_max_events", selected_max_events)
         request.operation_id = operation_id
         request.frame_id = frame_id
-        cffi_result = self._try_submit_result_cffi_api(
-            operation_id=operation_id,
-            frame_id=frame_id,
-            payload=payload,
-            selected_result_payload=selected_result_payload,
-            state=state,
-            max_events=selected_max_events,
-        )
-        if cffi_result is not None:
-            return cffi_result
+        cffi_api = self.entrypoints.cffi_submit_result_api
+        if cffi_api is not None:
+            cffi_result = self._try_submit_result_cffi_api(
+                cffi_api=cffi_api,
+                operation_id=operation_id,
+                frame_id=frame_id,
+                payload=payload,
+                selected_result_payload=selected_result_payload,
+                state=state,
+                max_events=selected_max_events,
+            )
+            if cffi_result is not None:
+                return cffi_result
         compact_result = self._submit_result_compact_result
         status = self._submit_result_client_submit_result_compact(
             request,
@@ -2871,6 +2936,7 @@ class NativeRuntimeSession:
     def _try_submit_result_cffi_api(
         self,
         *,
+        cffi_api: _NativeCffiSubmitResultApi,
         operation_id: int,
         frame_id: int,
         payload: bytes | bytearray | memoryview,
@@ -2878,8 +2944,7 @@ class NativeRuntimeSession:
         state: NativeOperationLifecycle | str | None,
         max_events: int,
     ) -> NativeRuntimeResult | None:
-        cffi_api = self.entrypoints.cffi_submit_result_api
-        if cffi_api is None or selected_result_payload is not payload:
+        if selected_result_payload is not payload:
             return None
 
         if self._cffi_submit_result_out is None:
@@ -3394,14 +3459,18 @@ def _void_pointer(value: int) -> ctypes.c_void_p:
 
 
 def _buffer_view_from_payload(payload: bytes | bytearray | memoryview) -> tuple[_NnrpBufferView, object | None]:
+    if isinstance(payload, bytes):
+        length = len(payload)
+        if length == 0:
+            return _NnrpBufferView(None, 0), None
+        buffer = ctypes.c_char_p(payload)
+        return _NnrpBufferView(ctypes.cast(buffer, ctypes.c_void_p), length), buffer
+
     view = memoryview(payload)
     if view.nbytes == 0:
         return _NnrpBufferView(None, 0), None
     if not view.contiguous:
         raise NativeHandleError("native submit payload must be contiguous")
-    if isinstance(payload, bytes):
-        buffer = ctypes.c_char_p(payload)
-        return _NnrpBufferView(ctypes.cast(buffer, ctypes.c_void_p), view.nbytes), buffer
     try:
         buffer = (ctypes.c_char * view.nbytes).from_buffer(view)
     except TypeError:

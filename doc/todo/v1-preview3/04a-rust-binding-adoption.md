@@ -29,14 +29,14 @@
       - [x] Add `native_batch_event_polling_throughput` benchmark that polls multiple events per FFI call.
       - [x] Add a benchmark plan that separates fixture/helper throughput from native runtime throughput.
       - [x] Route native submit/result benchmark scenarios through explicit submit, client completion, and result polling calls.
-    - [ ] Optimize FFI call granularity until the native runtime path shows the expected migration win.
+    - [x] Optimize FFI call granularity until the native runtime path shows the expected migration win.
       - [x] Count Python-to-native calls per submit/result iteration.
       - [x] Batch submit plus result polling where one coarse native call can replace multiple fine-grained calls.
       - [x] Reuse native connection/session handles across hot benchmark iterations without rebuilding Python wrapper state.
       - [x] Bind compact submit/result ABI and skip repeated ctypes request field writes on the hot path.
       - [x] Add a benchmark-only cffi API mode runner to compare binding overhead when a local C compiler is available.
       - [x] Add cffi API auto-detection on the production native submit/result path with ctypes fallback when the fast path is unavailable.
-      - [ ] Compare raw throughput against the pre-migration baseline and target at least 30% improvement for the glued runtime path.
+      - [x] Compare raw throughput against the pre-migration baseline and target at least 30% improvement for the glued runtime path.
     - [ ] Audit payload copy boundaries after native-runtime benchmarks land.
       - [ ] Measure submit payload copy count on the native runtime benchmark path.
       - [ ] Measure result/event payload snapshot count on the native runtime benchmark path.

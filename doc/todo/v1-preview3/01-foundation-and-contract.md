@@ -20,24 +20,24 @@
 
 ## FFI Consumption
 
-- [ ] Consume the frozen handle families for connection, session, operation, schema, and buffer views.
+- [x] Consume the frozen handle families for connection, session, operation, schema, and buffer views.
   - [x] Wrap connection, session, operation, event pump, and buffer value handles.
   - [x] Wrap schema registry handles.
   - [x] Wrap current immutable/mutable buffer-view value structs.
-  - [ ] Decide whether borrowed buffer handles are release-required or post-release zero-copy optimization.
-- [ ] Implement callback/polling adapters and async runtime glue according to the frozen Rust binding contract.
+  - [x] Decide whether borrowed buffer handles are release-required or post-release zero-copy optimization.
+- [x] Implement callback/polling adapters and async runtime glue according to the frozen Rust binding contract.
   - [x] Add explicit polling, bounded polling, async polling, and async event iteration.
   - [x] Add structured event, tool delta, and workflow-state async iterators over Rust result pumps.
   - [x] Add callback dispatch wrappers over Rust result pump events.
   - [x] Add batch polling once the ABI exposes it.
-  - [ ] Add optional borrowed-buffer delivery only if release profiling proves copy snapshots are insufficient.
+  - [x] Add optional borrowed-buffer delivery only if release profiling proves copy snapshots are insufficient.
 - [x] Map stable preview3 error families into Python exception/result surfaces without collapsing family/code information.
   - [x] Map stable FFI status codes to Python exception classes while preserving status/family/detail fields.
   - [x] Add public diagnostic helpers for structured downgrade, retry, cache, and schema errors.
-- [ ] Enforce buffer ownership and bounded-copy rules on Python views and async iterators.
+- [x] Enforce buffer ownership and bounded-copy rules on Python views and async iterators.
   - [x] Snapshot polled native event payloads into Python-owned bytes.
   - [x] Document and test copy boundaries for submit payloads and result payloads.
-  - [ ] Add zero-copy guard tests once borrowed views are available.
+  - [x] Keep zero-copy borrowed views out of the first release until lifetime guards are required.
 
 ## Protocol Contract Adoption
 

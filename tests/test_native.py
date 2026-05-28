@@ -1226,12 +1226,26 @@ def test_native_runtime_client_runs_connection_session_submit_close_roundtrip(tm
     submit_request = library.nnrp_client_submit.calls[0][0]
     assert submit_request.frame_id == 7
     assert submit_request.payload.len == 7
+    scheduled_submit_request = library.nnrp_client_submit.calls[1][0]
+    assert scheduled_submit_request.operation_id == 100
+    assert not hasattr(scheduled_submit_request, "parent_operation_id")
+    assert not hasattr(scheduled_submit_request, "operation_group_id")
+    assert not hasattr(scheduled_submit_request, "deadline_ms")
     assert library.nnrp_control.calls[0][0].control_code == 10
     assert library.nnrp_control.calls[0][0].payload.len == len(b"connection-control")
     assert library.nnrp_client_cancel.calls[0][0].frame_id == 8
     assert library.nnrp_client_cancel.calls[1][0].frame_id == 7
     assert library.nnrp_control.calls[1][0].control_code == 11
     assert library.nnrp_control.calls[1][0].payload.len == len(b"session-control")
+
+
+def test_native_submit_request_shape_matches_frozen_ffi_without_private_scheduling_fields() -> None:
+    assert [name for name, _field_type in _NnrpSubmitRequest._fields_] == [
+        "session",
+        "operation_id",
+        "frame_id",
+        "payload",
+    ]
 
 
 def test_native_connection_resumes_session_through_executable_resume_abi(tmp_path: Path) -> None:

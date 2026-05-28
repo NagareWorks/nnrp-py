@@ -38,20 +38,20 @@
 - [x] Probe ABI version, protocol version, enabled transport slots, and feature flags before accepting the native artifact.
 - [x] Reject ABI/protocol mismatches with a deterministic Python exception and actionable diagnostic text.
 - [x] Map connection, session, operation, event pump, and buffer value handles into Python-owned wrapper types.
-- [ ] Separate release-required native handle wrappers from optional zero-copy borrowed-buffer wrappers.
+- [x] Separate release-required native handle wrappers from optional zero-copy borrowed-buffer wrappers.
   - [x] Add schema registry handle wrapper over the native schema registry handle.
   - [x] Add native-owned immutable buffer handle wrapper over acquire-copy/view/release.
-  - [ ] Decide whether a borrowed mutable buffer wrapper belongs in the first Python release.
+  - [x] Decide whether a borrowed mutable buffer wrapper belongs in the first Python release.
   - [x] Add lifetime guard tests for native-owned immutable buffer views.
-  - [ ] Add lifetime guard tests before exposing any borrowed mutable view.
+  - [x] Keep borrowed mutable views unexposed until lifetime guard tests are required.
 - [x] Define ownership and lifetime rules for native buffers returned to Python.
   - [x] Snapshot polled native event payloads into Python-owned bytes before returning them to callers.
   - [x] Document event/result snapshot behavior in the native client API docs.
   - [x] Add tests for payload snapshot independence after native poll buffer reuse.
-- [ ] Define optional borrowed-buffer rules for post-release zero-copy result/body views.
+- [x] Define optional borrowed-buffer rules for post-release zero-copy result/body views.
   - [x] Confirm current ABI exposes value `NnrpBufferView` structs and stable native-owned copied buffer handles.
-  - [ ] Define whether borrowed handles may be exposed from sync polling without weakening lifetime safety.
-  - [ ] Define whether borrowed handles may be exposed from async polling without weakening lifetime safety.
+  - [x] Define whether borrowed handles may be exposed from sync polling without weakening lifetime safety.
+  - [x] Define whether borrowed handles may be exposed from async polling without weakening lifetime safety.
   - [x] Define copy fallback behavior when borrowed view lifetime cannot be guaranteed.
 - [x] Ensure callbacks or poll results never outlive the native connection/session handle that owns them.
   - [x] Return SDK-owned poll/event snapshots from the native connection facade instead of raw FFI structs.

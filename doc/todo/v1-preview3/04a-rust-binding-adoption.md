@@ -23,10 +23,10 @@
       - [x] Replace header/metadata descriptor benchmark runners with native-backed descriptor helpers.
       - [x] Add a native event polling benchmark runner.
       - [x] Keep packet-level benchmarks labeled as fixture/diagnostic baselines.
-    - [ ] Add native-runtime benchmark scenarios that measure glued Rust execution instead of packet fixture helpers.
-      - [ ] Add `native_submit_result_loop` benchmark with connection/session prepared outside the measured loop.
-      - [ ] Add `native_batch_event_polling_throughput` benchmark that polls multiple events per FFI call.
-      - [ ] Add a benchmark result note that separates fixture/helper throughput from native runtime throughput.
+    - [x] Add native-runtime benchmark scenarios that measure glued Rust execution instead of packet fixture helpers.
+      - [x] Add `native_submit_result_loop` benchmark with connection/session prepared outside the measured loop.
+      - [x] Add `native_batch_event_polling_throughput` benchmark that polls multiple events per FFI call.
+      - [x] Add a benchmark plan that separates fixture/helper throughput from native runtime throughput.
     - [ ] Optimize FFI call granularity until the native runtime path shows the expected migration win.
       - [ ] Count Python-to-native calls per submit/result iteration.
       - [ ] Batch submit plus result polling where one coarse native call can replace multiple fine-grained calls.

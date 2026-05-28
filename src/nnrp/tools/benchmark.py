@@ -356,6 +356,79 @@ def _run_native_event_polling(scenario_id: str, workload: dict[str, Any]) -> dic
     return _measured_latency_result(scenario_id, samples)
 
 
+def _run_native_batch_event_polling_throughput(scenario_id: str, workload: dict[str, Any]) -> dict[str, Any]:
+    duration_seconds = _positive_float(workload.get("duration_seconds"), default=10.0)
+    warmup_iterations = _non_negative_int(workload.get("warmup_iterations"), default=1_000)
+    max_events = _positive_int(workload.get("max_events"), default=8)
+    profile = _bool(workload.get("profile"), default=False)
+    try:
+        connection = load_native_client().bootstrap_connection(
+            connection_id=1,
+            generation=1,
+            transport_id=2,
+        )
+    except NativeArtifactError as error:
+        return _skip_result(scenario_id, f"native client unavailable: {error}")
+
+    def operation() -> None:
+        connection.poll_events_batch(max_events=max_events)
+
+    try:
+        for _ in range(warmup_iterations):
+            operation()
+
+        metrics = _measure_throughput_metrics(operation, duration_seconds, profile=profile)
+        return _measured_throughput_result(scenario_id, metrics)
+    finally:
+        connection.close()
+
+
+def _run_native_submit_result_loop(scenario_id: str, workload: dict[str, Any]) -> dict[str, Any]:
+    duration_seconds = _positive_float(workload.get("duration_seconds"), default=10.0)
+    warmup_iterations = _non_negative_int(workload.get("warmup_iterations"), default=1_000)
+    payload_bytes = _positive_int(workload.get("payload_bytes"), default=1024)
+    profile = _bool(workload.get("profile"), default=False)
+    try:
+        connection = load_native_client().connect(
+            connection_id=1,
+            generation=1,
+            transport_id=2,
+        )
+    except NativeArtifactError as error:
+        return _skip_result(scenario_id, f"native client unavailable: {error}")
+
+    session = connection.open_session(
+        requested_session_id=1,
+        generation=1,
+        profile_id=0,
+        schema_id=0,
+        schema_version=0,
+    )
+    payload = b"x" * payload_bytes
+    counter = 0
+
+    def operation() -> None:
+        nonlocal counter
+        counter += 1
+        session.submit_and_poll_result(
+            operation_id=counter,
+            frame_id=counter,
+            payload=payload,
+            max_events=1,
+        )
+
+    try:
+        for _ in range(warmup_iterations):
+            operation()
+
+        metrics = _measure_throughput_metrics(operation, duration_seconds, profile=profile)
+        return _measured_throughput_result(scenario_id, metrics)
+    except NativeWouldBlockError as error:
+        return _skip_result(scenario_id, f"native submit/result loop unavailable: {error}")
+    finally:
+        connection.close()
+
+
 def _run_native_submit_result_allocation_smoke(scenario_id: str, workload: dict[str, Any]) -> dict[str, Any]:
     iterations = _positive_int(workload.get("iterations"), default=1_000)
     warmup_iterations = _non_negative_int(workload.get("warmup_iterations"), default=min(100, iterations))
@@ -767,7 +840,9 @@ _SCENARIO_RUNNERS: dict[str, Callable[[str, dict[str, Any]], dict[str, Any]]] = 
     "typed_payload_pack_unpack": _run_typed_payload_pack_unpack,
     "native_schema_descriptor_roundtrip": _run_native_schema_descriptor_roundtrip,
     "native_event_polling": _run_native_event_polling,
+    "native_batch_event_polling_throughput": _run_native_batch_event_polling_throughput,
     "native_artifact_probe": _run_native_artifact_probe,
+    "native_submit_result_loop": _run_native_submit_result_loop,
     "native_submit_result_allocation_smoke": _run_native_submit_result_allocation_smoke,
     "runtime_probe": _run_runtime_probe,
     "session_lifecycle": _run_session_lifecycle,

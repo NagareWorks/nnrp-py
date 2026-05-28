@@ -157,6 +157,8 @@ class FakeSession:
         self.operations: list[FakeOperation] = []
         self.cancelled_frames: list[int] = []
         self.control_calls: list[tuple[int, bytes | bytearray | memoryview]] = []
+        self.flow_updates: list[int] = []
+        self.result_hints: list[bytes | bytearray | memoryview] = []
 
     def close(self) -> None:
         self.closed = True
@@ -193,6 +195,12 @@ class FakeSession:
     def cancel(self, *, frame_id: int) -> None:
         self.cancelled_frames.append(frame_id)
 
+    def send_flow_update(self, *, frame_id: int) -> None:
+        self.flow_updates.append(frame_id)
+
+    def send_result_hint(self, payload: bytes | bytearray | memoryview = b"") -> None:
+        self.result_hints.append(payload)
+
     def control(self, *, control_code: int, payload: bytes | bytearray | memoryview = b"") -> None:
         self.control_calls.append((control_code, payload))
 
@@ -204,11 +212,19 @@ class FakeOperation:
         self.frame_id = frame_id
         self.payload = payload
         self.cancelled = False
+        self.completed_payloads: list[bytes | bytearray | memoryview] = []
+        self.dropped = False
         self.parent_operation_id: int | None = None
         self.operation_group_id: int | None = None
 
     def cancel(self) -> None:
         self.cancelled = True
+
+    def complete(self, payload: bytes | bytearray | memoryview = b"") -> None:
+        self.completed_payloads.append(payload)
+
+    def drop(self) -> None:
+        self.dropped = True
 
 
 class FakeResult:
@@ -363,6 +379,23 @@ def test_native_client_connection_supports_operation_cancellation() -> None:
 
         assert operation.cancelled is True
         assert session.cancelled_frames == [7]
+
+
+def test_native_client_connection_supports_completion_drop_and_control_aliases() -> None:
+    backend = FakeBackend()
+    with connect_native_client_connection(backend=backend) as connection:
+        session = connection.open_session()
+        operation = session.submit_operation(operation_id=100, frame_id=7, payload=b"payload")
+
+        connection.complete_operation(operation, b"result")
+        connection.drop_operation(operation)
+        connection.send_flow_update(session, frame_id=7)
+        connection.send_result_hint(session, b"hint")
+
+        assert operation.completed_payloads == [b"result"]
+        assert operation.dropped is True
+        assert session.flow_updates == [7]
+        assert session.result_hints == [b"hint"]
 
 
 def test_native_client_connection_operation_scope_cancels_on_error() -> None:

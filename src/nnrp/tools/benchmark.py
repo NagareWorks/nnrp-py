@@ -410,12 +410,13 @@ def _run_native_submit_result_loop(scenario_id: str, workload: dict[str, Any]) -
     def operation() -> None:
         nonlocal counter
         counter += 1
-        session.submit_and_poll_result(
+        submitted = session.submit_operation(
             operation_id=counter,
             frame_id=counter,
             payload=payload,
-            max_events=1,
         )
+        session.complete_operation(submitted, payload)
+        session.poll_result(submitted, max_events=2)
 
     try:
         for _ in range(warmup_iterations):
@@ -455,12 +456,13 @@ def _run_native_submit_result_allocation_smoke(scenario_id: str, workload: dict[
     def operation() -> None:
         nonlocal counter
         counter += 1
-        session.submit_and_poll_result(
+        submitted = session.submit_operation(
             operation_id=counter,
             frame_id=counter,
             payload=payload,
-            max_events=1,
         )
+        session.complete_operation(submitted, payload)
+        session.poll_result(submitted, max_events=2)
 
     try:
         for _ in range(warmup_iterations):

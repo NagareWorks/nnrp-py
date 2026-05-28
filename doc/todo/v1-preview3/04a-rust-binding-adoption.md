@@ -3,6 +3,7 @@
 - [x] Consume the frozen Rust FFI surface from `nnrp-rs`.
   - [x] Bind and load the frozen preview3 runtime entrypoint table and request/event structs behind the native backend module.
   - [x] Add a native-backed facade for connect, bootstrap, open-session, submit, cancel, control, event polling, close, schema descriptors, typed payload binding validation, and recovery validation.
+  - [x] Bind client completion/drop/flow-update/result-hint helpers from the Rust native artifact ABI.
   - [x] Replace SDK runtime calls with the bound native entrypoints.
     - [x] Route adapter conformance smoke execution through the native backend selector.
     - [x] Route new client connection/session helpers through native backend handles.
@@ -27,6 +28,7 @@
       - [x] Add `native_submit_result_loop` benchmark with connection/session prepared outside the measured loop.
       - [x] Add `native_batch_event_polling_throughput` benchmark that polls multiple events per FFI call.
       - [x] Add a benchmark plan that separates fixture/helper throughput from native runtime throughput.
+      - [x] Route native submit/result benchmark scenarios through explicit submit, client completion, and result polling calls.
     - [ ] Optimize FFI call granularity until the native runtime path shows the expected migration win.
       - [ ] Count Python-to-native calls per submit/result iteration.
       - [ ] Batch submit plus result polling where one coarse native call can replace multiple fine-grained calls.

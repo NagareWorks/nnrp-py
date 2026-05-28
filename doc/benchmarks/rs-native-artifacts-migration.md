@@ -26,7 +26,7 @@ The existing Python SDK owns helper-level packet construction, transport-oriente
 
 ## Pinned Native Contract
 
-The current preview3 binding work consumes `nnrp-rs` native artifact version `1.0.0-preview.3.3`.
+The current preview3 binding work consumes `nnrp-rs` native artifact version `1.0.0-preview.3.4`.
 
 This version is the native artifact contract pin for the current migration branch and includes:
 

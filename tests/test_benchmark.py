@@ -576,6 +576,8 @@ class FakeNativeConnection:
     def __init__(self) -> None:
         self.polled_batches: list[int] = []
         self.submitted_payloads: list[bytes] = []
+        self.completed_payloads: list[bytes] = []
+        self.polled_results: list[int | None] = []
         self.closed = False
 
     def open_session(
@@ -602,18 +604,35 @@ class FakeNativeSession:
     def __init__(self, connection: FakeNativeConnection) -> None:
         self.connection = connection
 
-    def submit_and_poll_result(
+    def submit_operation(
         self,
         *,
         operation_id: int,
         frame_id: int,
         payload: bytes | bytearray | memoryview = b"",
-        max_events: int | None = None,
     ):
         assert operation_id == frame_id
-        assert max_events == 1
         self.connection.submitted_payloads.append(bytes(payload))
+        return FakeNativeOperation(operation_id, frame_id)
+
+    def complete_operation(
+        self,
+        operation: "FakeNativeOperation",
+        payload: bytes | bytearray | memoryview = b"",
+    ) -> None:
+        self.connection.completed_payloads.append(bytes(payload))
+
+    def poll_result(self, operation: "FakeNativeOperation", *, max_events: int | None = None):
+        self.connection.polled_results.append(max_events)
+        assert operation.operation_id == operation.frame_id
+        assert max_events == 2
         return object()
+
+
+class FakeNativeOperation:
+    def __init__(self, operation_id: int, frame_id: int) -> None:
+        self.operation_id = operation_id
+        self.frame_id = frame_id
 
 
 class WouldBlockNativeClient(FakeNativeClient):
@@ -636,14 +655,23 @@ class WouldBlockNativeConnection(FakeNativeConnection):
 
 
 class WouldBlockNativeSession:
-    def submit_and_poll_result(
+    def submit_operation(
         self,
         *,
         operation_id: int,
         frame_id: int,
         payload: bytes | bytearray | memoryview = b"",
-        max_events: int | None = None,
     ):
+        return FakeNativeOperation(operation_id, frame_id)
+
+    def complete_operation(
+        self,
+        operation: FakeNativeOperation,
+        payload: bytes | bytearray | memoryview = b"",
+    ) -> None:
+        return None
+
+    def poll_result(self, operation: FakeNativeOperation, *, max_events: int | None = None):
         raise NativeWouldBlockError(NativeStatus(FFI_STATUS_WOULD_BLOCK))
 
 

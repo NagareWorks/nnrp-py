@@ -15,7 +15,7 @@ from typing import Any, Protocol, TypeVar, runtime_checkable
 EXPECTED_PROTOCOL_MAJOR = 1
 EXPECTED_PROTOCOL_WIRE_FORMAT = 0
 EXPECTED_ABI_MAJOR = 1
-MINIMUM_ABI_MINOR = 2
+MINIMUM_ABI_MINOR = 3
 TRANSPORT_SLOT_QUIC = 0x00000001
 TRANSPORT_SLOT_TCP = 0x00000002
 RUNTIME_FEATURE_PROTOCOL_CORE = 0x0000000000000001
@@ -32,6 +32,7 @@ RUNTIME_FEATURE_CACHE_LEASE_OPS = 0x0000000000000400
 RUNTIME_FEATURE_SCHEMA_REGISTRY_HANDLES = 0x0000000000000800
 RUNTIME_FEATURE_BUFFER_HANDLES = 0x0000000000001000
 RUNTIME_FEATURE_EXECUTABLE_RESUME = 0x0000000000002000
+RUNTIME_FEATURE_CLIENT_COMPLETION_HELPERS = 0x0000000000004000
 SCHEMA_REGISTRY_ACTION_INSTALLED = 0
 SCHEMA_REGISTRY_ACTION_ALREADY_INSTALLED = 1
 SCHEMA_REGISTRY_ACTION_UPDATED = 2
@@ -59,6 +60,7 @@ REQUIRED_RUNTIME_FEATURES = (
     | RUNTIME_FEATURE_SCHEMA_REGISTRY_HANDLES
     | RUNTIME_FEATURE_BUFFER_HANDLES
     | RUNTIME_FEATURE_EXECUTABLE_RESUME
+    | RUNTIME_FEATURE_CLIENT_COMPLETION_HELPERS
 )
 REQUIRED_TRANSPORT_SLOTS = TRANSPORT_SLOT_TCP
 FFI_STATUS_OK = 0
@@ -118,6 +120,7 @@ EVENT_KIND_FLOW_UPDATED = 8
 EVENT_KIND_CONTROL = 9
 EVENT_KIND_ERROR = 10
 EVENT_KIND_RESULT_HINT = 11
+CONTROL_CODE_RESULT_HINT = 0x18
 DEFAULT_ARTIFACT_ROOT_ENV = "NNRP_NATIVE_ARTIFACT_ROOT"
 _CallbackEventT = TypeVar("_CallbackEventT")
 
@@ -595,6 +598,19 @@ class _NnrpClientCancelRequest(ctypes.Structure):
     ]
 
 
+class _NnrpClientCompleteOperationRequest(ctypes.Structure):
+    _fields_ = [
+        ("operation", _NnrpHandle),
+        ("payload", _NnrpBufferView),
+    ]
+
+
+class _NnrpClientDropOperationRequest(ctypes.Structure):
+    _fields_ = [
+        ("operation", _NnrpHandle),
+    ]
+
+
 class _NnrpServerAcceptRequest(ctypes.Structure):
     _fields_ = [
         ("server", _NnrpHandle),
@@ -774,6 +790,24 @@ class NativeRuntimeEntrypoints:
         )
         self.client_cancel = _bind_native_function(
             library, "nnrp_client_cancel", _NnrpFfiStatus, [_NnrpClientCancelRequest]
+        )
+        self.client_complete_operation = _bind_native_function(
+            library,
+            "nnrp_client_complete_operation",
+            _NnrpFfiStatus,
+            [_NnrpClientCompleteOperationRequest],
+        )
+        self.client_drop_operation = _bind_native_function(
+            library,
+            "nnrp_client_drop_operation",
+            _NnrpFfiStatus,
+            [_NnrpClientDropOperationRequest],
+        )
+        self.client_send_flow_update = _bind_native_function(
+            library, "nnrp_client_send_flow_update", _NnrpFfiStatus, [_NnrpServerFlowUpdateRequest]
+        )
+        self.client_send_result_hint = _bind_native_function(
+            library, "nnrp_client_send_result_hint", _NnrpFfiStatus, [_NnrpControlRequest]
         )
         self.client_await_event = _bind_native_function(
             library,
@@ -1554,6 +1588,17 @@ class NativeRuntimeOperation:
         status = self.entrypoints.client_cancel(request)
         raise_for_native_status(status)
 
+    def complete(self, payload: bytes | bytearray | memoryview = b"") -> None:
+        payload_view, _payload_owner = _buffer_view_from_payload(payload)
+        request = _NnrpClientCompleteOperationRequest(self.handle.to_ffi(), payload_view)
+        status = self.entrypoints.client_complete_operation(request)
+        raise_for_native_status(status)
+
+    def drop(self) -> None:
+        request = _NnrpClientDropOperationRequest(self.handle.to_ffi())
+        status = self.entrypoints.client_drop_operation(request)
+        raise_for_native_status(status)
+
     def cache_backend(self, *, now_ms: int = 0, ttl_ms: int = 0, expected_version: int = 0) -> NativeCacheLeaseBackend:
         return NativeCacheLeaseBackend(
             self.entrypoints,
@@ -2126,6 +2171,18 @@ class NativeRuntimeSession:
 
         raise NativeWouldBlockError(NativeStatus(FFI_STATUS_WOULD_BLOCK))
 
+    def complete_operation(
+        self,
+        operation: NativeRuntimeOperation,
+        payload: bytes | bytearray | memoryview = b"",
+    ) -> None:
+        self._ensure_open()
+        operation.complete(payload)
+
+    def drop_operation(self, operation: NativeRuntimeOperation) -> None:
+        self._ensure_open()
+        operation.drop()
+
     def submit_and_poll_result(
         self,
         *,
@@ -2182,6 +2239,19 @@ class NativeRuntimeSession:
         self._ensure_open()
         request = _NnrpClientCancelRequest(self.handle.to_ffi(), frame_id)
         status = self.entrypoints.client_cancel(request)
+        raise_for_native_status(status)
+
+    def send_flow_update(self, *, frame_id: int) -> None:
+        self._ensure_open()
+        request = _NnrpServerFlowUpdateRequest(self.handle.to_ffi(), frame_id)
+        status = self.entrypoints.client_send_flow_update(request)
+        raise_for_native_status(status)
+
+    def send_result_hint(self, payload: bytes | bytearray | memoryview = b"") -> None:
+        self._ensure_open()
+        payload_view, _payload_owner = _buffer_view_from_payload(payload)
+        request = _NnrpControlRequest(self.handle.to_ffi(), CONTROL_CODE_RESULT_HINT, payload_view)
+        status = self.entrypoints.client_send_result_hint(request)
         raise_for_native_status(status)
 
     def control(self, *, control_code: int, payload: bytes | bytearray | memoryview = b"") -> None:

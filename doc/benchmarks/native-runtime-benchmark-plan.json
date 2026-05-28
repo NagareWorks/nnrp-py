@@ -59,6 +59,61 @@
         "warmup_iterations": 1000,
         "duration_seconds": 10
       }
+    },
+    {
+      "id": "l4.native.submit_result.profile",
+      "category": "memory",
+      "feature": "benchmark.native.submit_result.profile",
+      "required_capabilities": [
+        "session.open_close",
+        "operation.submit",
+        "event.polling.batch"
+      ],
+      "description": "Measure native runtime submit/result throughput with CPU and peak traced memory profiling enabled.",
+      "workload": {
+        "operation": "native_submit_result_loop",
+        "payload": "inline_payload",
+        "payload_bytes": 1024,
+        "warmup_iterations": 1000,
+        "duration_seconds": 10,
+        "profile": true
+      }
+    },
+    {
+      "id": "l4.native.submit_result.cffi_api.profile",
+      "category": "memory",
+      "feature": "benchmark.native.submit_result.cffi_api.profile",
+      "required_capabilities": [
+        "session.open_close",
+        "operation.submit",
+        "event.polling.batch"
+      ],
+      "description": "Measure native cffi API submit/result throughput with CPU and peak traced memory profiling enabled.",
+      "workload": {
+        "operation": "native_submit_result_cffi_api_loop",
+        "payload": "inline_payload",
+        "payload_bytes": 1024,
+        "warmup_iterations": 1000,
+        "duration_seconds": 10,
+        "profile": true
+      }
+    },
+    {
+      "id": "l4.native.event_polling.profile",
+      "category": "memory",
+      "feature": "benchmark.native.event_polling.profile",
+      "required_capabilities": [
+        "event.polling.batch"
+      ],
+      "description": "Measure native batch event polling throughput with CPU and peak traced memory profiling enabled.",
+      "workload": {
+        "operation": "native_batch_event_polling_throughput",
+        "payload": "empty_batch",
+        "max_events": 8,
+        "warmup_iterations": 1000,
+        "duration_seconds": 10,
+        "profile": true
+      }
     }
   ]
 }

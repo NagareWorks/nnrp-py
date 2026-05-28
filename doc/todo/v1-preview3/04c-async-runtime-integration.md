@@ -41,10 +41,10 @@
     - [x] Run the SDK-local plan with a native artifact that can complete submit/result polling.
   - [x] Record p50/p95/p99 latency deltas.
   - [x] Record raw throughput deltas.
-  - [ ] Record profiled CPU/memory baselines without mixing them into raw throughput comparisons.
+  - [x] Record profiled CPU/memory baselines without mixing them into raw throughput comparisons.
   - [x] Record artifact version, Python version, OS/arch, and CPU in the post-migration environment row.
-- [ ] Add a second-stage performance optimization pass for the native-glue runtime path.
+- [x] Add a second-stage performance optimization pass for the native-glue runtime path.
   - [x] Run raw throughput benchmarks for native runtime scenarios separately from fixture/helper scenarios.
-  - [ ] Record profiled CPU/memory baselines for those native runtime scenarios after raw throughput is stable.
+  - [x] Record profiled CPU/memory baselines for those native runtime scenarios after raw throughput is stable.
   - [x] Investigate any native runtime scenario that does not reach the expected 30%+ improvement target.
   - [x] Feed confirmed bottlenecks back into FFI batching, handle reuse, or zero-copy follow-up work.

@@ -68,10 +68,11 @@ Before publishing native wheels, the release PR must include:
 1. The pinned `nnrp-rs` artifact version.
 2. The platform wheel matrix and embedded artifact tags.
 3. Wheel inspection output proving each wheel embeds exactly one matching native artifact.
-4. Wheel inspection output proving each native wheel embeds a compiled cffi API fast-path module for its wheel tag.
+4. Wheel inspection output proving each published native wheel embeds a compiled cffi API fast-path module for its wheel tag.
 5. Post-migration benchmark results captured on the release artifact.
 6. Confirmation that the sdist remains free of prebuilt native libraries unless release policy changed.
 7. Confirmation that GitHub Release assets are uploaded as top-level wheel files, not as a nested archive containing wheels and a duplicate source archive.
+8. Confirmation that native artifact tags without compiled cffi API coverage are not published as wheels for that release.
 
 Reviewer reject conditions:
 

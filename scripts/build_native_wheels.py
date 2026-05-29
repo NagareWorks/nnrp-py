@@ -44,6 +44,7 @@ def build_native_wheels(
     clean: bool = False,
     cffi_dir: Path | None = None,
     require_cffi_api: bool = False,
+    publish_cffi_api_artifacts_only: bool = False,
     abi3_python_tag: str = "cp311",
 ) -> list[Path]:
     if clean and output_dir.exists():
@@ -68,6 +69,8 @@ def build_native_wheels(
 
         entries = {name: data for name, data in base_entries.items() if _keep_entry_for_artifact(name, artifact_tag)}
         cffi_entries = _cffi_entries_for_artifact(cffi_dir, artifact_tag)
+        if publish_cffi_api_artifacts_only and not cffi_entries:
+            continue
         if require_cffi_api and not cffi_entries:
             raise ValueError(f"missing compiled cffi API artifact for native artifact {artifact_tag}")
         entries.update(cffi_entries)
@@ -89,6 +92,8 @@ def build_native_wheels(
             for name, data in sorted(entries.items()):
                 archive.writestr(name, data)
         built.append(output_wheel)
+    if not built:
+        raise ValueError("no platform wheels were built")
     return built
 
 
@@ -248,6 +253,11 @@ def main() -> int:
     )
     parser.add_argument("--require-cffi-api", action="store_true")
     parser.add_argument(
+        "--publish-cffi-api-artifacts-only",
+        action="store_true",
+        help="Publish only native artifact wheels that have compiled cffi API entries.",
+    )
+    parser.add_argument(
         "--abi3-python-tag",
         default="cp311",
         help="Minimum Python tag to use for abi3 cffi API wheels, e.g. cp311, 3.11, or 311.",
@@ -260,6 +270,7 @@ def main() -> int:
         clean=args.clean,
         cffi_dir=args.cffi_dir,
         require_cffi_api=args.require_cffi_api,
+        publish_cffi_api_artifacts_only=args.publish_cffi_api_artifacts_only,
         abi3_python_tag=args.abi3_python_tag,
     ):
         print(wheel)

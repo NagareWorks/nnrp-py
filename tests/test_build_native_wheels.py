@@ -162,6 +162,39 @@ def test_build_native_wheels_requires_cffi_api_for_each_native_artifact(tmp_path
         build_native_wheels(source, tmp_path / "dist", cffi_dir=cffi_dir, require_cffi_api=True)
 
 
+def test_build_native_wheels_can_publish_only_artifacts_with_compiled_cffi_api(tmp_path: Path) -> None:
+    source = _write_staging_wheel(tmp_path / "nnrp_py-1.0.0rc3-py3-none-any.whl")
+    cffi_dir = tmp_path / "cffi-api"
+    linux_cffi = cffi_dir / "linux-x86_64" / "nnrp" / "_nnrp_cffi_api_submit_result.abi3.so"
+    linux_cffi.parent.mkdir(parents=True)
+    linux_cffi.write_bytes(b"linux-abi3-cffi")
+
+    built = build_native_wheels(
+        source,
+        tmp_path / "dist",
+        cffi_dir=cffi_dir,
+        require_cffi_api=True,
+        publish_cffi_api_artifacts_only=True,
+    )
+
+    assert [wheel.name for wheel in built] == [
+        "nnrp_py-1.0.0rc3-cp311-abi3-manylinux_2_28_x86_64.whl",
+    ]
+
+
+def test_build_native_wheels_rejects_empty_publishable_cffi_api_set(tmp_path: Path) -> None:
+    source = _write_staging_wheel(tmp_path / "nnrp_py-1.0.0rc3-py3-none-any.whl")
+
+    with pytest.raises(ValueError, match="no platform wheels were built"):
+        build_native_wheels(
+            source,
+            tmp_path / "dist",
+            cffi_dir=tmp_path / "missing",
+            require_cffi_api=True,
+            publish_cffi_api_artifacts_only=True,
+        )
+
+
 def test_build_native_wheels_ignores_missing_cffi_dir_and_rejects_file_path(tmp_path: Path) -> None:
     assert _cffi_entries_for_artifact(tmp_path / "missing", "linux-x86_64") == {}
 

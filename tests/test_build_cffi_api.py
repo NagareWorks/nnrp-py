@@ -24,7 +24,8 @@ class FakeFFI:
     def cdef(self, source: str) -> None:
         self.cdefs.append(source)
 
-    def set_source(self, module_name: str, source: str) -> None:
+    def set_source(self, module_name: str, source: str, *, py_limited_api: bool = False) -> None:
+        assert py_limited_api is True
         self.sources.append((module_name, source))
 
     def compile(self, *, tmpdir: str, verbose: bool) -> str:

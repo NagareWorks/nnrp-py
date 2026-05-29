@@ -18,6 +18,7 @@ build_native_wheels = _MODULE.build_native_wheels
 build_native_wheels_main = _MODULE.main
 _cffi_entries_for_artifact = _MODULE._cffi_entries_for_artifact
 _python_abi_tags = _MODULE._python_abi_tags
+_normalize_python_tag = _MODULE._normalize_python_tag
 _retag_wheel_metadata = _MODULE._retag_wheel_metadata
 
 
@@ -110,6 +111,55 @@ def test_build_native_wheels_injects_matching_cffi_api_artifacts(tmp_path: Path)
     assert "nnrp/_nnrp_cffi_api_submit_result.cpython-311-x86_64-linux-gnu.so" not in windows_names
     assert windows_cffi_payload == b"windows-cffi"
     assert "Tag: cp312-cp312-win_amd64" in windows_metadata
+
+
+def test_build_native_wheels_supports_abi3_cffi_api_artifacts(tmp_path: Path) -> None:
+    source = _write_staging_wheel(tmp_path / "nnrp_py-1.0.0rc3-py3-none-any.whl")
+    output = tmp_path / "dist"
+    cffi_dir = tmp_path / "cffi-api"
+    linux_cffi = cffi_dir / "linux-x86_64" / "nnrp" / "_nnrp_cffi_api_submit_result.abi3.so"
+    linux_cffi.parent.mkdir(parents=True)
+    linux_cffi.write_bytes(b"linux-abi3-cffi")
+
+    built = build_native_wheels(source, output, cffi_dir=cffi_dir)
+
+    assert built[1].name == "nnrp_py-1.0.0rc3-cp311-abi3-manylinux_2_28_x86_64.whl"
+    with zipfile.ZipFile(built[1]) as archive:
+        metadata = archive.read("nnrp_py-1.0.0rc3.dist-info/WHEEL").decode("utf-8")
+
+    assert "Tag: cp311-abi3-manylinux_2_28_x86_64" in metadata
+
+
+def test_build_native_wheels_allows_configured_abi3_python_tag(tmp_path: Path) -> None:
+    source = _write_staging_wheel(tmp_path / "nnrp_py-1.0.0rc3-py3-none-any.whl")
+    output = tmp_path / "dist"
+    cffi_dir = tmp_path / "cffi-api"
+    linux_cffi = cffi_dir / "linux-x86_64" / "nnrp" / "_nnrp_cffi_api_submit_result.abi3.so"
+    linux_cffi.parent.mkdir(parents=True)
+    linux_cffi.write_bytes(b"linux-abi3-cffi")
+
+    built = build_native_wheels(source, output, cffi_dir=cffi_dir, abi3_python_tag="3.12")
+
+    assert built[1].name == "nnrp_py-1.0.0rc3-cp312-abi3-manylinux_2_28_x86_64.whl"
+
+
+def test_build_native_wheels_validates_configured_abi3_python_tag() -> None:
+    assert _normalize_python_tag("cp311") == "cp311"
+    assert _normalize_python_tag("3.12") == "cp312"
+    assert _normalize_python_tag("python3.13") == "cp313"
+    with pytest.raises(ValueError, match="Python 3.11"):
+        _normalize_python_tag("3.10")
+
+
+def test_build_native_wheels_requires_cffi_api_for_each_native_artifact(tmp_path: Path) -> None:
+    source = _write_staging_wheel(tmp_path / "nnrp_py-1.0.0rc3-py3-none-any.whl")
+    cffi_dir = tmp_path / "cffi-api"
+    linux_cffi = cffi_dir / "linux-x86_64" / "nnrp" / "_nnrp_cffi_api_submit_result.abi3.so"
+    linux_cffi.parent.mkdir(parents=True)
+    linux_cffi.write_bytes(b"linux-abi3-cffi")
+
+    with pytest.raises(ValueError, match="missing compiled cffi API artifact for native artifact ios-arm64-sim"):
+        build_native_wheels(source, tmp_path / "dist", cffi_dir=cffi_dir, require_cffi_api=True)
 
 
 def test_build_native_wheels_ignores_missing_cffi_dir_and_rejects_file_path(tmp_path: Path) -> None:

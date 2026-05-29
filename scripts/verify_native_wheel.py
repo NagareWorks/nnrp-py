@@ -13,6 +13,7 @@ NATIVE_LIBRARY_SUFFIXES = (".dll", ".so", ".dylib", ".a")
 UNIVERSAL_PLATFORM_TAG = "any"
 CFFI_API_MODULE_PREFIX = "nnrp/_nnrp_cffi_api_submit_result"
 CFFI_API_SUFFIXES = (".py", ".pyd", ".so", ".dylib")
+COMPILED_CFFI_API_SUFFIXES = (".pyd", ".so", ".dylib")
 
 ARTIFACT_PLATFORM_TAGS = {
     "windows-x86": "win32",
@@ -53,6 +54,10 @@ class WheelNativeSummary:
     def is_universal(self) -> bool:
         return self.platform_tag == UNIVERSAL_PLATFORM_TAG
 
+    @property
+    def has_compiled_cffi_api(self) -> bool:
+        return any(entry.endswith(COMPILED_CFFI_API_SUFFIXES) for entry in self.cffi_api_entries)
+
 
 def inspect_wheel(path: Path) -> WheelNativeSummary:
     platform_tag = _wheel_platform_tag(path)
@@ -88,6 +93,7 @@ def verify_native_wheels(
     require_single_platform: bool = False,
     verify_platform_tag: bool = False,
     require_cffi_api: bool = False,
+    require_compiled_cffi_api: bool = False,
 ) -> None:
     summary_list = list(summaries)
     failures = [
@@ -138,6 +144,15 @@ def verify_native_wheels(
         wheel_names = ", ".join(summary.wheel.name for summary in missing_cffi_api)
         raise ValueError(f"wheel is missing packaged cffi API module: {wheel_names}")
 
+    missing_compiled_cffi_api = [
+        summary
+        for summary in summary_list
+        if require_compiled_cffi_api and summary.has_native_artifacts and not summary.has_compiled_cffi_api
+    ]
+    if missing_compiled_cffi_api:
+        wheel_names = ", ".join(summary.wheel.name for summary in missing_compiled_cffi_api)
+        raise ValueError(f"wheel is missing packaged compiled cffi API module: {wheel_names}")
+
 
 def _artifact_tags(names: Iterable[str]) -> set[str]:
     return {
@@ -174,6 +189,7 @@ def main() -> int:
     parser.add_argument("--require-single-platform", action="store_true")
     parser.add_argument("--verify-platform-tag", action="store_true")
     parser.add_argument("--require-cffi-api", action="store_true")
+    parser.add_argument("--require-compiled-cffi-api", action="store_true")
     args = parser.parse_args()
 
     try:
@@ -185,6 +201,7 @@ def main() -> int:
             require_single_platform=args.require_single_platform,
             verify_platform_tag=args.verify_platform_tag,
             require_cffi_api=args.require_cffi_api,
+            require_compiled_cffi_api=args.require_compiled_cffi_api,
         )
     except ValueError as error:
         print(error, file=sys.stderr)
@@ -197,7 +214,8 @@ def main() -> int:
             f"{summary.wheel.name}: "
             f"{len(summary.manifests)} manifest(s), {library_count} native {library_label}, "
             f"platform={summary.platform_tag}, artifacts={','.join(summary.artifact_tags) or '-'}, "
-            f"cffi_api={len(summary.cffi_api_entries)}"
+            f"cffi_api={len(summary.cffi_api_entries)}, "
+            f"compiled_cffi_api={1 if summary.has_compiled_cffi_api else 0}"
         )
     return 0
 

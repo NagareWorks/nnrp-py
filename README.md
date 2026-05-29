@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="assets/nnrp-readme-banner.svg" alt="NNRP - Neural Network Runtime Protocol" width="100%" />
+  <img src="https://raw.githubusercontent.com/NagareWorks/nnrp-py/main/assets/nnrp-readme-banner.svg" alt="NNRP - Neural Network Runtime Protocol" width="100%" />
 </p>
 
 <p align="center">

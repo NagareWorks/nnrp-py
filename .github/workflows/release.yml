@@ -55,10 +55,15 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - name: linux
+          - name: linux-x86
             os: ubuntu-latest
             cibw_platform: linux
-            cibw_archs: x86_64 i686 aarch64 armv7l
+            cibw_archs: x86_64 i686
+            optional: false
+          - name: linux-arm
+            os: ubuntu-latest
+            cibw_platform: linux
+            cibw_archs: aarch64 armv7l
             optional: false
           - name: windows
             os: windows-latest
@@ -114,9 +119,16 @@ jobs:
             --package-version "${{ steps.version.outputs.package_version }}" \
             --abi3-python-tag "$abi3_tag"
 
+      - name: Setup Linux ARM emulation
+        if: matrix.name == 'linux-arm'
+        uses: docker/setup-qemu-action@v3
+        with:
+          platforms: arm64,arm
+
       - name: Build cffi API wheels
         id: build_cffi
         continue-on-error: ${{ matrix.optional }}
+        timeout-minutes: 30
         shell: bash
         run: |
           set -euo pipefail

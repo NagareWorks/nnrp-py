@@ -38,7 +38,117 @@ permissions:
   contents: write
 
 jobs:
+  build-cffi-api:
+    name: Build cffi API (${{ matrix.name }})
+    runs-on: ${{ matrix.os }}
+    env:
+      NNRP_PY_RELEASE_PYTHON_VERSION: ${{ github.event_name == 'workflow_dispatch' && inputs.python_version || vars.NNRP_PY_RELEASE_PYTHON_VERSION || '3.11' }}
+      CIBW_ARCHS: ${{ matrix.cibw_archs }}
+      CIBW_PLATFORM: ${{ matrix.cibw_platform }}
+      CIBW_SKIP: "pp* *musllinux*"
+      CIBW_TEST_SKIP: "*"
+      CIBW_MANYLINUX_I686_IMAGE: manylinux_2_28
+      CIBW_MANYLINUX_X86_64_IMAGE: manylinux_2_28
+      CIBW_MANYLINUX_AARCH64_IMAGE: manylinux_2_28
+      CIBW_MANYLINUX_ARMV7L_IMAGE: manylinux_2_28
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: linux
+            os: ubuntu-latest
+            cibw_platform: linux
+            cibw_archs: x86_64 i686 aarch64 armv7l
+            optional: false
+          - name: windows
+            os: windows-latest
+            cibw_platform: windows
+            cibw_archs: AMD64 x86 ARM64
+            optional: false
+          - name: macos-x86-64
+            os: macos-13
+            cibw_platform: macos
+            cibw_archs: x86_64
+            optional: false
+          - name: macos-arm64
+            os: macos-14
+            cibw_platform: macos
+            cibw_archs: arm64
+            optional: false
+          - name: android
+            os: ubuntu-latest
+            cibw_platform: android
+            cibw_archs: x86_64 arm64_v8a
+            optional: true
+          - name: ios
+            os: macos-14
+            cibw_platform: ios
+            cibw_archs: arm64 arm64_iphonesimulator x86_64_iphonesimulator
+            optional: true
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.ref || github.ref }}
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.NNRP_PY_RELEASE_PYTHON_VERSION }}
+
+      - name: Install build dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m pip install --upgrade pip
+          python -m pip install -e ".[dev]" cibuildwheel
+
+      - name: Resolve version
+        id: version
+        shell: bash
+        run: python scripts/resolve_version.py show --github-output --run-number ""
+
+      - name: Write cffi API build project
+        shell: bash
+        run: |
+          set -euo pipefail
+          abi3_tag="cp${NNRP_PY_RELEASE_PYTHON_VERSION//./}"
+          python scripts/write_cffi_api_build_project.py \
+            --output artifacts/cffi-api-build \
+            --package-version "${{ steps.version.outputs.package_version }}" \
+            --abi3-python-tag "$abi3_tag"
+
+      - name: Build cffi API wheels
+        id: build_cffi
+        continue-on-error: ${{ matrix.optional }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          export CIBW_BUILD="cp${NNRP_PY_RELEASE_PYTHON_VERSION//./}-*"
+          python -m cibuildwheel artifacts/cffi-api-build --output-dir artifacts/cffi-api-wheels
+
+      - name: Extract cffi API extensions
+        if: steps.build_cffi.outcome == 'success'
+        id: extract_cffi
+        shell: bash
+        run: >
+          python scripts/extract_cffi_api_wheels.py
+          --wheel-dir artifacts/cffi-api-wheels
+          --output artifacts/cffi-api
+          --clean
+
+      - name: Upload cffi API extensions
+        if: steps.extract_cffi.outcome == 'success'
+        uses: actions/upload-artifact@v4
+        with:
+          name: nnrp-py-cffi-api-${{ matrix.name }}
+          path: artifacts/cffi-api/**
+          if-no-files-found: error
+          retention-days: 14
+
   package:
+    needs: build-cffi-api
     runs-on: ubuntu-latest
     environment:
       name: release
@@ -147,8 +257,12 @@ jobs:
       - name: Test
         run: pytest -q
 
-      - name: Build cffi API fast-path module
-        run: python scripts/build_cffi_api.py --clean --output artifacts/cffi-api
+      - name: Download cffi API fast-path modules
+        uses: actions/download-artifact@v4
+        with:
+          pattern: nnrp-py-cffi-api-*
+          path: artifacts/cffi-api
+          merge-multiple: true
 
       - name: Build source distribution without native payloads
         shell: bash
@@ -172,6 +286,7 @@ jobs:
             --dist dist \
             --cffi-dir artifacts/cffi-api \
             --require-cffi-api \
+            --publish-cffi-api-artifacts-only \
             --abi3-python-tag "$NNRP_PY_RELEASE_PYTHON_VERSION"
 
       - name: Verify packaged native artifacts

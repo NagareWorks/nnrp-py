@@ -14,10 +14,13 @@ PLATFORM_TO_ARTIFACT = {
     "win32": "windows-x86",
     "win_amd64": "windows-x86_64",
     "win_arm64": "windows-arm64",
-    "manylinux_2_28_i686": "linux-x86",
-    "manylinux_2_28_x86_64": "linux-x86_64",
-    "manylinux_2_28_armv7l": "linux-arm",
-    "manylinux_2_28_aarch64": "linux-arm64",
+}
+
+LINUX_ARCH_TO_ARTIFACT = {
+    "i686": "linux-x86",
+    "x86_64": "linux-x86_64",
+    "armv7l": "linux-arm",
+    "aarch64": "linux-arm64",
 }
 
 
@@ -52,12 +55,37 @@ def _artifact_tag_from_wheel(wheel: Path) -> str:
     if len(parts) < 5:
         raise ValueError(f"invalid wheel filename: {wheel}")
     platform_tag = parts[-1]
-    artifact_tag = PLATFORM_TO_ARTIFACT.get(platform_tag)
-    if artifact_tag is None:
-        artifact_tag = _macos_artifact_tag(platform_tag) or _mobile_artifact_tag(platform_tag)
+    artifact_tags = {
+        artifact_tag
+        for tag in platform_tag.split(".")
+        for artifact_tag in [_single_platform_artifact_tag(tag)]
+        if artifact_tag is not None
+    }
+    if len(artifact_tags) > 1:
+        raise ValueError(f"wheel platform resolves to multiple native artifact tags: {platform_tag}: {wheel}")
+    artifact_tag = next(iter(artifact_tags), None)
     if artifact_tag is None:
         raise ValueError(f"no native artifact tag mapping for wheel platform {platform_tag}: {wheel}")
     return artifact_tag
+
+
+def _single_platform_artifact_tag(platform_tag: str) -> str | None:
+    return (
+        PLATFORM_TO_ARTIFACT.get(platform_tag)
+        or _linux_artifact_tag(platform_tag)
+        or _macos_artifact_tag(platform_tag)
+        or _mobile_artifact_tag(platform_tag)
+    )
+
+
+def _linux_artifact_tag(platform_tag: str) -> str | None:
+    linux = re.fullmatch(
+        r"(?:manylinux(?:_\d+_\d+|1|2010|2014)|musllinux_\d+_\d+)_(?P<arch>i686|x86_64|armv7l|aarch64)",
+        platform_tag,
+    )
+    if linux is None:
+        return None
+    return LINUX_ARCH_TO_ARTIFACT[linux.group("arch")]
 
 
 def _macos_artifact_tag(platform_tag: str) -> str | None:

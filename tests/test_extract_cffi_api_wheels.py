@@ -59,6 +59,32 @@ def test_extract_cffi_api_wheels_maps_macos_tags(tmp_path: Path, platform_tag: s
 @pytest.mark.parametrize(
     ("platform_tag", "artifact_tag"),
     [
+        ("manylinux_2_28_x86_64", "linux-x86_64"),
+        ("manylinux1_i686", "linux-x86"),
+        ("manylinux_2_5_i686", "linux-x86"),
+        ("manylinux1_i686.manylinux_2_28_i686.manylinux_2_5_i686", "linux-x86"),
+        ("manylinux_2_28_aarch64", "linux-arm64"),
+        ("manylinux_2_28_armv7l", "linux-arm"),
+    ],
+)
+def test_extract_cffi_api_wheels_maps_linux_tags(tmp_path: Path, platform_tag: str, artifact_tag: str) -> None:
+    wheel = tmp_path / f"nnrp_py_cffi_api-0.0.0-cp311-abi3-{platform_tag}.whl"
+    wheel.touch()
+
+    assert _artifact_tag_from_wheel(wheel) == artifact_tag
+
+
+def test_extract_cffi_api_wheels_rejects_mixed_compressed_platform_tags(tmp_path: Path) -> None:
+    wheel = tmp_path / "nnrp_py_cffi_api-0.0.0-cp311-abi3-manylinux_2_28_i686.manylinux_2_28_x86_64.whl"
+    wheel.touch()
+
+    with pytest.raises(ValueError, match="multiple native artifact tags"):
+        _artifact_tag_from_wheel(wheel)
+
+
+@pytest.mark.parametrize(
+    ("platform_tag", "artifact_tag"),
+    [
         ("android_21_x86", "android-x86"),
         ("android_24_x86_64", "android-x86_64"),
         ("android_24_armeabi_v7a", "android-arm"),

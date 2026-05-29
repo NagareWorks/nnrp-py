@@ -27,11 +27,12 @@ def build_package_version(release_version: str, version_date: str | None, run_nu
 
 
 def build_tag_name(release_version: str) -> str:
-    preview_match = re.fullmatch(r"(?P<core>\d+\.\d+\.\d+)rc(?P<preview>\d+)", release_version)
+    preview_match = re.fullmatch(r"(?P<core>\d+\.\d+\.\d+)rc(?P<preview>\d+)(?P<suffix>\.post\d+)?", release_version)
     if preview_match:
         core = preview_match.group("core")
         preview = int(preview_match.group("preview"))
-        return f"v{core}-preview.{preview}"
+        suffix = preview_match.group("suffix") or ""
+        return f"v{core}-preview.{preview}{suffix}"
 
     return f"v{release_version}"
 

@@ -68,11 +68,15 @@ Before publishing native wheels, the release PR must include:
 1. The pinned `nnrp-rs` artifact version.
 2. The platform wheel matrix and embedded artifact tags.
 3. Wheel inspection output proving each wheel embeds exactly one matching native artifact.
-4. Post-migration benchmark results captured on the release artifact.
-5. Confirmation that the sdist remains free of prebuilt native libraries unless release policy changed.
+4. Wheel inspection output proving each native wheel embeds a compiled cffi API fast-path module for its wheel tag.
+5. Post-migration benchmark results captured on the release artifact.
+6. Confirmation that the sdist remains free of prebuilt native libraries unless release policy changed.
+7. Confirmation that GitHub Release assets are uploaded as top-level wheel files, not as a nested archive containing wheels and a duplicate source archive.
 
 Reviewer reject conditions:
 
 1. A platform wheel embeds a mismatched OS or architecture artifact.
 2. A native release publishes a `py3-none-any` wheel.
 3. Post-migration benchmark rows remain `TBD` for the platform being released.
+4. A native wheel contains only the Python cffi shim without a compiled cffi API fast-path extension.
+5. GitHub Release assets hide wheel files inside a repository-owned zip instead of attaching the wheels directly.

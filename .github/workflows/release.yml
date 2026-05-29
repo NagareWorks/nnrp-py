@@ -29,6 +29,10 @@ on:
         required: true
         type: boolean
         default: false
+      python_version:
+        description: Python version used to build abi3 cffi API wheel extensions
+        required: false
+        default: '3.11'
 
 permissions:
   contents: write
@@ -45,6 +49,7 @@ jobs:
       PYPI_PUBLISH_MODE: ${{ vars.PYPI_PUBLISH_MODE || 'disabled' }}
       PYPI_API_TOKEN: ${{ secrets.PYPI_API_TOKEN }}
       NNRP_RS_NATIVE_VERSION: ${{ github.event_name == 'workflow_dispatch' && inputs.rust_native_version || vars.NNRP_RS_NATIVE_VERSION || '1.0.0-preview.3.6' }}
+      NNRP_PY_RELEASE_PYTHON_VERSION: ${{ github.event_name == 'workflow_dispatch' && inputs.python_version || vars.NNRP_PY_RELEASE_PYTHON_VERSION || '3.11' }}
 
     steps:
       - name: Checkout
@@ -56,7 +61,7 @@ jobs:
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.11'
+          python-version: ${{ env.NNRP_PY_RELEASE_PYTHON_VERSION }}
 
       - name: Resolve version
         id: version
@@ -162,31 +167,21 @@ jobs:
         run: |
           set -euo pipefail
 
-          python scripts/build_native_wheels.py --wheel artifacts/staged-wheel/*.whl --dist dist --cffi-dir artifacts/cffi-api
+          python scripts/build_native_wheels.py \
+            --wheel artifacts/staged-wheel/*.whl \
+            --dist dist \
+            --cffi-dir artifacts/cffi-api \
+            --require-cffi-api \
+            --abi3-python-tag "$NNRP_PY_RELEASE_PYTHON_VERSION"
 
       - name: Verify packaged native artifacts
-        run: python scripts/verify_native_wheel.py --dist dist --require-native --reject-universal-native --require-single-platform --verify-platform-tag --require-cffi-api
-
-      - name: Bundle release artifacts
-        run: |
-          python - <<'PY'
-          import pathlib
-          import zipfile
-
-          version = '${{ steps.version.outputs.package_version }}'
-          artifact_dir = pathlib.Path('artifacts')
-          artifact_dir.mkdir(exist_ok=True)
-          artifact = artifact_dir / f'nnrp-py-{version}.zip'
-          with zipfile.ZipFile(artifact, 'w', compression=zipfile.ZIP_DEFLATED) as archive:
-              for item in sorted(pathlib.Path('dist').glob('*')):
-                  archive.write(item, item.name)
-          PY
+        run: python scripts/verify_native_wheel.py --dist dist --require-native --reject-universal-native --require-single-platform --verify-platform-tag --require-cffi-api --require-compiled-cffi-api
 
       - name: Upload workflow artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: nnrp-py-release-${{ steps.version.outputs.package_version }}
-          path: artifacts/nnrp-py-${{ steps.version.outputs.package_version }}.zip
+          name: nnrp-py-wheels-${{ steps.version.outputs.package_version }}
+          path: dist/*.whl
           if-no-files-found: error
           retention-days: 14
 
@@ -196,7 +191,7 @@ jobs:
         with:
           tag_name: ${{ steps.version.outputs.tag_name }}
           name: ${{ steps.version.outputs.release_name }}
-          files: artifacts/nnrp-py-${{ steps.version.outputs.package_version }}.zip
+          files: dist/*.whl
 
       - name: Publish to PyPI with Trusted Publisher
         if: (github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.create_tag && inputs.publish_to_pypi)) && env.PYPI_PUBLISH_MODE == 'trusted'

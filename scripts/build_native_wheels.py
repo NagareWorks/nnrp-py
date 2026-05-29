@@ -43,6 +43,8 @@ def build_native_wheels(
     *,
     clean: bool = False,
     cffi_dir: Path | None = None,
+    require_cffi_api: bool = False,
+    abi3_python_tag: str = "cp311",
 ) -> list[Path]:
     if clean and output_dir.exists():
         shutil.rmtree(output_dir)
@@ -66,8 +68,10 @@ def build_native_wheels(
 
         entries = {name: data for name, data in base_entries.items() if _keep_entry_for_artifact(name, artifact_tag)}
         cffi_entries = _cffi_entries_for_artifact(cffi_dir, artifact_tag)
+        if require_cffi_api and not cffi_entries:
+            raise ValueError(f"missing compiled cffi API artifact for native artifact {artifact_tag}")
         entries.update(cffi_entries)
-        python_tag, abi_tag = _python_abi_tags(cffi_entries)
+        python_tag, abi_tag = _python_abi_tags(cffi_entries, abi3_python_tag=abi3_python_tag)
         entries[wheel_metadata_name] = _retag_wheel_metadata(
             entries[wheel_metadata_name],
             python_tag=python_tag,
@@ -130,7 +134,7 @@ def _cffi_entries_for_artifact(cffi_dir: Path | None, artifact_tag: str) -> dict
     return entries
 
 
-def _python_abi_tags(cffi_entries: dict[str, bytes]) -> tuple[str, str]:
+def _python_abi_tags(cffi_entries: dict[str, bytes], *, abi3_python_tag: str = "cp311") -> tuple[str, str]:
     tags = {
         _cffi_python_tag(match)
         for name in cffi_entries
@@ -142,14 +146,38 @@ def _python_abi_tags(cffi_entries: dict[str, bytes]) -> tuple[str, str]:
     if len(tags) != 1:
         raise ValueError(f"cffi API artifacts must use exactly one Python ABI tag: {','.join(sorted(tags))}")
     tag = tags.pop()
+    if tag == "abi3":
+        return _normalize_python_tag(abi3_python_tag), "abi3"
     return tag, tag
 
 
+def _normalize_python_tag(value: str) -> str:
+    normalized = value.strip().lower().replace(".", "")
+    if normalized.startswith("python"):
+        normalized = normalized.removeprefix("python")
+    if normalized.startswith("py"):
+        normalized = normalized.removeprefix("py")
+    if normalized.startswith("cp"):
+        digits = normalized.removeprefix("cp")
+    else:
+        digits = normalized
+    if not re.fullmatch(r"3\d{2}", digits):
+        raise ValueError(f"abi3 Python tag must target Python 3.11+ and look like cp311, 3.11, or 311: {value}")
+    if int(digits) < 311:
+        raise ValueError(f"abi3 Python tag must target Python 3.11 or newer: {value}")
+    return f"cp{digits}"
+
+
 def _cffi_python_tag_match(name: str) -> re.Match[str] | None:
-    return re.search(r"(?:\.|-)cpython-(?P<cpython>3\d{2})(?:[.-])|[.-](?P<cp>cp3\d{2})(?:[.-])", name)
+    return re.search(
+        r"(?:\.|-)cpython-(?P<cpython>3\d{2})(?:[.-])|[.-](?P<cp>cp3\d{2})(?:[.-])|[.-](?P<abi3>abi3)(?:[.-])",
+        name,
+    )
 
 
 def _cffi_python_tag(match: re.Match[str]) -> str:
+    if match.group("abi3") is not None:
+        return "abi3"
     cp_tag = match.group("cp")
     if cp_tag is not None:
         return cp_tag
@@ -218,9 +246,22 @@ def main() -> int:
         default=None,
         help="Optional directory containing per-artifact-tag cffi API package entries.",
     )
+    parser.add_argument("--require-cffi-api", action="store_true")
+    parser.add_argument(
+        "--abi3-python-tag",
+        default="cp311",
+        help="Minimum Python tag to use for abi3 cffi API wheels, e.g. cp311, 3.11, or 311.",
+    )
     args = parser.parse_args()
 
-    for wheel in build_native_wheels(args.wheel, args.dist, clean=args.clean, cffi_dir=args.cffi_dir):
+    for wheel in build_native_wheels(
+        args.wheel,
+        args.dist,
+        clean=args.clean,
+        cffi_dir=args.cffi_dir,
+        require_cffi_api=args.require_cffi_api,
+        abi3_python_tag=args.abi3_python_tag,
+    ):
         print(wheel)
     return 0
 

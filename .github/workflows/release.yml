@@ -50,7 +50,7 @@ jobs:
       CIBW_MANYLINUX_I686_IMAGE: quay.io/pypa/manylinux_2_28_i686
       CIBW_MANYLINUX_X86_64_IMAGE: quay.io/pypa/manylinux_2_28_x86_64
       CIBW_MANYLINUX_AARCH64_IMAGE: quay.io/pypa/manylinux_2_28_aarch64
-      CIBW_MANYLINUX_ARMV7L_IMAGE: quay.io/pypa/manylinux_2_28_armv7l
+      CIBW_MANYLINUX_ARMV7L_IMAGE: quay.io/pypa/manylinux_2_31_armv7l
     strategy:
       fail-fast: false
       matrix:

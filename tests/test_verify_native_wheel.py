@@ -120,6 +120,33 @@ def test_verify_native_wheels_rejects_missing_cffi_api_when_required(tmp_path: P
         verify_native_wheels([summary], require_native=True, require_cffi_api=True)
 
 
+def test_verify_native_wheels_can_require_compiled_cffi_api(tmp_path: Path) -> None:
+    source_only = _write_wheel(
+        tmp_path / "nnrp_py-1.0.0rc3-py3-none-win_amd64.whl",
+        [
+            "nnrp/native_artifacts/windows-x86_64/manifest.json",
+            "nnrp/native_artifacts/windows-x86_64/nnrp_ffi.dll",
+            "nnrp/_nnrp_cffi_api_submit_result.py",
+        ],
+    )
+    compiled = _write_wheel(
+        tmp_path / "nnrp_py-1.0.0rc3-cp313-cp313-win_amd64.whl",
+        [
+            "nnrp/native_artifacts/windows-x86_64/manifest.json",
+            "nnrp/native_artifacts/windows-x86_64/nnrp_ffi.dll",
+            "nnrp/_nnrp_cffi_api_submit_result.cp313-win_amd64.pyd",
+        ],
+    )
+
+    source_only_summary = inspect_wheel(source_only)
+    compiled_summary = inspect_wheel(compiled)
+
+    verify_native_wheels([source_only_summary], require_native=True, require_cffi_api=True)
+    with pytest.raises(ValueError, match="missing packaged compiled cffi API module"):
+        verify_native_wheels([source_only_summary], require_native=True, require_compiled_cffi_api=True)
+    verify_native_wheels([compiled_summary], require_native=True, require_compiled_cffi_api=True)
+
+
 @pytest.mark.parametrize(
     ("artifact_tag", "wheel_tag", "library"),
     [
@@ -192,4 +219,4 @@ def test_verify_native_wheel_cli_reports_success(
     captured = capsys.readouterr().out
     assert "1 manifest(s), 1 native library" in captured
     assert "platform=manylinux_2_28_x86_64" in captured
-    assert "cffi_api=0" in captured
+    assert "cffi_api=0, compiled_cffi_api=0" in captured

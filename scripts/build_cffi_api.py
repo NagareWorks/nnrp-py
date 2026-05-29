@@ -51,7 +51,7 @@ def build_cffi_api(output: Path, *, artifact_tag: str | None = None, clean: bool
 
     builder = FFI()
     builder.cdef(_CDEF)
-    builder.set_source(MODULE_NAME, _CFFI_API_SUBMIT_RESULT_SOURCE)
+    builder.set_source(MODULE_NAME, _CFFI_API_SUBMIT_RESULT_SOURCE, py_limited_api=True)
     built = Path(builder.compile(tmpdir=str(target_root), verbose=False))
 
     target = package_dir / built.name

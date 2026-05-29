@@ -43,6 +43,22 @@ def test_extract_cffi_api_wheels_extracts_compiled_extension_by_platform_tag(tmp
 @pytest.mark.parametrize(
     ("platform_tag", "artifact_tag"),
     [
+        ("macosx_10_9_x86_64", "macos-x86_64"),
+        ("macosx_11_0_x86_64", "macos-x86_64"),
+        ("macosx_11_0_arm64", "macos-arm64"),
+        ("macosx_14_0_arm64", "macos-arm64"),
+    ],
+)
+def test_extract_cffi_api_wheels_maps_macos_tags(tmp_path: Path, platform_tag: str, artifact_tag: str) -> None:
+    wheel = tmp_path / f"nnrp_py_cffi_api-0.0.0-cp311-abi3-{platform_tag}.whl"
+    wheel.touch()
+
+    assert _artifact_tag_from_wheel(wheel) == artifact_tag
+
+
+@pytest.mark.parametrize(
+    ("platform_tag", "artifact_tag"),
+    [
         ("android_21_x86", "android-x86"),
         ("android_24_x86_64", "android-x86_64"),
         ("android_24_armeabi_v7a", "android-arm"),

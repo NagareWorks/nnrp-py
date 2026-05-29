@@ -14,8 +14,6 @@ PLATFORM_TO_ARTIFACT = {
     "win32": "windows-x86",
     "win_amd64": "windows-x86_64",
     "win_arm64": "windows-arm64",
-    "macosx_11_0_x86_64": "macos-x86_64",
-    "macosx_11_0_arm64": "macos-arm64",
     "manylinux_2_28_i686": "linux-x86",
     "manylinux_2_28_x86_64": "linux-x86_64",
     "manylinux_2_28_armv7l": "linux-arm",
@@ -56,10 +54,17 @@ def _artifact_tag_from_wheel(wheel: Path) -> str:
     platform_tag = parts[-1]
     artifact_tag = PLATFORM_TO_ARTIFACT.get(platform_tag)
     if artifact_tag is None:
-        artifact_tag = _mobile_artifact_tag(platform_tag)
+        artifact_tag = _macos_artifact_tag(platform_tag) or _mobile_artifact_tag(platform_tag)
     if artifact_tag is None:
         raise ValueError(f"no native artifact tag mapping for wheel platform {platform_tag}: {wheel}")
     return artifact_tag
+
+
+def _macos_artifact_tag(platform_tag: str) -> str | None:
+    macos = re.fullmatch(r"macosx_(?P<major>\d+)_(?P<minor>\d+)_(?P<arch>x86_64|arm64)", platform_tag)
+    if macos is None:
+        return None
+    return f"macos-{macos.group('arch')}"
 
 
 def _mobile_artifact_tag(platform_tag: str) -> str | None:

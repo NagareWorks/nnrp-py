@@ -88,12 +88,12 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           ref: ${{ github.event_name == 'workflow_dispatch' && inputs.ref || github.ref }}
 
       - name: Setup Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: ${{ env.NNRP_PY_RELEASE_PYTHON_VERSION }}
 
@@ -147,7 +147,7 @@ jobs:
 
       - name: Upload cffi API extensions
         if: steps.extract_cffi.outcome == 'success'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: nnrp-py-cffi-api-${{ matrix.name }}
           path: artifacts/cffi-api/**
@@ -170,13 +170,13 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           fetch-depth: 0
           ref: ${{ github.event_name == 'workflow_dispatch' && inputs.ref || github.ref }}
 
       - name: Setup Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: ${{ env.NNRP_PY_RELEASE_PYTHON_VERSION }}
 
@@ -265,7 +265,7 @@ jobs:
         run: pytest -q
 
       - name: Download cffi API fast-path modules
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v7
         with:
           pattern: nnrp-py-cffi-api-*
           path: artifacts/cffi-api
@@ -300,7 +300,7 @@ jobs:
         run: python scripts/verify_native_wheel.py --dist dist --require-native --reject-universal-native --require-single-platform --verify-platform-tag --require-cffi-api --require-compiled-cffi-api
 
       - name: Upload workflow artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: nnrp-py-wheels-${{ steps.version.outputs.package_version }}
           path: dist/*.whl

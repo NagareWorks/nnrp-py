@@ -61,7 +61,7 @@ The SDK-local benchmark plan lives in `doc/benchmarks/native-runtime-benchmark-p
 | --- | --- | --- | --- | --- | --- | --- | --- |
 | Fixture baseline | 2026-05-29 | 1e88eac | N/A | 3.13.1 | windows/amd64 | Intel64 Family 6 Model 183 Stepping 1, GenuineIntel | SDK-local pure Python fixture submit/result loop, 1024-byte payload. |
 | Native ctypes fallback | 2026-05-29 | 1e88eac | 1.0.0-preview.3.6 | 3.13.1 | windows/amd64 | Intel64 Family 6 Model 183 Stepping 1, GenuineIntel | Local release artifact installed with `scripts/prepare_native_artifacts.py`; `NNRP_NATIVE_BINDING_MODE=ctypes`. |
-| Native cffi API batch | 2026-06-03 | pending | 1.0.0-preview.3.7 | 3.13.5 | windows/amd64 | Intel64 Family 6 Model 15 Stepping 11, GenuineIntel | Local release build staged under `NNRP_NATIVE_ARTIFACT_ROOT`; cffi API wrapper calls `nnrp_client_submit_result_compact_batch`. |
+| Native cffi API batch | 2026-06-03 | 85a5461 | 1.0.0-preview.3.7 | 3.13.1 | windows/amd64 | Intel64 Family 6 Model 183 Stepping 1, GenuineIntel | Local workstation run with `scripts/prepare_native_artifacts.py`; cffi API wrapper calls `nnrp_client_submit_result_compact_batch`. |
 
 ## Latency Benchmarks
 
@@ -76,25 +76,36 @@ The SDK-local benchmark plan lives in `doc/benchmarks/native-runtime-benchmark-p
 | Schema descriptor roundtrip | token delta descriptor | 100000 | Native schema codec through `ctypes` | 16.6 us | 20.0 us | 33.2 us | Measured by `l4.native.schema_descriptor.latency`. |
 | Event polling | one result event | 100000 | Native single event polling through `ctypes` | 2.3 us | 2.5 us | 3.9 us | Measured by `l4.native.event_polling.latency`. |
 | Submit/result loop | 1024-byte inline payload | 100000 | Pure Python fixture helper | 3.7 us | 3.9 us | 5.0 us | Fixture helper micro-latency. |
-| Submit/result loop | 1024-byte inline payload | 100000 | Native compact ABI through `ctypes` | 2.2 us | 2.3 us | 2.5 us | `NativeRuntimeSession.submit_result`; event materialization remains lazy. |
-| Submit/result loop | 1024-byte inline payload | 100000 | Native cffi API compact wrapper | 0.5 us | 0.6 us | 0.6 us | Compiled cffi API wrapper over the native compact ABI. |
+| Submit/result loop | 1024-byte inline payload | 100000 | Native compact ABI through `ctypes` | 2.4 us | 2.7 us | 3.6 us | `NativeRuntimeSession.submit_result`; event materialization remains lazy. |
+| Submit/result loop | 1024-byte inline payload | 100000 | Native cffi API compact wrapper | 0.6 us | 0.6 us | 0.7 us | Direct compiled cffi API single-call wrapper over the native compact ABI. |
 
 ## Throughput Benchmarks
 
 | Benchmark | Payload | Duration | Binding/runtime path | Throughput | Delta vs fixture baseline | Notes |
 | --- | --- | ---: | --- | ---: | ---: | --- |
 | Submit/result loop | 1024-byte inline payload | 10 s | Pure Python fixture helper | 264148.8 ops/s | baseline | Fixture/diagnostic path. |
-| Submit/result loop | 1024-byte inline payload | 10 s | Native compact ABI through `ctypes` | 434336.7 ops/s | +64.4% | Zero-compiler fallback path; one compact Rust FFI call per operation. |
-| Submit/result loop | 1024-byte inline payload | 10 s | Native batch compact ABI through cffi API | 3753062.4 ops/s | +1320.8% | Preferred packaged fast path; one batch wrapper call per 1024 operations. |
-| Batch event polling | empty batch | 10 s | Native batch event polling through `ctypes` | 398662.6 ops/s | N/A | Native pump smoke baseline. |
+| Submit/result loop | 1024-byte inline payload | 10 s | Native compact ABI through `ctypes` | 403761.0 ops/s | +52.9% | Zero-compiler fallback path; one compact Rust FFI call per operation. |
+| Submit/result loop | 1024-byte inline payload | 10 s | Native batch compact ABI through cffi API | 8011673.6 ops/s | +2932.6% | Preferred packaged fast path; one batch wrapper call per 1024 operations. |
+| Batch event polling | empty batch | 10 s | Native batch event polling through `ctypes` | 384292.7 ops/s | N/A | Native pump smoke baseline. |
 
 ## Profiled CPU And Memory Smoke
 
 | Benchmark | Payload | Duration | Binding/runtime path | Throughput under tracing | CPU | Peak traced memory | Notes |
 | --- | --- | ---: | --- | ---: | ---: | ---: | --- |
-| Submit/result loop | 1024-byte inline payload | 10 s | Native compact ABI through `ctypes` | 42198.9 ops/s | 98.6% | 1188 B | Tracing overhead is intentionally not compared with raw throughput. |
-| Submit/result loop | 1024-byte inline payload | 10 s | Native batch compact ABI through cffi API | 2239283.2 ops/s | 62.0% | 380 B | Batch wrapper keeps Python-side traced memory nearly flat. |
-| Batch event polling | empty batch | 10 s | Native batch event polling through `ctypes` | 77871.8 ops/s | 99.1% | 6361 B | Native pump memory baseline. |
+| Submit/result loop | 1024-byte inline payload | 10 s | Native compact ABI through `ctypes` | 39791.6 ops/s | 93.4% | 1188 B | Tracing overhead is intentionally not compared with raw throughput. |
+| Submit/result loop | 1024-byte inline payload | 10 s | Native batch compact ABI through cffi API | 7947776.0 ops/s | 97.3% | 380 B | Batch wrapper keeps Python-side traced memory nearly flat. |
+| Batch event polling | empty batch | 10 s | Native batch event polling through `ctypes` | 71678.7 ops/s | 96.4% | 6361 B | Native pump memory baseline. |
+
+## Current Reading
+
+The packaged cffi API batch path is the preferred hot path for submit/result loops. On the local workstation it reaches
+8.0M ops/s with one native wrapper call per 1024 operations, about 30.3x the pure-Python fixture throughput and about
+19.8x the `ctypes` fallback throughput. The `ctypes` path remains valuable as the zero-compiler fallback, but it should
+not be used as the headline native performance number.
+
+Direct single-call cffi latency is also lower than `ctypes`, but the high-level `NativeRuntimeSession.submit_result`
+adapter still has Python-side wrapper overhead in non-batch mode. Treat batch cffi API results as the current hot-path
+baseline and keep single-operation adapter tuning as a follow-up optimization target.
 
 ## Smoke Threshold Gate
 

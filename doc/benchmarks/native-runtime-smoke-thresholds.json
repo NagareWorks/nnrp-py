@@ -16,11 +16,12 @@
       "id": "l4.native.submit_result.cffi_api.throughput",
       "allow_skip": true,
       "min": {
-        "throughput_ops_per_sec": 1000000,
-        "native_ffi_client_submit_result_compact_calls_per_op": 1
+        "throughput_ops_per_sec": 2000000,
+        "native_batch_size": 1024,
+        "native_ffi_client_submit_result_compact_calls_per_op": 0
       },
       "max": {
-        "native_ffi_client_submit_result_compact_calls_per_op": 1
+        "native_ffi_client_submit_result_compact_batch_calls_per_op": 0.001
       }
     },
     {

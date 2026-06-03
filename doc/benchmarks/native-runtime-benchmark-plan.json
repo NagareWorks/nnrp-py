@@ -40,6 +40,7 @@
         "operation": "native_submit_result_cffi_api_loop",
         "payload": "inline_payload",
         "payload_bytes": 1024,
+        "batch_size": 1024,
         "warmup_iterations": 1000,
         "duration_seconds": 10
       }
@@ -93,6 +94,7 @@
         "operation": "native_submit_result_cffi_api_loop",
         "payload": "inline_payload",
         "payload_bytes": 1024,
+        "batch_size": 1024,
         "warmup_iterations": 1000,
         "duration_seconds": 10,
         "profile": true

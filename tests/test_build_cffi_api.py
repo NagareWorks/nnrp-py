@@ -52,6 +52,8 @@ def test_build_cffi_api_writes_platform_package_entry(tmp_path: Path, monkeypatc
     assert built == tmp_path / "out" / "windows-x86_64" / "nnrp" / "_nnrp_cffi_api_submit_result.cp311-test.pyd"
     assert built.read_bytes() == b"compiled"
     assert fake_builders[0].sources[0][0] == "nnrp._nnrp_cffi_api_submit_result"
+    assert "nnrp_py_client_submit_result_compact_batch" in fake_builders[0].cdefs[0]
+    assert "nnrp_client_submit_result_compact_batch" in fake_builders[0].sources[0][1]
 
 
 def test_build_cffi_api_cleans_previous_package_dir_and_copies_external_compile_output(

@@ -38,6 +38,23 @@ int nnrp_py_client_submit_result_compact(
     size_t payload_len,
     NnrpPyCompactResult *out_result
 );
+
+int nnrp_py_client_submit_result_compact_batch(
+    const char *library_path,
+    unsigned int session_kind,
+    unsigned long long session_id,
+    unsigned int session_generation,
+    unsigned int session_flags,
+    unsigned long long operation_id_start,
+    unsigned int frame_id_start,
+    unsigned int frame_id_stride,
+    const unsigned char *payload,
+    size_t payload_len,
+    size_t max_events,
+    size_t iterations,
+    NnrpPyCompactResult *out_result,
+    size_t *out_completed
+);
 """
 
 

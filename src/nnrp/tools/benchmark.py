@@ -450,6 +450,7 @@ def _run_native_submit_result_cffi_api_loop(scenario_id: str, workload: dict[str
     duration_seconds = _positive_float(workload.get("duration_seconds"), default=10.0)
     warmup_iterations = _non_negative_int(workload.get("warmup_iterations"), default=1_000)
     payload_bytes = _positive_int(workload.get("payload_bytes"), default=1024)
+    batch_size = _positive_int(workload.get("batch_size"), default=1024)
     profile = _bool(workload.get("profile"), default=False)
     try:
         artifact_path = resolve_native_artifact(default_artifact_root())
@@ -475,9 +476,11 @@ def _run_native_submit_result_cffi_api_loop(scenario_id: str, workload: dict[str
     payload_view = ffi.from_buffer(payload)
     artifact_path_bytes = os.fsencode(artifact_path)
     out_result = ffi.new("NnrpPyCompactResult *")
+    out_completed = ffi.new("size_t *")
     counter = 0
+    has_batch = hasattr(cffi_api, "nnrp_py_client_submit_result_compact_batch")
 
-    def operation() -> None:
+    def single_operation() -> int:
         nonlocal counter
         counter += 1
         status = cffi_api.nnrp_py_client_submit_result_compact(
@@ -497,14 +500,52 @@ def _run_native_submit_result_cffi_api_loop(scenario_id: str, workload: dict[str
                 f"cffi api submit/result failed: wrapper_status={status} "
                 f"ffi_status={out_result.status_code} has_result={int(out_result.has_result)}"
             )
+        return 1
+
+    def batch_operation() -> int:
+        nonlocal counter
+        operation_id_start = counter + 1
+        status = cffi_api.nnrp_py_client_submit_result_compact_batch(
+            artifact_path_bytes,
+            native_session.kind,
+            native_session.id,
+            native_session.generation,
+            native_session.flags,
+            operation_id_start,
+            operation_id_start,
+            1,
+            payload_view,
+            payload_bytes,
+            2,
+            batch_size,
+            out_result,
+            out_completed,
+        )
+        completed = int(out_completed[0])
+        counter += completed
+        if status != 0 or out_result.status_code != 0 or completed != batch_size or not out_result.has_result:
+            raise RuntimeError(
+                f"cffi api submit/result batch failed: wrapper_status={status} "
+                f"ffi_status={out_result.status_code} completed={completed} has_result={int(out_result.has_result)}"
+            )
+        return completed
+
+    operation = batch_operation if has_batch else single_operation
 
     try:
-        for _ in range(warmup_iterations):
+        for _ in range(max(1, (warmup_iterations + batch_size - 1) // batch_size) if has_batch else warmup_iterations):
             operation()
 
-        metrics = _measure_throughput_metrics(operation, duration_seconds, profile=profile, include_completed=True)
-        metrics["native_ffi_calls_per_op"] = 1.0
-        metrics["native_ffi_client_submit_result_compact_calls_per_op"] = 1.0
+        metrics = _measure_counted_throughput_metrics(operation, duration_seconds, profile=profile)
+        if has_batch:
+            metrics["native_ffi_calls_per_op"] = 1.0 / batch_size
+            metrics["native_ffi_client_submit_result_compact_batch_calls_per_op"] = 1.0 / batch_size
+            metrics["native_ffi_client_submit_result_compact_calls_per_op"] = 0.0
+            metrics["native_batch_size"] = batch_size
+        else:
+            metrics["native_ffi_calls_per_op"] = 1.0
+            metrics["native_ffi_client_submit_result_compact_calls_per_op"] = 1.0
+            metrics["native_ffi_client_submit_result_compact_batch_calls_per_op"] = 0.0
         metrics["native_binding_mode"] = "cffi_api"
         return _measured_throughput_result(scenario_id, metrics)
     except RuntimeError as error:
@@ -660,46 +701,76 @@ def _load_cffi_api_submit_result_module() -> tuple[Any, Any]:  # pragma: no cove
     if existing is None:
         existing = next(build_dir.glob(f"{module_name}*.so"), None)
     if existing is None:
-        builder = FFI()
-        builder.cdef(
-            """
-            typedef struct NnrpPyCompactResult {
-                unsigned int status_code;
-                unsigned int error_family;
-                unsigned int protocol_error_code;
-                unsigned int detail_code;
-                unsigned char has_result;
-                unsigned int event_kind;
-                unsigned int result_state;
-                unsigned long long operation_id;
-                unsigned int frame_id;
-                size_t payload_len;
-            } NnrpPyCompactResult;
+        existing = _build_cffi_api_submit_result_module(FFI, module_name, build_dir)
 
-            int nnrp_py_client_submit_result_compact(
-                const char *library_path,
-                unsigned int session_kind,
-                unsigned long long session_id,
-                unsigned int session_generation,
-                unsigned int session_flags,
-                unsigned long long operation_id,
-                unsigned int frame_id,
-                const unsigned char *payload,
-                size_t payload_len,
-                NnrpPyCompactResult *out_result
-            );
-            """
-        )
-        builder.set_source(module_name, _CFFI_API_SUBMIT_RESULT_SOURCE)
-        existing = Path(builder.compile(tmpdir=str(build_dir), verbose=False))
+    module = _load_compiled_cffi_api_module(module_name, existing)
+    if not hasattr(module.lib, "nnrp_py_client_submit_result_compact_batch"):
+        existing.unlink(missing_ok=True)
+        existing = _build_cffi_api_submit_result_module(FFI, module_name, build_dir)
+        module = _load_compiled_cffi_api_module(module_name, existing)
+    return module.ffi, module.lib
 
+
+def _build_cffi_api_submit_result_module(ffi_factory: Callable[[], Any], module_name: str, build_dir: Path) -> Path:
+    builder = ffi_factory()
+    builder.cdef(
+        """
+        typedef struct NnrpPyCompactResult {
+            unsigned int status_code;
+            unsigned int error_family;
+            unsigned int protocol_error_code;
+            unsigned int detail_code;
+            unsigned char has_result;
+            unsigned int event_kind;
+            unsigned int result_state;
+            unsigned long long operation_id;
+            unsigned int frame_id;
+            size_t payload_len;
+        } NnrpPyCompactResult;
+
+        int nnrp_py_client_submit_result_compact(
+            const char *library_path,
+            unsigned int session_kind,
+            unsigned long long session_id,
+            unsigned int session_generation,
+            unsigned int session_flags,
+            unsigned long long operation_id,
+            unsigned int frame_id,
+            const unsigned char *payload,
+            size_t payload_len,
+            NnrpPyCompactResult *out_result
+        );
+
+        int nnrp_py_client_submit_result_compact_batch(
+            const char *library_path,
+            unsigned int session_kind,
+            unsigned long long session_id,
+            unsigned int session_generation,
+            unsigned int session_flags,
+            unsigned long long operation_id_start,
+            unsigned int frame_id_start,
+            unsigned int frame_id_stride,
+            const unsigned char *payload,
+            size_t payload_len,
+            size_t max_events,
+            size_t iterations,
+            NnrpPyCompactResult *out_result,
+            size_t *out_completed
+        );
+        """
+    )
+    builder.set_source(module_name, _CFFI_API_SUBMIT_RESULT_SOURCE)
+    return Path(builder.compile(tmpdir=str(build_dir), verbose=False))
+
+
+def _load_compiled_cffi_api_module(module_name: str, existing: Path) -> Any:
     spec = importlib.util.spec_from_file_location(module_name, existing)
     if spec is None or spec.loader is None:
         raise RuntimeError(f"failed to load compiled cffi api module: {existing}")
     module = importlib.util.module_from_spec(spec)
     sys.modules[module_name] = module
     spec.loader.exec_module(module)
-    return module.ffi, module.lib
+    return module
 
 
 _CFFI_API_SUBMIT_RESULT_SOURCE = r"""
@@ -769,6 +840,17 @@ typedef struct NnrpClientSubmitResultRequest {
     size_t max_events;
 } NnrpClientSubmitResultRequest;
 
+typedef struct NnrpClientSubmitResultBatchRequest {
+    NnrpHandle session;
+    uint64_t operation_id_start;
+    uint32_t frame_id_start;
+    uint32_t frame_id_stride;
+    NnrpBufferView submit_payload;
+    NnrpBufferView result_payload;
+    size_t max_events;
+    size_t iterations;
+} NnrpClientSubmitResultBatchRequest;
+
 typedef struct NnrpCompactResult {
     NnrpFfiStatus status;
     uint8_t has_result;
@@ -797,6 +879,12 @@ typedef struct NnrpPyCompactResult {
 typedef NnrpFfiStatus (*nnrp_client_submit_result_compact_fn)(
     NnrpClientSubmitResultRequest request,
     NnrpCompactResult *out_result
+);
+
+typedef NnrpFfiStatus (*nnrp_client_submit_result_compact_batch_fn)(
+    NnrpClientSubmitResultBatchRequest request,
+    NnrpCompactResult *out_last_result,
+    size_t *out_completed
 );
 
 int nnrp_py_client_submit_result_compact(
@@ -837,6 +925,77 @@ int nnrp_py_client_submit_result_compact(
     NnrpCompactResult native_result;
     memset(&native_result, 0, sizeof(native_result));
     NnrpFfiStatus status = submit_result(request, &native_result);
+    out_result->status_code = status.status_code;
+    out_result->error_family = status.error_family;
+    out_result->protocol_error_code = status.protocol_error_code;
+    out_result->detail_code = status.detail_code;
+    if (status.status_code != 0) {
+        out_result->has_result = 0;
+        return 0;
+    }
+
+    out_result->status_code = native_result.status.status_code;
+    out_result->error_family = native_result.status.error_family;
+    out_result->protocol_error_code = native_result.status.protocol_error_code;
+    out_result->detail_code = native_result.status.detail_code;
+    out_result->has_result = native_result.has_result;
+    out_result->event_kind = native_result.event_kind;
+    out_result->result_state = native_result.result_state;
+    out_result->operation_id = native_result.operation_id;
+    out_result->frame_id = native_result.frame_id;
+    out_result->payload_len = native_result.payload.len;
+    return 0;
+}
+
+int nnrp_py_client_submit_result_compact_batch(
+    const char *library_path,
+    unsigned int session_kind,
+    unsigned long long session_id,
+    unsigned int session_generation,
+    unsigned int session_flags,
+    unsigned long long operation_id_start,
+    unsigned int frame_id_start,
+    unsigned int frame_id_stride,
+    const unsigned char *payload,
+    size_t payload_len,
+    size_t max_events,
+    size_t iterations,
+    NnrpPyCompactResult *out_result,
+    size_t *out_completed
+) {
+    if (library_path == NULL || out_result == NULL || out_completed == NULL) {
+        return -1;
+    }
+    nnrp_client_submit_result_compact_batch_fn submit_result_batch =
+        (nnrp_client_submit_result_compact_batch_fn)nnrp_py_load_symbol(
+            library_path,
+            "nnrp_client_submit_result_compact_batch"
+        );
+    if (submit_result_batch == NULL) {
+        return -2;
+    }
+
+    NnrpClientSubmitResultBatchRequest request;
+    memset(&request, 0, sizeof(request));
+    request.session.kind = (uint32_t)session_kind;
+    request.session.id = (uint64_t)session_id;
+    request.session.generation = (uint32_t)session_generation;
+    request.session.flags = (uint32_t)session_flags;
+    request.operation_id_start = (uint64_t)operation_id_start;
+    request.frame_id_start = (uint32_t)frame_id_start;
+    request.frame_id_stride = (uint32_t)frame_id_stride;
+    request.submit_payload.ptr = payload;
+    request.submit_payload.len = payload_len;
+    request.result_payload.ptr = payload;
+    request.result_payload.len = payload_len;
+    request.max_events = max_events;
+    request.iterations = iterations;
+
+    NnrpCompactResult native_result;
+    memset(&native_result, 0, sizeof(native_result));
+    size_t native_completed = 0;
+    NnrpFfiStatus status = submit_result_batch(request, &native_result, &native_completed);
+    *out_completed = native_completed;
     out_result->status_code = status.status_code;
     out_result->error_family = status.error_family;
     out_result->protocol_error_code = status.protocol_error_code;
@@ -1101,6 +1260,39 @@ def _measure_throughput_metrics(
     if include_completed:
         metrics["completed_operations"] = completed
     return metrics
+
+
+def _measure_counted_throughput_metrics(
+    operation: Callable[[], int],
+    duration_seconds: float,
+    *,
+    profile: bool,
+) -> dict[str, float | int]:
+    if profile:
+        gc.collect()
+        tracemalloc.start()
+        process_start = time.process_time()
+    deadline = time.perf_counter() + duration_seconds
+    completed = 0
+    try:
+        while time.perf_counter() < deadline:
+            completed += operation()
+        if not profile:
+            return {
+                "throughput_ops_per_sec": completed / duration_seconds,
+                "completed_operations": completed,
+            }
+        _, peak_bytes = tracemalloc.get_traced_memory()
+    finally:
+        if profile:
+            tracemalloc.stop()
+    process_seconds = time.process_time() - process_start
+    return {
+        "throughput_ops_per_sec": completed / duration_seconds,
+        "completed_operations": completed,
+        "cpu_percent": (process_seconds / duration_seconds) * 100,
+        "peak_memory_bytes": int(peak_bytes),
+    }
 
 
 def _measure_allocation_smoke(operation: Callable[[], None], iterations: int) -> dict[str, float]:

@@ -392,6 +392,62 @@ def test_native_submit_result_cffi_api_loop_measures_when_wrapper_is_available(m
         def from_buffer(self, payload: bytes):
             return payload
 
+        def new(self, type_name: str):
+            if type_name == "size_t *":
+                return [0]
+            return SimpleNamespace(status_code=0, has_result=0)
+
+    class FakeCffiApi:
+        def __init__(self) -> None:
+            self.calls = 0
+            self.batch_calls = 0
+
+        def nnrp_py_client_submit_result_compact(self, *_args):
+            self.calls += 1
+            out_result = _args[-1]
+            out_result.status_code = 0
+            out_result.has_result = 1
+            return 0
+
+        def nnrp_py_client_submit_result_compact_batch(self, *_args):
+            self.batch_calls += 1
+            iterations = _args[-3]
+            out_result = _args[-2]
+            out_completed = _args[-1]
+            out_result.status_code = 0
+            out_result.has_result = 1
+            out_completed[0] = iterations
+            return 0
+
+    native_client = FakeNativeClient()
+    cffi_api = FakeCffiApi()
+    monkeypatch.setattr(benchmark, "default_artifact_root", lambda: Path("native-root"))
+    monkeypatch.setattr(benchmark, "resolve_native_artifact", lambda _root: Path("nnrp_ffi.dll"))
+    monkeypatch.setattr(benchmark, "load_native_client", lambda _artifact_path=None: native_client)
+    monkeypatch.setattr(benchmark, "_load_cffi_api_submit_result_module", lambda: (FakeFFI(), cffi_api))
+
+    result = benchmark._run_native_submit_result_cffi_api_loop(
+        "l4.native.submit_result.cffi_api.throughput",
+        {"duration_seconds": 0.01, "warmup_iterations": 1, "payload_bytes": 8, "batch_size": 8},
+    )
+
+    assert result["outcome"] == "measured"
+    assert result["metrics"]["native_binding_mode"] == "cffi_api"
+    assert result["metrics"]["native_ffi_client_submit_result_compact_calls_per_op"] == 0
+    assert result["metrics"]["native_ffi_client_submit_result_compact_batch_calls_per_op"] == 0.125
+    assert result["metrics"]["native_batch_size"] == 8
+    assert cffi_api.calls == 0
+    assert cffi_api.batch_calls > 0
+    assert native_client.connection.closed is True
+
+
+def test_native_submit_result_cffi_api_loop_uses_single_wrapper_without_batch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FakeFFI:
+        def from_buffer(self, payload: bytes):
+            return payload
+
         def new(self, _type_name: str):
             return SimpleNamespace(status_code=0, has_result=0)
 
@@ -419,9 +475,45 @@ def test_native_submit_result_cffi_api_loop_measures_when_wrapper_is_available(m
     )
 
     assert result["outcome"] == "measured"
-    assert result["metrics"]["native_binding_mode"] == "cffi_api"
+    assert result["metrics"]["native_ffi_calls_per_op"] == 1
     assert result["metrics"]["native_ffi_client_submit_result_compact_calls_per_op"] == 1
+    assert result["metrics"]["native_ffi_client_submit_result_compact_batch_calls_per_op"] == 0
     assert cffi_api.calls > 0
+    assert native_client.connection.closed is True
+
+
+def test_native_submit_result_cffi_api_loop_skips_failed_batch(monkeypatch: pytest.MonkeyPatch) -> None:
+    class FakeFFI:
+        def from_buffer(self, payload: bytes):
+            return payload
+
+        def new(self, type_name: str):
+            if type_name == "size_t *":
+                return [0]
+            return SimpleNamespace(status_code=0, has_result=0)
+
+    class FakeCffiApi:
+        def nnrp_py_client_submit_result_compact_batch(self, *_args):
+            out_result = _args[-2]
+            out_completed = _args[-1]
+            out_result.status_code = 0
+            out_result.has_result = 1
+            out_completed[0] = 1
+            return 0
+
+    native_client = FakeNativeClient()
+    monkeypatch.setattr(benchmark, "default_artifact_root", lambda: Path("native-root"))
+    monkeypatch.setattr(benchmark, "resolve_native_artifact", lambda _root: Path("nnrp_ffi.dll"))
+    monkeypatch.setattr(benchmark, "load_native_client", lambda _artifact_path=None: native_client)
+    monkeypatch.setattr(benchmark, "_load_cffi_api_submit_result_module", lambda: (FakeFFI(), FakeCffiApi()))
+
+    result = benchmark._run_native_submit_result_cffi_api_loop(
+        "l4.native.submit_result.cffi_api.throughput",
+        {"duration_seconds": 0.01, "warmup_iterations": 1, "payload_bytes": 8, "batch_size": 8},
+    )
+
+    assert result["outcome"] == "skip"
+    assert "batch failed" in result["message"]
     assert native_client.connection.closed is True
 
 
@@ -440,6 +532,54 @@ def test_native_submit_result_cffi_api_loop_skips_wrapper_failures(monkeypatch: 
 
     assert result["outcome"] == "skip"
     assert "no compiler" in result["message"]
+
+
+def test_cffi_api_submit_result_module_builds_and_loads_helpers(tmp_path: Path) -> None:
+    class FakeBuilder:
+        def __init__(self) -> None:
+            self.cdef_source = ""
+            self.set_source_args: tuple[str, str] | None = None
+
+        def cdef(self, source: str) -> None:
+            self.cdef_source = source
+
+        def set_source(self, module_name: str, source: str) -> None:
+            self.set_source_args = (module_name, source)
+
+        def compile(self, *, tmpdir: str, verbose: bool) -> str:
+            assert Path(tmpdir) == tmp_path
+            assert verbose is False
+            output = tmp_path / "compiled.py"
+            output.write_text("value = 42\n", encoding="utf-8")
+            return str(output)
+
+    builder = FakeBuilder()
+    built = benchmark._build_cffi_api_submit_result_module(lambda: builder, "compiled", tmp_path)
+
+    assert built == tmp_path / "compiled.py"
+    assert "nnrp_py_client_submit_result_compact_batch" in builder.cdef_source
+    assert builder.set_source_args is not None
+    assert builder.set_source_args[0] == "compiled"
+
+    module = benchmark._load_compiled_cffi_api_module("compiled", built)
+    assert module.value == 42
+
+
+def test_measure_counted_throughput_metrics_profiles_completed_operations() -> None:
+    calls = 0
+
+    def operation() -> int:
+        nonlocal calls
+        calls += 1
+        return 3
+
+    metrics = benchmark._measure_counted_throughput_metrics(operation, 0.001, profile=True)
+
+    assert metrics["completed_operations"] >= 3
+    assert metrics["throughput_ops_per_sec"] > 0
+    assert metrics["cpu_percent"] >= 0
+    assert metrics["peak_memory_bytes"] >= 0
+    assert calls > 0
 
 
 def test_drain_native_setup_events_ignores_single_poll_would_block() -> None:

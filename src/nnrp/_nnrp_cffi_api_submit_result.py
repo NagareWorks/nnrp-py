@@ -46,6 +46,17 @@ ffi.cdef(
         size_t max_events;
     } NnrpClientSubmitResultRequest;
 
+    typedef struct NnrpClientSubmitResultBatchRequest {
+        NnrpHandle session;
+        unsigned long long operation_id_start;
+        unsigned int frame_id_start;
+        unsigned int frame_id_stride;
+        NnrpBufferView submit_payload;
+        NnrpBufferView result_payload;
+        size_t max_events;
+        size_t iterations;
+    } NnrpClientSubmitResultBatchRequest;
+
     typedef struct NnrpCompactResult {
         NnrpFfiStatus status;
         unsigned char has_result;
@@ -74,6 +85,12 @@ ffi.cdef(
     NnrpFfiStatus nnrp_client_submit_result_compact(
         NnrpClientSubmitResultRequest request,
         NnrpCompactResult *out_result
+    );
+
+    NnrpFfiStatus nnrp_client_submit_result_compact_batch(
+        NnrpClientSubmitResultBatchRequest request,
+        NnrpCompactResult *out_last_result,
+        size_t *out_completed
     );
     """
 )
@@ -142,6 +159,68 @@ class _CffiAbiSubmitResultApi:
 
         native_result = ffi.new("NnrpCompactResult *")
         status = native.nnrp_client_submit_result_compact(request[0], native_result)
+        out_result.status_code = status.status_code
+        out_result.error_family = status.error_family
+        out_result.protocol_error_code = status.protocol_error_code
+        out_result.detail_code = status.detail_code
+        if status.status_code != 0:
+            out_result.has_result = 0
+            return 0
+
+        out_result.status_code = native_result.status.status_code
+        out_result.error_family = native_result.status.error_family
+        out_result.protocol_error_code = native_result.status.protocol_error_code
+        out_result.detail_code = native_result.status.detail_code
+        out_result.has_result = native_result.has_result
+        out_result.event_kind = native_result.event_kind
+        out_result.result_state = native_result.result_state
+        out_result.operation_id = native_result.operation_id
+        out_result.frame_id = native_result.frame_id
+        out_result.payload_len = native_result.payload.len
+        return 0
+
+    def nnrp_py_client_submit_result_compact_batch(
+        self,
+        library_path: bytes | str | os.PathLike[str],
+        session_kind: int,
+        session_id: int,
+        session_generation: int,
+        session_flags: int,
+        operation_id_start: int,
+        frame_id_start: int,
+        frame_id_stride: int,
+        payload: Any,
+        payload_len: int,
+        max_events: int,
+        iterations: int,
+        out_result: Any,
+        out_completed: Any,
+    ) -> int:
+        if out_result == ffi.NULL or out_completed == ffi.NULL:
+            return -1
+        native = _load_native_library(library_path)
+        if not hasattr(native, "nnrp_client_submit_result_compact_batch"):
+            return -2
+
+        request = ffi.new("NnrpClientSubmitResultBatchRequest *")
+        request.session.kind = session_kind
+        request.session.id = session_id
+        request.session.generation = session_generation
+        request.session.flags = session_flags
+        request.operation_id_start = operation_id_start
+        request.frame_id_start = frame_id_start
+        request.frame_id_stride = frame_id_stride
+        request.submit_payload.ptr = ffi.cast("const unsigned char *", payload)
+        request.submit_payload.len = payload_len
+        request.result_payload.ptr = ffi.cast("const unsigned char *", payload)
+        request.result_payload.len = payload_len
+        request.max_events = max_events
+        request.iterations = iterations
+
+        native_result = ffi.new("NnrpCompactResult *")
+        native_completed = ffi.new("size_t *")
+        status = native.nnrp_client_submit_result_compact_batch(request[0], native_result, native_completed)
+        out_completed[0] = native_completed[0]
         out_result.status_code = status.status_code
         out_result.error_family = status.error_family
         out_result.protocol_error_code = status.protocol_error_code

@@ -45,6 +45,8 @@ jobs:
       NNRP_PY_RELEASE_PYTHON_VERSION: ${{ github.event_name == 'workflow_dispatch' && inputs.python_version || vars.NNRP_PY_RELEASE_PYTHON_VERSION || '3.11' }}
       CIBW_ARCHS: ${{ matrix.cibw_archs }}
       CIBW_PLATFORM: ${{ matrix.cibw_platform }}
+      CIBW_BUILD_FRONTEND: build
+      CIBW_BUILD_OVERRIDE: ${{ matrix.cibw_build }}
       CIBW_SKIP: "pp* *musllinux*"
       CIBW_TEST_SKIP: "*"
       CIBW_MANYLINUX_I686_IMAGE: quay.io/pypa/manylinux_2_28_i686
@@ -78,12 +80,14 @@ jobs:
           - name: android
             os: ubuntu-latest
             cibw_platform: android
+            cibw_build: cp313-*
             cibw_archs: x86_64 arm64_v8a
             optional: true
           - name: ios
             os: macos-14
             cibw_platform: ios
-            cibw_archs: arm64 arm64_iphonesimulator x86_64_iphonesimulator
+            cibw_build: cp313-*
+            cibw_archs: arm64_iphoneos arm64_iphonesimulator x86_64_iphonesimulator
             optional: true
 
     steps:
@@ -132,7 +136,11 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          export CIBW_BUILD="cp${NNRP_PY_RELEASE_PYTHON_VERSION//./}-*"
+          if [ -n "${CIBW_BUILD_OVERRIDE}" ]; then
+            export CIBW_BUILD="${CIBW_BUILD_OVERRIDE}"
+          else
+            export CIBW_BUILD="cp${NNRP_PY_RELEASE_PYTHON_VERSION//./}-*"
+          fi
           python -m cibuildwheel artifacts/cffi-api-build --output-dir artifacts/cffi-api-wheels
 
       - name: Extract cffi API extensions

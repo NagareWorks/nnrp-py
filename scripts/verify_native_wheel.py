@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 import zipfile
 from collections.abc import Iterable
@@ -45,6 +46,7 @@ class WheelNativeSummary:
     artifact_tags: tuple[str, ...]
     platform_tag: str
     cffi_api_entries: tuple[str, ...] = ()
+    transport_scopes: tuple[str, ...] = ()
 
     @property
     def has_native_artifacts(self) -> bool:
@@ -63,6 +65,7 @@ def inspect_wheel(path: Path) -> WheelNativeSummary:
     platform_tag = _wheel_platform_tag(path)
     with zipfile.ZipFile(path) as archive:
         names = tuple(archive.namelist())
+        transport_scopes = _transport_scopes(archive, names)
     manifests = tuple(
         name for name in names if name.startswith(NATIVE_ARTIFACT_PREFIX) and name.endswith("/manifest.json")
     )
@@ -75,7 +78,15 @@ def inspect_wheel(path: Path) -> WheelNativeSummary:
         for name in names
         if name.startswith(CFFI_API_MODULE_PREFIX) and name.endswith(CFFI_API_SUFFIXES)
     )
-    return WheelNativeSummary(path, manifests, libraries, artifact_tags, platform_tag, cffi_api_entries)
+    return WheelNativeSummary(
+        path,
+        manifests,
+        libraries,
+        artifact_tags,
+        platform_tag,
+        cffi_api_entries,
+        transport_scopes,
+    )
 
 
 def inspect_dist(dist: Path) -> list[WheelNativeSummary]:
@@ -94,6 +105,7 @@ def verify_native_wheels(
     verify_platform_tag: bool = False,
     require_cffi_api: bool = False,
     require_compiled_cffi_api: bool = False,
+    require_split_transports: bool = False,
 ) -> None:
     summary_list = list(summaries)
     failures = [
@@ -153,6 +165,23 @@ def verify_native_wheels(
         wheel_names = ", ".join(summary.wheel.name for summary in missing_compiled_cffi_api)
         raise ValueError(f"wheel is missing packaged compiled cffi API module: {wheel_names}")
 
+    split_transport_failures = [
+        summary
+        for summary in summary_list
+        if require_split_transports
+        and summary.has_native_artifacts
+        and (
+            set(summary.transport_scopes) != {"tcp", "quic"}
+            or any(scope == "all" for scope in summary.transport_scopes)
+        )
+    ]
+    if split_transport_failures:
+        details = ", ".join(
+            f"{summary.wheel.name} has transport scopes {summary.transport_scopes or ('-',)}"
+            for summary in split_transport_failures
+        )
+        raise ValueError(f"wheel must embed split TCP and QUIC native transport artifacts: {details}")
+
 
 def _artifact_tags(names: Iterable[str]) -> set[str]:
     return {
@@ -162,6 +191,22 @@ def _artifact_tags(names: Iterable[str]) -> set[str]:
         for parts in [name.split("/")]
         if len(parts) >= 4 and parts[2]
     }
+
+
+def _transport_scopes(archive: zipfile.ZipFile, names: Iterable[str]) -> tuple[str, ...]:
+    scopes: set[str] = set()
+    for name in names:
+        if not name.startswith(NATIVE_ARTIFACT_PREFIX) or not name.endswith("/manifest.json"):
+            continue
+        try:
+            manifest = json.loads(archive.read(name))
+        except json.JSONDecodeError:
+            continue
+        if isinstance(manifest, dict):
+            scope = manifest.get("transport_scope")
+            if isinstance(scope, str) and scope:
+                scopes.add(scope)
+    return tuple(sorted(scopes))
 
 
 def _wheel_platform_tag(path: Path) -> str:
@@ -190,6 +235,7 @@ def main() -> int:
     parser.add_argument("--verify-platform-tag", action="store_true")
     parser.add_argument("--require-cffi-api", action="store_true")
     parser.add_argument("--require-compiled-cffi-api", action="store_true")
+    parser.add_argument("--require-split-transports", action="store_true")
     args = parser.parse_args()
 
     try:
@@ -202,6 +248,7 @@ def main() -> int:
             verify_platform_tag=args.verify_platform_tag,
             require_cffi_api=args.require_cffi_api,
             require_compiled_cffi_api=args.require_compiled_cffi_api,
+            require_split_transports=args.require_split_transports,
         )
     except ValueError as error:
         print(error, file=sys.stderr)
@@ -214,6 +261,7 @@ def main() -> int:
             f"{summary.wheel.name}: "
             f"{len(summary.manifests)} manifest(s), {library_count} native {library_label}, "
             f"platform={summary.platform_tag}, artifacts={','.join(summary.artifact_tags) or '-'}, "
+            f"transports={','.join(summary.transport_scopes) or '-'}, "
             f"cffi_api={len(summary.cffi_api_entries)}, "
             f"compiled_cffi_api={1 if summary.has_compiled_cffi_api else 0}"
         )

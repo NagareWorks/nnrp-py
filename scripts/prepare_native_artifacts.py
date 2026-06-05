@@ -77,6 +77,9 @@ def _install_package(package_dir: Path, output: Path) -> list[Path]:
     os_name = _require_string(manifest, "os")
     arch = _normalize_arch(_require_string(manifest, "arch"))
     target_dir = output / f"{os_name}-{arch}"
+    transport_scope = _transport_scope(manifest)
+    if transport_scope != "all":
+        target_dir = target_dir / transport_scope
     target_dir.mkdir(parents=True, exist_ok=True)
 
     installed: list[Path] = []
@@ -127,6 +130,15 @@ def _library_names(manifest: dict[str, Any]) -> tuple[str, ...]:
         return (library,)
 
     raise ValueError("native artifact manifest does not list a supported nnrp-ffi library")
+
+
+def _transport_scope(manifest: dict[str, Any]) -> str:
+    scope = manifest.get("transport_scope")
+    if scope is None:
+        return "all"
+    if scope in {"all", "tcp", "quic"}:
+        return scope
+    raise ValueError(f"native artifact manifest lists unsupported transport scope: {scope}")
 
 
 def main() -> int:

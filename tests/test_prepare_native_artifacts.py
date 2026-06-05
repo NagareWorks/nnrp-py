@@ -18,7 +18,15 @@ prepare_native_artifacts = _MODULE.prepare_native_artifacts
 prepare_native_artifacts_main = _MODULE.main
 
 
-def _write_package(root: Path, name: str, *, os_name: str, arch: str, library: str) -> Path:
+def _write_package(
+    root: Path,
+    name: str,
+    *,
+    os_name: str,
+    arch: str,
+    library: str,
+    transport_scope: str = "all",
+) -> Path:
     package_dir = root / name
     package_dir.mkdir(parents=True)
     (package_dir / library).write_bytes(b"native")
@@ -31,6 +39,8 @@ def _write_package(root: Path, name: str, *, os_name: str, arch: str, library: s
                 "library_kind": "dynamic",
                 "library": library,
                 "libraries": [library],
+                "transport_scope": transport_scope,
+                "transport_slots": [transport_scope] if transport_scope != "all" else ["tcp", "quic"],
             }
         ),
         encoding="utf-8",
@@ -39,17 +49,49 @@ def _write_package(root: Path, name: str, *, os_name: str, arch: str, library: s
 
 
 def test_prepare_native_artifacts_installs_directory_packages(tmp_path: Path) -> None:
-    package_dir = _write_package(tmp_path, "linux-aarch64", os_name="linux", arch="aarch64", library="libnnrp_ffi.so")
+    package_dir = _write_package(
+        tmp_path,
+        "linux-aarch64",
+        os_name="linux",
+        arch="aarch64",
+        library="libnnrp_ffi.so",
+        transport_scope="tcp",
+    )
     output = tmp_path / "out"
 
     installed = prepare_native_artifacts([package_dir], output)
 
-    assert output.joinpath("linux-arm64", "libnnrp_ffi.so").read_bytes() == b"native"
-    assert output.joinpath("linux-arm64", "manifest.json").is_file()
+    assert output.joinpath("linux-arm64", "tcp", "libnnrp_ffi.so").read_bytes() == b"native"
+    assert output.joinpath("linux-arm64", "tcp", "manifest.json").is_file()
     assert installed == [
-        output / "linux-arm64" / "libnnrp_ffi.so",
-        output / "linux-arm64" / "manifest.json",
+        output / "linux-arm64" / "tcp" / "libnnrp_ffi.so",
+        output / "linux-arm64" / "tcp" / "manifest.json",
     ]
+
+
+def test_prepare_native_artifacts_keeps_split_transport_artifacts_side_by_side(tmp_path: Path) -> None:
+    tcp_package = _write_package(
+        tmp_path,
+        "tcp-linux-x86_64",
+        os_name="linux",
+        arch="x86_64",
+        library="libnnrp_ffi.so",
+        transport_scope="tcp",
+    )
+    quic_package = _write_package(
+        tmp_path,
+        "quic-linux-x86_64",
+        os_name="linux",
+        arch="x86_64",
+        library="libnnrp_ffi.so",
+        transport_scope="quic",
+    )
+    output = tmp_path / "out"
+
+    prepare_native_artifacts([tcp_package, quic_package], output)
+
+    assert output.joinpath("linux-x86_64", "tcp", "libnnrp_ffi.so").read_bytes() == b"native"
+    assert output.joinpath("linux-x86_64", "quic", "libnnrp_ffi.so").read_bytes() == b"native"
 
 
 def test_prepare_native_artifacts_normalizes_ios_simulator_arch(tmp_path: Path) -> None:

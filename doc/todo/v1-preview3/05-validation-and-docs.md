@@ -34,6 +34,8 @@
   - [x] Add schema descriptor native parse/write latency smoke.
   - [x] Gate smoke thresholds with stable local baselines before enabling CI failure.
 - [x] Add release packaging validation for installing `nnrp-rs` native artifacts into the Python wheel source tree.
+  - [x] Add release validation that requires split TCP and QUIC native transport artifacts in every native wheel.
+  - [x] Add release validation that rejects legacy `transport_scope = all` native wheels before publish.
 
 ## Documentation And Rollout
 

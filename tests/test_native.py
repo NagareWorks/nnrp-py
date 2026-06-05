@@ -967,6 +967,27 @@ def test_resolve_native_artifact_uses_platform_tag_and_library_name(tmp_path: Pa
     assert resolve_native_artifact(tmp_path, NativePlatform("linux", "x86_64")) == artifact
 
 
+def test_resolve_native_artifact_supports_split_transport_artifacts(tmp_path: Path) -> None:
+    tcp_dir = tmp_path / "linux-x86_64" / "tcp"
+    quic_dir = tmp_path / "linux-x86_64" / "quic"
+    tcp_dir.mkdir(parents=True)
+    quic_dir.mkdir(parents=True)
+    tcp_artifact = tcp_dir / "libnnrp_ffi.so"
+    quic_artifact = quic_dir / "libnnrp_ffi.so"
+    tcp_artifact.write_bytes(b"tcp")
+    quic_artifact.write_bytes(b"quic")
+    native_platform = NativePlatform("linux", "x86_64")
+
+    assert resolve_native_artifact(tmp_path, native_platform) == tcp_artifact
+    assert resolve_native_artifact(tmp_path, native_platform, transport="tcp") == tcp_artifact
+    assert resolve_native_artifact(tmp_path, native_platform, transport="quic") == quic_artifact
+
+
+def test_resolve_native_artifact_rejects_unknown_transport_scope(tmp_path: Path) -> None:
+    with pytest.raises(NativeArtifactError, match="unsupported native transport scope"):
+        resolve_native_artifact(tmp_path, NativePlatform("linux", "x86_64"), transport="websocket")
+
+
 def test_resolve_native_artifact_uses_current_platform_when_not_provided(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

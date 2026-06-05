@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import sys
 import zipfile
 from importlib.util import module_from_spec, spec_from_file_location
@@ -23,7 +24,23 @@ verify_native_wheel_main = _MODULE.main
 def _write_wheel(path: Path, names: list[str]) -> Path:
     with zipfile.ZipFile(path, "w") as archive:
         for name in names:
-            archive.writestr(name, b"wheel-data")
+            if name.endswith("manifest.json"):
+                scope = "all"
+                if "/tcp/" in name:
+                    scope = "tcp"
+                elif "/quic/" in name:
+                    scope = "quic"
+                archive.writestr(
+                    name,
+                    json.dumps(
+                        {
+                            "transport_scope": scope,
+                            "transport_slots": [scope] if scope != "all" else ["tcp", "quic"],
+                        }
+                    ).encode(),
+                )
+            else:
+                archive.writestr(name, b"wheel-data")
     return path
 
 
@@ -45,6 +62,7 @@ def test_inspect_wheel_finds_packaged_native_artifacts(tmp_path: Path) -> None:
     assert summary.artifact_tags == ("windows-x86_64",)
     assert summary.platform_tag == "win_amd64"
     assert summary.cffi_api_entries == ("nnrp/_nnrp_cffi_api_submit_result.py",)
+    assert summary.transport_scopes == ("all",)
 
 
 def test_verify_native_wheels_rejects_empty_native_payload(tmp_path: Path) -> None:
@@ -90,6 +108,30 @@ def test_verify_native_wheels_rejects_multiple_embedded_platforms(tmp_path: Path
 
     with pytest.raises(ValueError, match="exactly one native artifact platform"):
         verify_native_wheels([summary], require_native=True, require_single_platform=True)
+
+
+def test_verify_native_wheels_requires_split_transport_artifacts(tmp_path: Path) -> None:
+    legacy = _write_wheel(
+        tmp_path / "nnrp_py-1.0.0rc3-py3-none-manylinux_2_28_x86_64.whl",
+        [
+            "nnrp/native_artifacts/linux-x86_64/manifest.json",
+            "nnrp/native_artifacts/linux-x86_64/libnnrp_ffi.so",
+        ],
+    )
+    split = _write_wheel(
+        tmp_path / "nnrp_py-1.0.0rc3.post4-py3-none-manylinux_2_28_x86_64.whl",
+        [
+            "nnrp/native_artifacts/linux-x86_64/tcp/manifest.json",
+            "nnrp/native_artifacts/linux-x86_64/tcp/libnnrp_ffi.so",
+            "nnrp/native_artifacts/linux-x86_64/quic/manifest.json",
+            "nnrp/native_artifacts/linux-x86_64/quic/libnnrp_ffi.so",
+        ],
+    )
+
+    with pytest.raises(ValueError, match="split TCP and QUIC"):
+        verify_native_wheels([inspect_wheel(legacy)], require_native=True, require_split_transports=True)
+
+    verify_native_wheels([inspect_wheel(split)], require_native=True, require_split_transports=True)
 
 
 def test_verify_native_wheels_rejects_platform_tag_mismatch(tmp_path: Path) -> None:

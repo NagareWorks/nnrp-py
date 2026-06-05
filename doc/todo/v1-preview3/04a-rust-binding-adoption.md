@@ -50,6 +50,8 @@
   - [x] Build platform-specific wheels instead of a `py3-none-any` wheel when native artifacts are required.
   - [x] Ensure each wheel contains only the native artifact for its platform tag.
   - [x] Verify wheel tags match the embedded native artifact OS/architecture.
+  - [x] Package split TCP and QUIC native transport artifacts side by side inside each platform wheel.
+  - [x] Reject release wheels that still embed the legacy all-in-one `nnrp-ffi` native artifact.
   - [x] Keep sdist free of prebuilt native libraries unless release policy explicitly changes.
   - [x] Add CI/release checks that fail if a native release publishes a universal wheel.
 - [x] Add a platform and architecture resolver for x86, x86_64, arm, and arm64 variants.

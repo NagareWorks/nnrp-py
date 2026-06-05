@@ -3163,13 +3163,34 @@ def default_artifact_root() -> Path:
 def resolve_native_artifact(
     root: Path | str | None = None,
     native_platform: NativePlatform | None = None,
+    transport: str | None = None,
 ) -> Path:
     selected_platform = native_platform or current_native_platform()
     artifact_root = Path(root) if root is not None else default_artifact_root()
-    artifact_path = artifact_root / selected_platform.tag / native_library_name(selected_platform.os_name)
-    if not artifact_path.is_file():
-        raise NativeArtifactError(f"native artifact was not found: {artifact_path}")
-    return artifact_path
+    platform_dir = artifact_root / selected_platform.tag
+    library_name = native_library_name(selected_platform.os_name)
+
+    if transport is not None:
+        candidate_dirs = [platform_dir / _normalize_native_transport_scope(transport)]
+    else:
+        candidate_dirs = [platform_dir, platform_dir / "tcp", platform_dir / "quic"]
+
+    for candidate_dir in candidate_dirs:
+        artifact_path = candidate_dir / library_name
+        if artifact_path.is_file():
+            return artifact_path
+
+    checked = ", ".join(str(candidate_dir / library_name) for candidate_dir in candidate_dirs)
+    raise NativeArtifactError(f"native artifact was not found; checked: {checked}")
+
+
+def _normalize_native_transport_scope(value: str) -> str:
+    normalized = value.strip().lower().replace("_", "-")
+    if normalized in {"tcp", "quic"}:
+        return normalized
+    if normalized in {"", "auto", "default"}:
+        return "tcp"
+    raise NativeArtifactError(f"unsupported native transport scope: {value}")
 
 
 def load_native_library(artifact_path: Path | str) -> ctypes.CDLL:
@@ -3214,10 +3235,15 @@ def load_native_runtime(
     *,
     root: Path | str | None = None,
     native_platform: NativePlatform | None = None,
+    transport: str | None = None,
     library: Any | None = None,
     cffi_submit_result_api: _NativeCffiSubmitResultApi | None = None,
 ) -> NativeRuntimeEntrypoints:
-    resolved_path = Path(artifact_path) if artifact_path is not None else resolve_native_artifact(root, native_platform)
+    resolved_path = (
+        Path(artifact_path)
+        if artifact_path is not None
+        else resolve_native_artifact(root, native_platform, transport=transport)
+    )
     loaded_library = library if library is not None else load_native_library(resolved_path)
     capabilities = _call_runtime_capabilities(loaded_library)
     _validate_runtime_capabilities(capabilities)
@@ -3236,6 +3262,7 @@ def load_native_client(
     *,
     root: Path | str | None = None,
     native_platform: NativePlatform | None = None,
+    transport: str | None = None,
     library: Any | None = None,
     cffi_submit_result_api: _NativeCffiSubmitResultApi | None = None,
 ) -> NativeRuntimeClient:
@@ -3244,6 +3271,7 @@ def load_native_client(
             artifact_path,
             root=root,
             native_platform=native_platform,
+            transport=transport,
             library=library,
             cffi_submit_result_api=cffi_submit_result_api,
         )
@@ -3255,10 +3283,17 @@ def load_native_schema_codec(
     *,
     root: Path | str | None = None,
     native_platform: NativePlatform | None = None,
+    transport: str | None = None,
     library: Any | None = None,
 ) -> NativeSchemaCodec:
     return NativeSchemaCodec(
-        load_native_runtime(artifact_path, root=root, native_platform=native_platform, library=library)
+        load_native_runtime(
+            artifact_path,
+            root=root,
+            native_platform=native_platform,
+            transport=transport,
+            library=library,
+        )
     )
 
 
@@ -3267,10 +3302,17 @@ def load_native_recovery_codec(
     *,
     root: Path | str | None = None,
     native_platform: NativePlatform | None = None,
+    transport: str | None = None,
     library: Any | None = None,
 ) -> NativeRecoveryCodec:
     return NativeRecoveryCodec(
-        load_native_runtime(artifact_path, root=root, native_platform=native_platform, library=library)
+        load_native_runtime(
+            artifact_path,
+            root=root,
+            native_platform=native_platform,
+            transport=transport,
+            library=library,
+        )
     )
 
 
@@ -3279,12 +3321,19 @@ def select_native_runtime_backend(
     *,
     root: Path | str | None = None,
     native_platform: NativePlatform | None = None,
+    transport: str | None = None,
     library: Any | None = None,
     fallback: NativeRuntimeBackend | None = None,
     require_native: bool = False,
 ) -> NativeRuntimeBackend:
     try:
-        return load_native_client(artifact_path, root=root, native_platform=native_platform, library=library)
+        return load_native_client(
+            artifact_path,
+            root=root,
+            native_platform=native_platform,
+            transport=transport,
+            library=library,
+        )
     except NativeArtifactError:
         if fallback is None or require_native:
             raise
@@ -3296,9 +3345,14 @@ def probe_native_artifact(
     *,
     root: Path | str | None = None,
     native_platform: NativePlatform | None = None,
+    transport: str | None = None,
     library: Any | None = None,
 ) -> NativeProbeResult:
-    resolved_path = Path(artifact_path) if artifact_path is not None else resolve_native_artifact(root, native_platform)
+    resolved_path = (
+        Path(artifact_path)
+        if artifact_path is not None
+        else resolve_native_artifact(root, native_platform, transport=transport)
+    )
     loaded_library = library if library is not None else load_native_library(resolved_path)
     capabilities = _call_runtime_capabilities(loaded_library)
     _validate_runtime_capabilities(capabilities)

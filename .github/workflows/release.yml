@@ -254,7 +254,8 @@ jobs:
           mkdir -p artifacts/native-downloads
           gh release download "$tag" \
             --repo "${{ github.repository_owner }}/nnrp-rs" \
-            --pattern "nnrp-ffi-native-*-${version}.zip" \
+            --pattern "nnrp-ffi-transport-tcp-native-*-${version}.zip" \
+            --pattern "nnrp-ffi-transport-quic-native-*-${version}.zip" \
             --dir artifacts/native-downloads
 
       - name: Prepare package native artifacts
@@ -305,7 +306,7 @@ jobs:
             --abi3-python-tag "$NNRP_PY_RELEASE_PYTHON_VERSION"
 
       - name: Verify packaged native artifacts
-        run: python scripts/verify_native_wheel.py --dist dist --require-native --reject-universal-native --require-single-platform --verify-platform-tag --require-cffi-api --require-compiled-cffi-api
+        run: python scripts/verify_native_wheel.py --dist dist --require-native --reject-universal-native --require-single-platform --verify-platform-tag --require-cffi-api --require-compiled-cffi-api --require-split-transports
 
       - name: Upload workflow artifacts
         uses: actions/upload-artifact@v6

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import sys
 import zipfile
 from importlib.util import module_from_spec, spec_from_file_location
@@ -25,10 +26,26 @@ _retag_wheel_metadata = _MODULE._retag_wheel_metadata
 def _write_staging_wheel(path: Path) -> Path:
     with zipfile.ZipFile(path, "w") as archive:
         archive.writestr("nnrp/__init__.py", b"")
-        archive.writestr("nnrp/native_artifacts/linux-x86_64/manifest.json", b"{}")
-        archive.writestr("nnrp/native_artifacts/linux-x86_64/libnnrp_ffi.so", b"linux")
-        archive.writestr("nnrp/native_artifacts/windows-x86_64/manifest.json", b"{}")
-        archive.writestr("nnrp/native_artifacts/windows-x86_64/nnrp_ffi.dll", b"windows")
+        archive.writestr(
+            "nnrp/native_artifacts/linux-x86_64/tcp/manifest.json",
+            json.dumps({"transport_scope": "tcp", "transport_slots": ["tcp"]}).encode(),
+        )
+        archive.writestr("nnrp/native_artifacts/linux-x86_64/tcp/libnnrp_ffi.so", b"linux-tcp")
+        archive.writestr(
+            "nnrp/native_artifacts/linux-x86_64/quic/manifest.json",
+            json.dumps({"transport_scope": "quic", "transport_slots": ["quic"]}).encode(),
+        )
+        archive.writestr("nnrp/native_artifacts/linux-x86_64/quic/libnnrp_ffi.so", b"linux-quic")
+        archive.writestr(
+            "nnrp/native_artifacts/windows-x86_64/tcp/manifest.json",
+            json.dumps({"transport_scope": "tcp", "transport_slots": ["tcp"]}).encode(),
+        )
+        archive.writestr("nnrp/native_artifacts/windows-x86_64/tcp/nnrp_ffi.dll", b"windows-tcp")
+        archive.writestr(
+            "nnrp/native_artifacts/windows-x86_64/quic/manifest.json",
+            json.dumps({"transport_scope": "quic", "transport_slots": ["quic"]}).encode(),
+        )
+        archive.writestr("nnrp/native_artifacts/windows-x86_64/quic/nnrp_ffi.dll", b"windows-quic")
         archive.writestr("nnrp/native_artifacts/ios-arm64-sim/manifest.json", b"{}")
         archive.writestr("nnrp/native_artifacts/ios-arm64-sim/libnnrp_ffi.a", b"ios-sim")
         archive.writestr(
@@ -57,8 +74,10 @@ def test_build_native_wheels_splits_artifacts_and_retags_platforms(tmp_path: Pat
         names = set(archive.namelist())
         wheel_metadata = archive.read("nnrp_py-1.0.0rc3.dist-info/WHEEL").decode("utf-8")
 
-    assert "nnrp/native_artifacts/linux-x86_64/libnnrp_ffi.so" in names
+    assert "nnrp/native_artifacts/linux-x86_64/tcp/libnnrp_ffi.so" in names
+    assert "nnrp/native_artifacts/linux-x86_64/quic/libnnrp_ffi.so" in names
     assert "nnrp/native_artifacts/windows-x86_64/nnrp_ffi.dll" not in names
+    assert "nnrp/native_artifacts/windows-x86_64/tcp/nnrp_ffi.dll" not in names
     assert "Root-Is-Purelib: false" in wheel_metadata
     assert "Tag: py3-none-manylinux_2_28_x86_64" in wheel_metadata
     assert "nnrp_py-1.0.0rc3.dist-info/RECORD" in names

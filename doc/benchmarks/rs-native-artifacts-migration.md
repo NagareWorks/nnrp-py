@@ -18,7 +18,7 @@ delegated to versioned native artifacts.
 
 ## Pinned Native Contract
 
-The current Python package consumes `nnrp-rs` native artifact version `1.0.0-preview.3.7`.
+The current Python package consumes `nnrp-rs` native artifact version `1.0.0-preview.3.8`.
 
 This artifact contract includes:
 
@@ -61,7 +61,7 @@ The SDK-local benchmark plan lives in `doc/benchmarks/native-runtime-benchmark-p
 | --- | --- | --- | --- | --- | --- | --- | --- |
 | Fixture baseline | 2026-05-29 | 1e88eac | N/A | 3.13.1 | windows/amd64 | Intel64 Family 6 Model 183 Stepping 1, GenuineIntel | SDK-local pure Python fixture submit/result loop, 1024-byte payload. |
 | Native ctypes fallback | 2026-05-29 | 1e88eac | 1.0.0-preview.3.6 | 3.13.1 | windows/amd64 | Intel64 Family 6 Model 183 Stepping 1, GenuineIntel | Local release artifact installed with `scripts/prepare_native_artifacts.py`; `NNRP_NATIVE_BINDING_MODE=ctypes`. |
-| Native cffi API batch | 2026-06-03 | pending | 1.0.0-preview.3.7 | 3.13.5 | windows/amd64 | Intel64 Family 6 Model 15 Stepping 11, GenuineIntel | Local release build staged under `NNRP_NATIVE_ARTIFACT_ROOT`; cffi API wrapper calls `nnrp_client_submit_result_compact_batch`. |
+| Native cffi API batch | 2026-06-03 | pending | 1.0.0-preview.3.8 | 3.13.5 | windows/amd64 | Intel64 Family 6 Model 15 Stepping 11, GenuineIntel | Local release build staged under `NNRP_NATIVE_ARTIFACT_ROOT`; cffi API wrapper calls `nnrp_client_submit_result_compact_batch`. |
 
 ## Latency Benchmarks
 

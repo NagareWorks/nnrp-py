@@ -60,8 +60,8 @@ The SDK-local benchmark plan lives in `doc/benchmarks/native-runtime-benchmark-p
 | Run | Date | SDK commit | nnrp-rs artifact | Python | OS/arch | CPU | Notes |
 | --- | --- | --- | --- | --- | --- | --- | --- |
 | Fixture baseline | 2026-05-29 | 1e88eac | N/A | 3.13.1 | windows/amd64 | Intel64 Family 6 Model 183 Stepping 1, GenuineIntel | SDK-local pure Python fixture submit/result loop, 1024-byte payload. |
-| Native ctypes fallback | 2026-05-29 | 1e88eac | 1.0.0-preview.3.6 | 3.13.1 | windows/amd64 | Intel64 Family 6 Model 183 Stepping 1, GenuineIntel | Local release artifact installed with `scripts/prepare_native_artifacts.py`; `NNRP_NATIVE_BINDING_MODE=ctypes`. |
-| Native cffi API batch | 2026-06-03 | pending | 1.0.0-preview.3.8 | 3.13.5 | windows/amd64 | Intel64 Family 6 Model 15 Stepping 11, GenuineIntel | Local release build staged under `NNRP_NATIVE_ARTIFACT_ROOT`; cffi API wrapper calls `nnrp_client_submit_result_compact_batch`. |
+| Native ctypes fallback | 2026-06-06 | a7acfba | 1.0.0-preview.3.8 | 3.13.1 | windows/amd64 | Intel64 Family 6 Model 183 Stepping 1, GenuineIntel | Split TCP/QUIC release artifacts installed with `scripts/prepare_native_artifacts.py`; `NNRP_NATIVE_BINDING_MODE=ctypes`. |
+| Native cffi API batch | 2026-06-06 | a7acfba | 1.0.0-preview.3.8 | 3.13.1 | windows/amd64 | Intel64 Family 6 Model 183 Stepping 1, GenuineIntel | Same split artifact install; cffi API wrapper calls `nnrp_client_submit_result_compact_batch` in 1024-operation batches. |
 
 ## Latency Benchmarks
 
@@ -84,17 +84,17 @@ The SDK-local benchmark plan lives in `doc/benchmarks/native-runtime-benchmark-p
 | Benchmark | Payload | Duration | Binding/runtime path | Throughput | Delta vs fixture baseline | Notes |
 | --- | --- | ---: | --- | ---: | ---: | --- |
 | Submit/result loop | 1024-byte inline payload | 10 s | Pure Python fixture helper | 264148.8 ops/s | baseline | Fixture/diagnostic path. |
-| Submit/result loop | 1024-byte inline payload | 10 s | Native compact ABI through `ctypes` | 434336.7 ops/s | +64.4% | Zero-compiler fallback path; one compact Rust FFI call per operation. |
-| Submit/result loop | 1024-byte inline payload | 10 s | Native batch compact ABI through cffi API | 3753062.4 ops/s | +1320.8% | Preferred packaged fast path; one batch wrapper call per 1024 operations. |
-| Batch event polling | empty batch | 10 s | Native batch event polling through `ctypes` | 398662.6 ops/s | N/A | Native pump smoke baseline. |
+| Submit/result loop | 1024-byte inline payload | 10 s | Native compact ABI through `ctypes` | 400045.5 ops/s | +51.4% | Zero-compiler fallback path; one compact Rust FFI call per operation. |
+| Submit/result loop | 1024-byte inline payload | 10 s | Native batch compact ABI through cffi API | 8196608.0 ops/s | +3003.8% | Preferred packaged fast path; one batch wrapper call per 1024 operations. Split artifacts are slightly faster than the previous all-in-one artifact run, so no split regression was observed. |
+| Batch event polling | empty batch | 10 s | Native batch event polling through `ctypes` | 390234.1 ops/s | N/A | Native pump smoke baseline. |
 
 ## Profiled CPU And Memory Smoke
 
 | Benchmark | Payload | Duration | Binding/runtime path | Throughput under tracing | CPU | Peak traced memory | Notes |
 | --- | --- | ---: | --- | ---: | ---: | ---: | --- |
-| Submit/result loop | 1024-byte inline payload | 10 s | Native compact ABI through `ctypes` | 42198.9 ops/s | 98.6% | 1188 B | Tracing overhead is intentionally not compared with raw throughput. |
-| Submit/result loop | 1024-byte inline payload | 10 s | Native batch compact ABI through cffi API | 2239283.2 ops/s | 62.0% | 380 B | Batch wrapper keeps Python-side traced memory nearly flat. |
-| Batch event polling | empty batch | 10 s | Native batch event polling through `ctypes` | 77871.8 ops/s | 99.1% | 6361 B | Native pump memory baseline. |
+| Submit/result loop | 1024-byte inline payload | 10 s | Native compact ABI through `ctypes` | 40434.6 ops/s | 98.1% | 1188 B | Tracing overhead is intentionally not compared with raw throughput. |
+| Submit/result loop | 1024-byte inline payload | 10 s | Native batch compact ABI through cffi API | 7985766.4 ops/s | 94.7% | 380 B | Batch wrapper keeps Python-side traced memory nearly flat. |
+| Batch event polling | empty batch | 10 s | Native batch event polling through `ctypes` | 71057.7 ops/s | 93.9% | 6361 B | Native pump memory baseline. |
 
 ## Smoke Threshold Gate
 

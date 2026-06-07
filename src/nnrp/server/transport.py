@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
+from inspect import isawaitable
 
 from nnrp.adapters import (
     NnrpQuicConnection,
@@ -12,6 +14,7 @@ from nnrp.adapters import (
 )
 from nnrp.client.transport import SubmitRequest, TypedPayload
 from nnrp.core import (
+    CLIENT_HELLO_TRANSPORT_POLICY_EXTENSION,
     BudgetPolicy,
     CacheObjectKind,
     ClientHelloMetadata,
@@ -26,17 +29,22 @@ from nnrp.core import (
     ResultClass,
     ResultFlags,
     ServerHelloAckMetadata,
+    ServerHelloAckTransportPolicyExtension,
     SubmitMode,
     TensorBodyView,
     TensorSectionData,
     TileIndexMode,
     TransportId,
+    TransportPolicy,
     WireFormat,
     build_flow_update_packet,
     build_result_drop_packet,
     build_result_push_mixed_packet,
     build_result_push_packet,
     build_result_push_typed_payload_packet,
+    build_server_hello_ack_transport_policy_extension,
+    pack_control_extension_block,
+    parse_client_hello_transport_policy_extension,
     unpack_control_extension_block,
     unpack_inline_object_blocks,
     unpack_object_reference_blocks,
@@ -49,6 +57,10 @@ from nnrp.server.profile import ServerProfile
 
 ServerListener = NnrpQuicListener | NnrpTcpListener
 ServerConnection = NnrpQuicConnection | NnrpTcpConnection
+ServerSessionResolver = Callable[
+    ["ClientHelloContext"],
+    "ServerSessionAcceptResolution | Awaitable[ServerSessionAcceptResolution]",
+]
 _SUPPORTED_PAYLOAD_KINDS = (
     PayloadKind.TENSOR
     | PayloadKind.TOKEN_CHUNK
@@ -66,6 +78,12 @@ class ClientHelloContext:
     metadata: ClientHelloMetadata
     auth_block: bytes
     control_extensions: tuple[ControlExtensionEntry, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class ServerSessionAcceptResolution:
+    session_id: int
+    active_model_name: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -258,10 +276,33 @@ async def accept_server_session(
     active_model_name: str = "",
     server_profile: ServerProfile | None = None,
     timeout: float = 10.0,
+    session_resolver: ServerSessionResolver | None = None,
 ) -> ServerSession:
     connection = await listener.accept(timeout=timeout)
+    return await accept_server_connection(
+        connection,
+        session_id=session_id,
+        active_model_name=active_model_name,
+        server_profile=server_profile,
+        timeout=timeout,
+        session_resolver=session_resolver,
+    )
+
+
+async def accept_server_connection(
+    connection: ServerConnection,
+    *,
+    first_packet: NnrpPacket | None = None,
+    session_id: int | None = None,
+    active_model_name: str = "",
+    server_profile: ServerProfile | None = None,
+    timeout: float = 10.0,
+    session_resolver: ServerSessionResolver | None = None,
+) -> ServerSession:
     try:
-        hello_packet = await connection.receive_control_packet(timeout=timeout)
+        hello_packet = first_packet
+        if hello_packet is None:
+            hello_packet = await connection.receive_control_packet(timeout=timeout)
         if hello_packet.header.msg_type is not MessageType.CLIENT_HELLO:
             raise ValueError(f"expected CLIENT_HELLO, got {hello_packet.header.msg_type.name}")
         if hello_packet.header.wire_format is not WireFormat.CURRENT:
@@ -280,11 +321,19 @@ async def accept_server_session(
             ),
         )
         resolved_session_id = int(metadata.requested_session_id) if session_id is None else int(session_id)
+        resolved_active_model_name = active_model_name
+        if session_resolver is not None:
+            resolution = session_resolver(hello)
+            if isawaitable(resolution):
+                resolution = await resolution
+            resolved_session_id = int(resolution.session_id)
+            resolved_active_model_name = resolution.active_model_name
         await connection.send_control_packet(
             _build_server_hello_ack_packet(
                 session_id=resolved_session_id,
-                active_model_name=active_model_name,
                 server_profile=resolved_profile,
+                active_transport_id=_transport_id_for_connection(connection),
+                requested_transport_policy=_requested_transport_policy(hello.control_extensions),
             )
         )
         return ServerSession(
@@ -292,7 +341,7 @@ async def accept_server_session(
             transport_id=_transport_id_for_connection(connection),
             hello=hello,
             session_id=resolved_session_id,
-            active_model_name=active_model_name,
+            active_model_name=resolved_active_model_name,
             server_profile=resolved_profile,
         )
     except Exception:
@@ -337,9 +386,21 @@ def _parse_hello_control_extensions(
 def _build_server_hello_ack_packet(
     *,
     session_id: int,
-    active_model_name: str,
     server_profile: ServerProfile,
+    active_transport_id: TransportId,
+    requested_transport_policy: TransportPolicy,
 ) -> NnrpPacket:
+    body = pack_control_extension_block(
+        (
+            build_server_hello_ack_transport_policy_extension(
+                ServerHelloAckTransportPolicyExtension(
+                    transport_policy=requested_transport_policy,
+                    accepted_transport_policy=requested_transport_policy,
+                    active_transport_id=active_transport_id,
+                )
+            ),
+        )
+    )
     metadata = ServerHelloAckMetadata(
         selected_version_major=1,
         selected_wire_format=int(WireFormat.CURRENT),
@@ -364,7 +425,7 @@ def _build_server_hello_ack_packet(
         max_body_bytes=server_profile.max_body_bytes,
         token_ttl_ms=0,
         retry_after_ms=0,
-        control_extension_bytes=0,
+        control_extension_bytes=len(body),
         server_flags=0,
     )
     return NnrpPacket.build(
@@ -374,8 +435,15 @@ def _build_server_hello_ack_packet(
         flags=HeaderFlags.ACK_REQUIRED,
         session_id=session_id,
         metadata=metadata.pack(),
-        body=active_model_name.encode("utf-8"),
+        body=body,
     )
+
+
+def _requested_transport_policy(control_extensions: tuple[ControlExtensionEntry, ...]) -> TransportPolicy:
+    for entry in control_extensions:
+        if entry.ext_type == CLIENT_HELLO_TRANSPORT_POLICY_EXTENSION:
+            return parse_client_hello_transport_policy_extension(entry).transport_policy
+    return TransportPolicy.AUTO
 
 
 def _decode_submit_request(

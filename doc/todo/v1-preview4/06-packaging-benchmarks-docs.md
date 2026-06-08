@@ -9,7 +9,7 @@
   - [ ] IPC.
   - [ ] WebSocket.
 - [ ] Include cffi API fast path where supported.
-- [ ] Keep ctypes fallback for environments without the cffi API fast path.
+- [ ] Keep ctypes diagnostic execution available for environments without the cffi API fast path.
 - [ ] Reject universal wheels for native preview4 releases.
 - [ ] Verify wheel contents per platform.
 

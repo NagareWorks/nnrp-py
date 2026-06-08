@@ -17,7 +17,6 @@
 ## Package Versioning
 
 - [ ] Move Python package version to the preview4 line in the release-preparation commit.
-- [ ] Keep preview3 wheels installable for users pinned to preview3.
 - [ ] Keep preview4 release notes separate from preview3 performance notes.
 - [ ] Add release checks that fail if preview4 wheels embed preview3-only artifacts.
 
@@ -32,5 +31,5 @@
 
 - [ ] Keep native loading in one internal backend module.
 - [ ] Keep cffi API detection in the backend selector.
-- [ ] Keep ctypes fallback available for development environments that cannot build cffi API locally.
-- [ ] Keep fallback paths labeled as lower-performance compatibility paths.
+- [ ] Keep ctypes execution available only as an explicit development or diagnostic path when cffi API artifacts are unavailable.
+- [ ] Keep diagnostic execution paths labeled as lower-performance non-default paths.

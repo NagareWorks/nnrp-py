@@ -5,7 +5,7 @@
 1. This file tracks the Python SDK work required to converge historical preview2 planning onto the current `NNRP/1.0` contract.
 2. The active Python target is the current `NNRP/1.0` wire only; do not reintroduce superseded preview-iteration assumptions.
 3. The protocol design document in `nnrp-doc` remains the source of truth for wire semantics.
-4. preview2 helper/runtime work must converge on the canonical async session shape now; do not defer submit/result pump semantics to preview3 when the existing preview2 wire already supports them.
+4. preview2 helper/runtime work must converge on the canonical async session shape now; do not defer submit/result pump semantics to preview3 because the existing preview2 wire already supports them.
 
 ## 1. Current Baseline
 

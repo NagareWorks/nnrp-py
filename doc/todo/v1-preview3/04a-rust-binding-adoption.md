@@ -34,8 +34,8 @@
       - [x] Batch submit plus result polling where one coarse native call can replace multiple fine-grained calls.
       - [x] Reuse native connection/session handles across hot benchmark iterations without rebuilding Python wrapper state.
       - [x] Bind compact submit/result ABI and skip repeated ctypes request field writes on the hot path.
-      - [x] Add a benchmark-only cffi API mode runner to compare binding overhead when a local C compiler is available.
-      - [x] Add cffi API auto-detection on the production native submit/result path with ctypes fallback when the fast path is unavailable.
+      - [x] Add a benchmark-only cffi API mode runner for compiler-capable local environments.
+      - [x] Add cffi API auto-detection on the production native submit/result path with ctypes fallback for environments without the fast path.
       - [x] Compare raw throughput against the pre-migration baseline and target at least 30% improvement for the glued runtime path.
     - [x] Audit payload copy boundaries after native-runtime benchmarks land.
       - [x] Measure submit payload copy count on the native runtime benchmark path.
@@ -80,7 +80,7 @@
   - [x] Add connection-level lifetime guards once native connection close/dispose is exposed.
   - [x] Add host-level native connection wrapper that closes owned sessions on context exit.
   - [x] Add native connection close/dispose FFI binding once exported.
-  - [x] Add tests for use-after-close on native connection handles after FFI dispose exists.
+  - [x] Add tests for use-after-close on native connection handles through FFI dispose.
 - [x] Map stable Rust error codes into Python exception hierarchies.
 - [x] Keep pure-Python codec helpers limited to fixture inspection, diagnostics, and explicitly unsupported runtime combinations.
   - [x] Inventory pure-Python helpers used by runtime-facing public APIs.
@@ -93,5 +93,5 @@
     - [x] Keep raw packet examples out of default runtime quick-start paths.
     - [x] Keep smoke-only transport helpers outside the primary host API narrative.
   - [x] Add explicit runtime fallback selection instead of implicit pure-Python execution.
-  - [x] Add tests that default host runtime uses native artifacts when available.
+  - [x] Add tests that default host runtime selects packaged native artifacts.
 - [x] Add loader and probe tests for every supported platform tag using fake or fixture native artifacts where real artifacts are unavailable.

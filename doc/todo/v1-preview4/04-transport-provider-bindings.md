@@ -1,0 +1,46 @@
+# 04 - Transport Provider Bindings
+
+## Provider Registry
+
+- [ ] Expose Python transport provider discovery over Rust artifacts.
+- [ ] Report available transport providers.
+  - [ ] TCP.
+  - [ ] QUIC.
+  - [ ] IPC.
+  - [ ] WebSocket.
+- [ ] Report provider cost and preference metadata.
+- [ ] Report provider platform limitations.
+- [ ] Reject provider names that are not advertised by the native artifact.
+
+## TCP And QUIC Continuity
+
+- [ ] Keep preview3 TCP binding behavior compatible with preview4 runtime objects.
+- [ ] Keep preview3 QUIC binding behavior compatible with preview4 runtime objects.
+- [ ] Route TCP and QUIC progress/backpressure events through the shared event pump.
+- [ ] Add tests that TCP and QUIC providers remain distinct native artifact slots.
+
+## IPC Binding
+
+- [ ] Add Python endpoint model for `unix://`.
+- [ ] Add Python endpoint model for `npipe://`.
+- [ ] Bind native IPC provider connect.
+- [ ] Bind native IPC provider listen.
+- [ ] Add loopback smoke tests against preview4 Rust IPC artifacts.
+- [ ] Add diagnostic skip behavior when the native artifact does not expose IPC.
+
+## WebSocket Binding
+
+- [ ] Add Python endpoint model for `ws://`.
+- [ ] Add Python endpoint model for `wss://`.
+- [ ] Bind native WebSocket provider connect.
+- [ ] Bind native WebSocket provider listen.
+- [ ] Add binary-frame-only validation.
+- [ ] Add loopback smoke tests against preview4 Rust WebSocket artifacts.
+- [ ] Add diagnostic skip behavior when the native artifact does not expose WebSocket.
+
+## Probe Policy
+
+- [ ] Select the installed transport directly for single-provider installations.
+- [ ] Probe installed transports by policy for multi-provider installations.
+- [ ] Preserve explicit user transport selection.
+- [ ] Surface probe results in diagnostics.

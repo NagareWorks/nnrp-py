@@ -35,3 +35,12 @@
 4. Cache lease/version/dependency rules, schema descriptor 32B, typed payload descriptor 24B, and `descriptor_flags` are tracked in `01` and `03`.
 5. `tensor` / `token` first-round standard profiles plus `structured_event` / `tool_delta` ownership boundaries are tracked in `01`, `03`, and `04`.
 6. Rust conformance-first enum/message/error baselines and Python binding validation are tracked in `01` and `05`.
+
+## 4. Preview3 SDK Surface Traceability
+
+1. Connection/session lifecycle is exposed through `NativeClientConnection`, `NativeClientSession`, `open_native_connection`, `open_session`, session close guards, and context-manager cleanup.
+2. Submit/result/cancel/control routing is exposed through native client session helpers, compact submit/result bindings, native event polling, cancellation helpers, `FLOW_UPDATE`, `RESULT_HINT`, and recovery/migration codecs.
+3. Cache semantics are exposed through `cache_query`, `cache_touch`, `cache_prefetch`, `cache_release`, native cache lease FFI operations, and host-facing cache lease diagnostics.
+4. Schema/profile semantics are exposed through `SchemaDescriptorHeader`, `Preview3TypedPayloadDescriptor`, `SchemaRegistryCatalog`, standard profile helpers, native schema codecs, and typed payload binding validation.
+5. Packaging traceability is enforced by platform-specific wheels containing split TCP/QUIC native artifacts, artifact tag validation, ABI/protocol probing, and checks that reject legacy all-in-one native payloads.
+6. Pure-Python packet helpers remain fixture/diagnostic surfaces; runtime-facing connection, session, schema, cache, recovery, and hot benchmark paths route through the Rust-backed native backend when available.

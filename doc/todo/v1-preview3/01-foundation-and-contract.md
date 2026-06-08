@@ -24,7 +24,7 @@
   - [x] Wrap connection, session, operation, event pump, and buffer value handles.
   - [x] Wrap schema registry handles.
   - [x] Wrap current immutable/mutable buffer-view value structs.
-  - [x] Decide whether borrowed buffer handles are release-required or post-release zero-copy optimization.
+  - [x] Decide whether borrowed buffer handles are release-required or outside the preview3 zero-copy surface.
 - [x] Implement callback/polling adapters and async runtime glue according to the frozen Rust binding contract.
   - [x] Add explicit polling, bounded polling, async polling, and async event iteration.
   - [x] Add structured event, tool delta, and workflow-state async iterators over Rust result pumps.
@@ -37,7 +37,7 @@
 - [x] Enforce buffer ownership and bounded-copy rules on Python views and async iterators.
   - [x] Snapshot polled native event payloads into Python-owned bytes.
   - [x] Document and test copy boundaries for submit payloads and result payloads.
-  - [x] Keep zero-copy borrowed views out of the first release until lifetime guards are required.
+  - [x] Keep zero-copy borrowed views out of the first release and require lifetime guards before any public borrowed-view surface.
 
 ## Protocol Contract Adoption
 

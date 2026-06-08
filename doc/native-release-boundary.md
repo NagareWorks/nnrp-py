@@ -1,6 +1,6 @@
 # Native Release Boundary
 
-This document defines what belongs in the first Rust-backed Python package release and what remains a post-release optimization. The Python SDK must expose the native runtime contract without inventing protocol fields that are absent from the frozen FFI structs.
+This document defines what belongs in the first Rust-backed Python package release and what stays outside the preview3 release gate. The Python SDK must expose the native runtime contract without inventing protocol fields that are absent from the frozen FFI structs.
 
 ## Release-Required Surface
 
@@ -14,7 +14,7 @@ The first native-backed release includes:
 
 ## Scheduling Hints
 
-Python exposes immutable scheduling hint models so hosts can carry operation grouping, parent operation ids, and deadline hints through their own orchestration code. The current native `NnrpSubmitRequest` contains only session, operation id, frame id, and payload. Until the Rust FFI adds protocol-owned scheduling fields, Python must not encode scheduling hints into private control payloads or mutate the submit struct locally.
+Python exposes immutable scheduling hint models so hosts can carry operation grouping, parent operation ids, and deadline hints through their own orchestration code. The preview3 native `NnrpSubmitRequest` contains session, operation id, frame id, and payload. Python must not encode scheduling hints into private control payloads or mutate the submit struct locally.
 
 Release rule:
 
@@ -35,7 +35,7 @@ Release rule:
 
 ## Borrowed And Zero-Copy Buffers
 
-The first release uses copied Python-owned snapshots for polled payloads and native-owned copied buffer handles for explicit buffer acquisition. Borrowed result/body views are not release-required. They are a post-release performance optimization that must be enabled only after lifetime ownership and release semantics are documented and guarded in Python.
+The first release uses copied Python-owned snapshots for polled payloads and native-owned copied buffer handles for explicit buffer acquisition. Borrowed result/body views are outside the preview3 release-required surface and must be enabled only after lifetime ownership and release semantics are documented and guarded in Python.
 
 Release rule:
 
@@ -46,4 +46,4 @@ Release rule:
 
 ## Benchmark Gate
 
-The release can ship with copied snapshots if benchmark results show acceptable overhead. If post-migration benchmarks show copy costs dominate hot-path latency or allocation count, borrowed-buffer work becomes a release blocker for that later release, not retroactively for the first native-backed release.
+The release can ship with copied snapshots if benchmark results show acceptable overhead. If benchmark results show copy costs dominate hot-path latency or allocation count, borrowed-buffer work becomes a blocker for the release line that introduces that borrowed-view surface, not retroactively for the first native-backed release.

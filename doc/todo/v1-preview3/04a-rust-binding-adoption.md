@@ -41,7 +41,7 @@
       - [x] Measure submit payload copy count on the native runtime benchmark path.
       - [x] Measure result/event payload snapshot count on the native runtime benchmark path.
       - [x] Decide whether borrowed result views become release-blocking if copy overhead dominates benchmark results.
-        - [x] Current benchmark rows clear the 30% target with copied snapshots, so borrowed result views stay a post-release zero-copy optimization rather than a preview3 release blocker.
+        - [x] Current benchmark rows clear the 30% target with copied snapshots, so borrowed result views stay outside the preview3 release-required zero-copy surface.
 - [x] Pin the exact `nnrp-rs` commit, tag, or artifact version used by the Python package.
 - [x] Define the packaged native artifact layout for Windows, macOS, Linux, Android, and iOS.
 - [x] Add release packaging glue that normalizes `nnrp-rs` native artifact zips into platform wheel contents before publish.
@@ -69,7 +69,7 @@
   - [x] Snapshot polled native event payloads into Python-owned bytes before returning them to callers.
   - [x] Document event/result snapshot behavior in the native client API docs.
   - [x] Add tests for payload snapshot independence after native poll buffer reuse.
-- [x] Define optional borrowed-buffer rules for post-release zero-copy result/body views.
+- [x] Define optional borrowed-buffer rules for zero-copy result/body views outside the preview3 release gate.
   - [x] Confirm current ABI exposes value `NnrpBufferView` structs and stable native-owned copied buffer handles.
   - [x] Define whether borrowed handles may be exposed from sync polling without weakening lifetime safety.
   - [x] Define whether borrowed handles may be exposed from async polling without weakening lifetime safety.

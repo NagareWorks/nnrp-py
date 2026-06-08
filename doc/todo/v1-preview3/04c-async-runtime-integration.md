@@ -8,9 +8,9 @@
     - [x] Add a local benchmark mode that records allocated Python objects per submit/result iteration.
     - [x] Capture baseline allocation count before changing payload ownership behavior.
   - [x] Add batch poll helper over native batched event polling.
-  - [x] Defer optional borrowed result payload helpers to post-release zero-copy work.
+  - [x] Keep optional borrowed result payload helpers outside the preview3 release-required zero-copy surface.
     - [x] Confirm current Rust ABI exposes value buffer views and native-owned copied buffer handles.
-    - [x] Decide whether borrowed result views are needed for the first Python release or can remain a post-release optimization.
+    - [x] Decide whether borrowed result views are needed for the first Python release or stay outside the preview3 release gate.
     - [x] Keep Python lifetime guard wrapper work paired with any future borrowed view exposure.
   - [x] Add regression test that hot-path payloads are not copied more than the documented boundary.
     - [x] Add submit payload copy-boundary test.

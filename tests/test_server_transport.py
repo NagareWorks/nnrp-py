@@ -12,7 +12,10 @@ from nnrp.client import (
 from nnrp.client.transport import connect_client_session
 from nnrp.core import (
     SERVER_HELLO_ACK_TRANSPORT_POLICY_EXTENSION,
+    HeaderFlags,
     InputProfile,
+    MessageType,
+    NnrpPacket,
     PayloadKind,
     TensorDType,
     TensorSectionData,
@@ -21,13 +24,140 @@ from nnrp.core import (
     parse_server_hello_ack_transport_policy_extension,
     unpack_control_extension_block,
 )
-from nnrp.server import ServerProfile, ServerSessionAcceptResolution, accept_server_connection, accept_server_session
+from nnrp.runtime import (
+    PartialResultMetadata,
+    PressureMetadata,
+    ProgressMetadata,
+    ResultDropReasonCode,
+    ResultDropReasonMetadata,
+    RuntimeRole,
+    decode_runtime_control_metadata,
+)
+from nnrp.server import (
+    ServerProfile,
+    ServerSession,
+    ServerSessionAcceptResolution,
+    accept_server_connection,
+    accept_server_session,
+)
 
 
 def _reserve_port() -> int:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
         sock.bind(("127.0.0.1", 0))
         return int(sock.getsockname()[1])
+
+
+class FakeServerConnection:
+    def __init__(self) -> None:
+        self.control_packets: list[NnrpPacket] = []
+        self.closed = False
+        self.waited = False
+
+    async def send_control_packet(self, packet: NnrpPacket) -> None:
+        self.control_packets.append(packet)
+
+    def close(self) -> None:
+        self.closed = True
+
+    async def wait_closed(self) -> None:
+        self.waited = True
+
+
+@pytest.mark.asyncio
+async def test_server_session_sends_preview4_runtime_control_packets() -> None:
+    connection = FakeServerConnection()
+    session = ServerSession(
+        connection=connection,
+        transport_id=TransportId.TCP,
+        hello=object(),
+        session_id=77,
+    )
+
+    await session.send_progress(
+        operation_id=100,
+        progress_sequence=1,
+        stage_code=2,
+        percent_x100=2500,
+        object_id=333,
+        body=b"stage",
+        frame_id=9,
+        flags=HeaderFlags.ACK_REQUIRED,
+        trace_id=123,
+    )
+    await session.send_partial_result(
+        operation_id=100,
+        result_sequence=2,
+        object_id=333,
+        delta_sequence=4,
+        body=b"partial",
+        control_flags=0x03,
+    )
+    await session.send_result_drop_reason(
+        operation_id=100,
+        result_sequence=3,
+        drop_reason_code=ResultDropReasonCode.DEADLINE_EXPIRED,
+        source_role=RuntimeRole.SERVER,
+        diagnostic=b"late",
+    )
+    await session.send_backpressure(
+        scope_id=77,
+        credit_window=4,
+        pressure_level=2,
+        pressure_reason=5,
+        retry_after_ms=20,
+        control_flags=0x01,
+    )
+    await session.send_credit_update(
+        scope_id=77,
+        credit_window=16,
+        pressure_level=1,
+    )
+
+    assert [packet.header.msg_type for packet in connection.control_packets] == [
+        MessageType.PROGRESS,
+        MessageType.PARTIAL_RESULT,
+        MessageType.RESULT_DROP_REASON,
+        MessageType.BACKPRESSURE,
+        MessageType.CREDIT_UPDATE,
+    ]
+    progress_packet = connection.control_packets[0]
+    assert progress_packet.header.session_id == 77
+    assert progress_packet.header.frame_id == 9
+    assert progress_packet.header.flags == HeaderFlags.ACK_REQUIRED
+    assert progress_packet.header.trace_id == 123
+    progress = decode_runtime_control_metadata(MessageType.PROGRESS, progress_packet.metadata)
+    assert progress.metadata == ProgressMetadata(100, 1, 2, 2500, 333, 5)
+    assert progress.tail == b"stage"
+
+    partial = decode_runtime_control_metadata(
+        MessageType.PARTIAL_RESULT,
+        connection.control_packets[1].metadata,
+    )
+    assert partial.metadata == PartialResultMetadata(100, 2, 333, 4, 7, 0x03)
+    assert partial.tail == b"partial"
+
+    drop = decode_runtime_control_metadata(
+        MessageType.RESULT_DROP_REASON,
+        connection.control_packets[2].metadata,
+    )
+    assert drop.metadata == ResultDropReasonMetadata(
+        100,
+        3,
+        ResultDropReasonCode.DEADLINE_EXPIRED,
+        RuntimeRole.SERVER,
+        0,
+        4,
+    )
+    assert drop.tail == b"late"
+
+    backpressure = decode_runtime_control_metadata(
+        MessageType.BACKPRESSURE,
+        connection.control_packets[3].metadata,
+    )
+    assert backpressure.metadata == PressureMetadata(77, 4, 2, 5, 20, 0x01)
+    credit = decode_runtime_control_metadata(MessageType.CREDIT_UPDATE, connection.control_packets[4].metadata)
+    assert credit.metadata == PressureMetadata(77, 16, 1, 0, 0, 0)
 
 
 @pytest.mark.asyncio

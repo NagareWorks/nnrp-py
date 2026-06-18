@@ -21,23 +21,23 @@
 
 ## Server Controls
 
-- [ ] Add server API for progress events.
-  - [ ] Progress stage.
-  - [ ] Optional percent.
-  - [ ] Optional trace context.
-- [ ] Add server API for partial results.
-  - [ ] Partial object reference.
-  - [ ] Partial payload snapshot.
-  - [ ] Partial completion marker.
-- [ ] Add server API for result drop reasons.
-  - [ ] Deadline expired.
-  - [ ] Superseded.
-  - [ ] Backpressure.
-  - [ ] Peer cancellation.
-- [ ] Add server API for backpressure.
-  - [ ] Credit update.
-  - [ ] Pressure reason.
-  - [ ] Max in-flight operations.
+- [x] Add server API for progress events.
+  - [x] Progress stage.
+  - [x] Optional percent.
+  - [x] Optional trace context.
+- [x] Add server API for partial results.
+  - [x] Partial object reference.
+  - [x] Partial payload snapshot.
+  - [x] Partial completion marker.
+- [x] Add server API for result drop reasons.
+  - [x] Deadline expired.
+  - [x] Superseded.
+  - [x] Backpressure.
+  - [x] Peer cancellation.
+- [x] Add server API for backpressure.
+  - [x] Credit update.
+  - [x] Pressure reason.
+  - [x] Max in-flight operations.
 
 ## Diagnostics
 

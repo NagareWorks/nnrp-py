@@ -26,8 +26,8 @@
 
 ## Documentation
 
-- [ ] Update quick-start for preview4 client controls.
-- [ ] Update server docs for progress, partial result, and drop reason.
+- [x] Update quick-start for preview4 client controls.
+- [x] Update server docs for progress, partial result, and drop reason.
 - [x] Update native runtime docs for transport providers.
 - [ ] Update benchmark docs with preview4 result tables.
 - [ ] Update conformance docs with wire target manifest generation.

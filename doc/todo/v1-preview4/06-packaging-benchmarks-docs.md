@@ -35,9 +35,9 @@
 
 ## Release Checks
 
-- [ ] Run unit tests.
-- [ ] Run adapter conformance.
-- [ ] Run wire conformance dry-run.
+- [x] Run unit tests.
+- [x] Run adapter conformance.
+- [x] Run wire conformance dry-run.
 - [x] Run native wheel inspection.
 - [ ] Run benchmark smoke thresholds.
 - [x] Publish only after platform wheel checks pass.

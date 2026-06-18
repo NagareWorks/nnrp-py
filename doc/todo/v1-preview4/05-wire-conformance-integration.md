@@ -28,7 +28,7 @@
 ## Result Validation
 
 - [x] Run `nnrp-conformance-runner wire-plan` in CI.
-- [ ] Run `nnrp-conformance-runner validate-wire-results` in CI when live endpoint tests are enabled.
+- [x] Run `nnrp-conformance-runner validate-wire-results` in CI when live endpoint tests are enabled.
 - [x] Keep adapter conformance and wire conformance as separate jobs.
 - [x] Add skip diagnostics for unavailable native transports.
 - [x] Ensure skipped transport cases do not masquerade as passed cases.

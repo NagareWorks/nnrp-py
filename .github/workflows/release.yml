@@ -282,6 +282,19 @@ jobs:
           path: artifacts/cffi-api
           merge-multiple: true
 
+      - name: Run native runtime benchmark smoke thresholds
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          mkdir -p artifacts/benchmark
+          python -m nnrp.tools.benchmark \
+            --plan doc/benchmarks/native-runtime-benchmark-plan.json \
+            --output artifacts/benchmark/native-runtime-benchmark-results.json
+          python scripts/check_benchmark_thresholds.py \
+            --results artifacts/benchmark/native-runtime-benchmark-results.json \
+            --thresholds doc/benchmarks/native-runtime-smoke-thresholds.json
+
       - name: Build source distribution without native payloads
         shell: bash
         run: |

@@ -381,6 +381,85 @@ def test_runtime_object_delta_and_partial_result_helpers_preserve_tail_boundarie
     assert partial_result.tail == b"output"
 
 
+def test_runtime_metadata_decoders_snapshot_mutable_payloads() -> None:
+    progress = ProgressMetadata(
+        operation_id=42,
+        progress_sequence=7,
+        stage_code=3,
+        percent_x100=2500,
+        object_id=11,
+        body_bytes=4,
+    )
+    object_ref = ObjectReferenceMetadata(
+        object_id=9,
+        operation_id=42,
+        object_version=2,
+        offset=128,
+        length=256,
+        flags=0x01,
+        metadata_bytes=2,
+    )
+
+    control_payload = bytearray(encode_runtime_control_metadata(MessageType.PROGRESS, progress, tail=b"step"))
+    object_payload = bytearray(reference_runtime_object(object_ref, metadata_tail=b"md"))
+    decoded_control = decode_runtime_control_metadata(MessageType.PROGRESS, control_payload)
+    decoded_object = decode_runtime_object_metadata(MessageType.OBJECT_REF, object_payload)
+
+    control_payload[-4:] = b"xxxx"
+    object_payload[-2:] = b"xx"
+
+    assert decoded_control.tail == b"step"
+    assert decoded_object.tail == b"md"
+
+
+def test_runtime_metadata_helpers_snapshot_mutable_tail_inputs() -> None:
+    delta_tail = bytearray(b"md")
+    delta_payload = bytearray(b"xxxx")
+    body = bytearray(b"output")
+    delta = ObjectDeltaMetadata(
+        object_id=9,
+        delta_sequence=2,
+        region_offset=128,
+        region_bytes=64,
+        delta_bytes=4,
+        flags=0x03,
+        metadata_bytes=2,
+    )
+    partial = PartialResultMetadata(
+        operation_id=4,
+        result_sequence=5,
+        object_id=9,
+        delta_sequence=2,
+        body_bytes=6,
+        flags=0x03,
+    )
+
+    encoded_delta = delta_runtime_object(delta, metadata_tail=delta_tail, delta=delta_payload)
+    encoded_partial = partial_result_runtime_object(partial, body=body)
+    delta_tail[:] = b"xx"
+    delta_payload[:] = b"yyyy"
+    body[:] = b"mutate"
+
+    assert decode_runtime_object_metadata(MessageType.OBJECT_DELTA, encoded_delta).tail == b"mdxxxx"
+    assert decode_runtime_control_metadata(MessageType.PARTIAL_RESULT, encoded_partial).tail == b"output"
+
+
+def test_runtime_metadata_helpers_reject_non_binary_snapshots() -> None:
+    progress = ProgressMetadata(
+        operation_id=42,
+        progress_sequence=7,
+        stage_code=3,
+        percent_x100=2500,
+        object_id=11,
+        body_bytes=4,
+    )
+
+    with pytest.raises(TypeError, match="runtime tail must be bytes-like"):
+        encode_runtime_control_metadata(MessageType.PROGRESS, progress, tail="text")
+    with pytest.raises(TypeError, match="runtime payload must be bytes-like"):
+        decode_runtime_control_metadata(MessageType.PROGRESS, object())
+
+
 @pytest.mark.parametrize(
     ("message_type", "metadata", "tail"),
     [

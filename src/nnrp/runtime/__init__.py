@@ -95,19 +95,24 @@ def encode_runtime_control_metadata(
     message_type: MessageType,
     metadata: _FixedRuntimeMetadata,
     *,
-    tail: bytes = b"",
+    tail: bytes | bytearray | memoryview = b"",
 ) -> bytes:
     fixed_type = _metadata_type(_RUNTIME_CONTROL_TYPES, message_type)
     if not isinstance(metadata, fixed_type):
         raise TypeError(f"{MessageType(message_type).name} requires {fixed_type.__name__}")
     fixed = metadata.pack()
-    _validate_declared_tail(message_type, metadata, tail)
-    return fixed + bytes(tail)
+    tail_bytes = _snapshot_payload("tail", tail)
+    _validate_declared_tail(message_type, metadata, tail_bytes)
+    return fixed + tail_bytes
 
 
-def decode_runtime_control_metadata(message_type: MessageType, payload: bytes) -> DecodedRuntimeControlMetadata:
+def decode_runtime_control_metadata(
+    message_type: MessageType,
+    payload: bytes | bytearray | memoryview,
+) -> DecodedRuntimeControlMetadata:
+    payload_bytes = _snapshot_payload("payload", payload)
     fixed_type = _metadata_type(_RUNTIME_CONTROL_TYPES, message_type)
-    fixed, tail = _split_fixed_tail(payload, fixed_type)
+    fixed, tail = _split_fixed_tail(payload_bytes, fixed_type)
     metadata = fixed_type.unpack(fixed)
     _validate_declared_tail(message_type, metadata, tail)
     return DecodedRuntimeControlMetadata(metadata=metadata, tail=tail)
@@ -117,20 +122,21 @@ def encode_runtime_object_metadata(
     message_type: MessageType,
     metadata: _FixedRuntimeMetadata,
     *,
-    tail: bytes = b"",
+    tail: bytes | bytearray | memoryview = b"",
 ) -> bytes:
     fixed_type = _metadata_type(_RUNTIME_OBJECT_TYPES, message_type)
     if not isinstance(metadata, fixed_type):
         raise TypeError(f"{MessageType(message_type).name} requires {fixed_type.__name__}")
     fixed = metadata.pack()
-    _validate_declared_tail(message_type, metadata, tail)
-    return fixed + bytes(tail)
+    tail_bytes = _snapshot_payload("tail", tail)
+    _validate_declared_tail(message_type, metadata, tail_bytes)
+    return fixed + tail_bytes
 
 
 def declare_runtime_object(
     metadata: ObjectDescriptorMetadata,
     *,
-    metadata_tail: bytes = b"",
+    metadata_tail: bytes | bytearray | memoryview = b"",
 ) -> bytes:
     return encode_runtime_object_metadata(MessageType.OBJECT_DECLARE, metadata, tail=metadata_tail)
 
@@ -138,7 +144,7 @@ def declare_runtime_object(
 def reference_runtime_object(
     metadata: ObjectReferenceMetadata,
     *,
-    metadata_tail: bytes = b"",
+    metadata_tail: bytes | bytearray | memoryview = b"",
 ) -> bytes:
     return encode_runtime_object_metadata(MessageType.OBJECT_REF, metadata, tail=metadata_tail)
 
@@ -146,7 +152,7 @@ def reference_runtime_object(
 def release_runtime_object(
     metadata: ObjectReleaseMetadata,
     *,
-    diagnostic_tail: bytes = b"",
+    diagnostic_tail: bytes | bytearray | memoryview = b"",
 ) -> bytes:
     return encode_runtime_object_metadata(MessageType.OBJECT_RELEASE, metadata, tail=diagnostic_tail)
 
@@ -154,32 +160,44 @@ def release_runtime_object(
 def patch_runtime_object(
     metadata: ObjectDeltaMetadata,
     *,
-    metadata_tail: bytes = b"",
-    delta: bytes = b"",
+    metadata_tail: bytes | bytearray | memoryview = b"",
+    delta: bytes | bytearray | memoryview = b"",
 ) -> bytes:
-    return encode_runtime_object_metadata(MessageType.OBJECT_PATCH, metadata, tail=metadata_tail + delta)
+    return encode_runtime_object_metadata(
+        MessageType.OBJECT_PATCH,
+        metadata,
+        tail=_snapshot_payload("metadata_tail", metadata_tail) + _snapshot_payload("delta", delta),
+    )
 
 
 def delta_runtime_object(
     metadata: ObjectDeltaMetadata,
     *,
-    metadata_tail: bytes = b"",
-    delta: bytes = b"",
+    metadata_tail: bytes | bytearray | memoryview = b"",
+    delta: bytes | bytearray | memoryview = b"",
 ) -> bytes:
-    return encode_runtime_object_metadata(MessageType.OBJECT_DELTA, metadata, tail=metadata_tail + delta)
+    return encode_runtime_object_metadata(
+        MessageType.OBJECT_DELTA,
+        metadata,
+        tail=_snapshot_payload("metadata_tail", metadata_tail) + _snapshot_payload("delta", delta),
+    )
 
 
 def partial_result_runtime_object(
     metadata: PartialResultMetadata,
     *,
-    body: bytes = b"",
+    body: bytes | bytearray | memoryview = b"",
 ) -> bytes:
     return encode_runtime_control_metadata(MessageType.PARTIAL_RESULT, metadata, tail=body)
 
 
-def decode_runtime_object_metadata(message_type: MessageType, payload: bytes) -> DecodedRuntimeObjectMetadata:
+def decode_runtime_object_metadata(
+    message_type: MessageType,
+    payload: bytes | bytearray | memoryview,
+) -> DecodedRuntimeObjectMetadata:
+    payload_bytes = _snapshot_payload("payload", payload)
     fixed_type = _metadata_type(_RUNTIME_OBJECT_TYPES, message_type)
-    fixed, tail = _split_fixed_tail(payload, fixed_type)
+    fixed, tail = _split_fixed_tail(payload_bytes, fixed_type)
     metadata = fixed_type.unpack(fixed)
     _validate_declared_tail(message_type, metadata, tail)
     return DecodedRuntimeObjectMetadata(metadata=metadata, tail=tail)
@@ -263,6 +281,15 @@ def _split_fixed_tail(payload: bytes, fixed_type: type[_FixedRuntimeMetadata]) -
     if len(payload) < fixed_len:
         raise ValueError(f"expected at least {fixed_len} bytes, got {len(payload)}")
     return payload[:fixed_len], payload[fixed_len:]
+
+
+def _snapshot_payload(name: str, value: bytes | bytearray | memoryview) -> bytes:
+    if isinstance(value, str):
+        raise TypeError(f"runtime {name} must be bytes-like")
+    try:
+        return memoryview(value).tobytes()
+    except TypeError as error:
+        raise TypeError(f"runtime {name} must be bytes-like") from error
 
 
 def _validate_declared_tail(message_type: MessageType, metadata: _FixedRuntimeMetadata, tail: bytes) -> None:

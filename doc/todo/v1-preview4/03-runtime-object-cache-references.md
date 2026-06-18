@@ -41,7 +41,7 @@
 
 ## Copy Boundaries
 
-- [ ] Snapshot event payloads when borrow lifetime is not guaranteed.
+- [x] Snapshot event payloads when borrow lifetime is not guaranteed.
 - [ ] Expose borrowed result views only where native lifetime guards exist.
 - [ ] Benchmark copied snapshot path.
 - [ ] Benchmark borrowed view path in the native lifetime-guard fixture.

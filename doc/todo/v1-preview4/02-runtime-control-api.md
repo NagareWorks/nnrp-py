@@ -3,19 +3,19 @@
 ## Client Controls
 
 - [ ] Add client API for cancellation.
-  - [ ] Cancel by operation ID.
-  - [ ] Abort by operation ID.
-  - [ ] Provide cancellation reason.
+  - [x] Cancel by operation ID.
+  - [x] Abort by operation ID.
+  - [x] Provide cancellation reason.
   - [ ] Suppress late results after cancellation.
-- [ ] Add client API for scheduling.
-  - [ ] Priority update.
-  - [ ] Deadline.
-  - [ ] Expire-at timestamp.
-  - [ ] Supersede operation.
-  - [ ] Budget update.
+- [x] Add client API for scheduling.
+  - [x] Priority update.
+  - [x] Deadline.
+  - [x] Expire-at timestamp.
+  - [x] Supersede operation.
+  - [x] Budget update.
 - [ ] Add client API for route and execution hints.
-  - [ ] Local subagent route hint.
-  - [ ] Runtime execution hint.
+  - [x] Local subagent route hint.
+  - [x] Runtime execution hint.
   - [ ] Preferred profile list.
   - [ ] Degrade profile handling.
 

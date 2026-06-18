@@ -9,6 +9,7 @@ from pathlib import Path
 from types import TracebackType
 from typing import Any
 
+from nnrp.core import MessageType
 from nnrp.native import (
     NativeCreditUpdateCallback,
     NativePayloadFamilyCallback,
@@ -22,6 +23,19 @@ from nnrp.native import (
     NativeRuntimeSession,
     select_native_runtime_backend,
 )
+from nnrp.runtime import (
+    BudgetMetadata,
+    ControlRequestMetadata,
+    ResultDropReasonCode,
+    RouteHintMetadata,
+    RuntimeRole,
+    SchedulingMetadata,
+    SupersedeMetadata,
+    encode_runtime_control_metadata,
+)
+from nnrp.runtime.types import _FixedRuntimeMetadata
+
+NativeControlTarget = NativeRuntimeConnection | NativeRuntimeSession
 
 
 @dataclass(frozen=True, slots=True)
@@ -257,13 +271,212 @@ class NativeClientConnection:
 
     def send_control(
         self,
-        target: NativeRuntimeConnection | NativeRuntimeSession,
+        target: NativeControlTarget,
         *,
         control_code: int,
         payload: bytes | bytearray | memoryview = b"",
     ) -> None:
         self._ensure_open()
         target.control(control_code=control_code, payload=payload)
+
+    def cancel_runtime_operation(
+        self,
+        target: NativeControlTarget,
+        *,
+        operation_id: int,
+        control_sequence: int,
+        reason_code: int = 0,
+        source_role: RuntimeRole | int = RuntimeRole.CLIENT,
+        diagnostic: bytes | bytearray | memoryview = b"",
+        flags: int = 0,
+    ) -> None:
+        self._send_runtime_control_request(
+            target,
+            MessageType.CANCEL,
+            operation_id=operation_id,
+            control_sequence=control_sequence,
+            reason_code=reason_code,
+            source_role=source_role,
+            diagnostic=diagnostic,
+            flags=flags,
+        )
+
+    def abort_runtime_operation(
+        self,
+        target: NativeControlTarget,
+        *,
+        operation_id: int,
+        control_sequence: int,
+        reason_code: int = 0,
+        source_role: RuntimeRole | int = RuntimeRole.CLIENT,
+        diagnostic: bytes | bytearray | memoryview = b"",
+        flags: int = 0,
+    ) -> None:
+        self._send_runtime_control_request(
+            target,
+            MessageType.ABORT,
+            operation_id=operation_id,
+            control_sequence=control_sequence,
+            reason_code=reason_code,
+            source_role=source_role,
+            diagnostic=diagnostic,
+            flags=flags,
+        )
+
+    def update_runtime_priority(
+        self,
+        target: NativeControlTarget,
+        *,
+        operation_id: int,
+        control_sequence: int,
+        priority_class: int,
+        priority_delta: int = 0,
+        flags: int = 0,
+    ) -> None:
+        self._send_runtime_scheduling(
+            target,
+            MessageType.PRIORITY_UPDATE,
+            operation_id=operation_id,
+            control_sequence=control_sequence,
+            priority_class=priority_class,
+            priority_delta=priority_delta,
+            deadline_unix_ms=0,
+            flags=flags,
+        )
+
+    def update_runtime_deadline(
+        self,
+        target: NativeControlTarget,
+        *,
+        operation_id: int,
+        control_sequence: int,
+        deadline_unix_ms: int,
+        priority_class: int = 0,
+        priority_delta: int = 0,
+        flags: int = 0,
+    ) -> None:
+        self._send_runtime_scheduling(
+            target,
+            MessageType.DEADLINE,
+            operation_id=operation_id,
+            control_sequence=control_sequence,
+            priority_class=priority_class,
+            priority_delta=priority_delta,
+            deadline_unix_ms=deadline_unix_ms,
+            flags=flags,
+        )
+
+    def expire_runtime_operation_at(
+        self,
+        target: NativeControlTarget,
+        *,
+        operation_id: int,
+        control_sequence: int,
+        expire_at_unix_ms: int,
+        priority_class: int = 0,
+        priority_delta: int = 0,
+        flags: int = 0,
+    ) -> None:
+        self._send_runtime_scheduling(
+            target,
+            MessageType.EXPIRE_AT,
+            operation_id=operation_id,
+            control_sequence=control_sequence,
+            priority_class=priority_class,
+            priority_delta=priority_delta,
+            deadline_unix_ms=expire_at_unix_ms,
+            flags=flags,
+        )
+
+    def supersede_runtime_operation(
+        self,
+        target: NativeControlTarget,
+        *,
+        old_operation_id: int,
+        new_operation_id: int,
+        control_sequence: int,
+        drop_reason_code: ResultDropReasonCode | int = ResultDropReasonCode.SUPERSEDED,
+        diagnostic: bytes | bytearray | memoryview = b"",
+        flags: int = 0,
+    ) -> None:
+        metadata = SupersedeMetadata(
+            old_operation_id=old_operation_id,
+            new_operation_id=new_operation_id,
+            control_sequence=control_sequence,
+            drop_reason_code=int(drop_reason_code),
+            flags=flags,
+            diagnostic_bytes=memoryview(diagnostic).nbytes,
+        )
+        self._send_runtime_control(target, MessageType.SUPERSEDE, metadata, tail=diagnostic)
+
+    def update_runtime_budget(
+        self,
+        target: NativeControlTarget,
+        *,
+        operation_id: int,
+        compute_budget_units: int = 0,
+        memory_budget_bytes: int = 0,
+        bandwidth_budget_bytes: int = 0,
+        token_budget: int = 0,
+        flags: int = 0,
+    ) -> None:
+        metadata = BudgetMetadata(
+            operation_id=operation_id,
+            compute_budget_units=compute_budget_units,
+            memory_budget_bytes=memory_budget_bytes,
+            bandwidth_budget_bytes=bandwidth_budget_bytes,
+            token_budget=token_budget,
+            flags=flags,
+        )
+        self._send_runtime_control(target, MessageType.BUDGET_UPDATE, metadata)
+
+    def send_runtime_route_hint(
+        self,
+        target: NativeControlTarget,
+        *,
+        operation_id: int,
+        route_id: int,
+        executor_class: int = 0,
+        affinity_class: int = 0,
+        deadline_unix_ms: int = 0,
+        body: bytes | bytearray | memoryview = b"",
+        flags: int = 0,
+    ) -> None:
+        self._send_runtime_route_control(
+            target,
+            MessageType.ROUTE_HINT,
+            operation_id=operation_id,
+            route_id=route_id,
+            executor_class=executor_class,
+            affinity_class=affinity_class,
+            deadline_unix_ms=deadline_unix_ms,
+            body=body,
+            flags=flags,
+        )
+
+    def send_runtime_execution_hint(
+        self,
+        target: NativeControlTarget,
+        *,
+        operation_id: int,
+        route_id: int,
+        executor_class: int = 0,
+        affinity_class: int = 0,
+        deadline_unix_ms: int = 0,
+        body: bytes | bytearray | memoryview = b"",
+        flags: int = 0,
+    ) -> None:
+        self._send_runtime_route_control(
+            target,
+            MessageType.EXECUTION_HINT,
+            operation_id=operation_id,
+            route_id=route_id,
+            executor_class=executor_class,
+            affinity_class=affinity_class,
+            deadline_unix_ms=deadline_unix_ms,
+            body=body,
+            flags=flags,
+        )
 
     def close(self) -> None:
         if self._closed:
@@ -279,6 +492,85 @@ class NativeClientConnection:
     def _ensure_open(self) -> None:
         if self._closed:
             raise RuntimeError("native client connection is closed")
+
+    def _send_runtime_control_request(
+        self,
+        target: NativeControlTarget,
+        message_type: MessageType,
+        *,
+        operation_id: int,
+        control_sequence: int,
+        reason_code: int,
+        source_role: RuntimeRole | int,
+        diagnostic: bytes | bytearray | memoryview,
+        flags: int,
+    ) -> None:
+        metadata = ControlRequestMetadata(
+            operation_id=operation_id,
+            control_sequence=control_sequence,
+            reason_code=reason_code,
+            source_role=source_role,
+            flags=flags,
+            diagnostic_bytes=memoryview(diagnostic).nbytes,
+        )
+        self._send_runtime_control(target, message_type, metadata, tail=diagnostic)
+
+    def _send_runtime_scheduling(
+        self,
+        target: NativeControlTarget,
+        message_type: MessageType,
+        *,
+        operation_id: int,
+        control_sequence: int,
+        priority_class: int,
+        priority_delta: int,
+        deadline_unix_ms: int,
+        flags: int,
+    ) -> None:
+        metadata = SchedulingMetadata(
+            operation_id=operation_id,
+            control_sequence=control_sequence,
+            priority_class=priority_class,
+            priority_delta=priority_delta,
+            deadline_unix_ms=deadline_unix_ms,
+            flags=flags,
+        )
+        self._send_runtime_control(target, message_type, metadata)
+
+    def _send_runtime_route_control(
+        self,
+        target: NativeControlTarget,
+        message_type: MessageType,
+        *,
+        operation_id: int,
+        route_id: int,
+        executor_class: int,
+        affinity_class: int,
+        deadline_unix_ms: int,
+        body: bytes | bytearray | memoryview,
+        flags: int,
+    ) -> None:
+        metadata = RouteHintMetadata(
+            operation_id=operation_id,
+            route_id=route_id,
+            executor_class=executor_class,
+            affinity_class=affinity_class,
+            deadline_unix_ms=deadline_unix_ms,
+            body_bytes=memoryview(body).nbytes,
+            flags=flags,
+        )
+        self._send_runtime_control(target, message_type, metadata, tail=body)
+
+    def _send_runtime_control(
+        self,
+        target: NativeControlTarget,
+        message_type: MessageType,
+        metadata: _FixedRuntimeMetadata,
+        *,
+        tail: bytes | bytearray | memoryview = b"",
+    ) -> None:
+        payload = encode_runtime_control_metadata(message_type, metadata, tail=tail)
+        self.send_control(target, control_code=int(message_type), payload=payload)
 
 
 def select_client_native_backend(

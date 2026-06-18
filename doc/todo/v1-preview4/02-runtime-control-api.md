@@ -51,5 +51,5 @@
 
 - [ ] Bind preview4 control-frame native calls.
 - [ ] Bind batch event polling for progress, partial result, and drop reason events.
-- [ ] Keep submit/control/result loops on coarse native calls.
-- [ ] Add tests that count Python-to-native calls on representative hot paths.
+- [x] Keep submit/control/result loops on coarse native calls.
+- [x] Add tests that count Python-to-native calls on representative hot paths.

@@ -171,6 +171,9 @@ class FakeSession:
         self.control_calls: list[tuple[int, bytes | bytearray | memoryview]] = []
         self.flow_updates: list[int] = []
         self.result_hints: list[bytes | bytearray | memoryview] = []
+        self.submit_operation_calls = 0
+        self.submit_result_calls = 0
+        self.poll_result_calls = 0
 
     def close(self) -> None:
         self.closed = True
@@ -184,6 +187,7 @@ class FakeSession:
         parent_operation_id: int | None = None,
         operation_group_id: int | None = None,
     ) -> FakeOperation:
+        self.submit_operation_calls += 1
         operation = FakeOperation(
             session_id=self.requested_session_id,
             operation_id=operation_id,
@@ -196,6 +200,7 @@ class FakeSession:
         return operation
 
     def poll_result(self, operation: FakeOperation, *, max_events: int | None = None) -> FakeResult:
+        self.poll_result_calls += 1
         return FakeResult(
             session_id=self.requested_session_id,
             operation_id=operation.operation_id,
@@ -213,6 +218,7 @@ class FakeSession:
         result_payload: bytes | bytearray | memoryview | None = None,
         max_events: int | None = None,
     ) -> FakeResult:
+        self.submit_result_calls += 1
         operation = self.submit_operation(operation_id=operation_id, frame_id=frame_id, payload=bytes(payload))
         selected_payload = payload if result_payload is None else result_payload
         return FakeResult(
@@ -659,6 +665,29 @@ def test_native_client_connection_sends_runtime_control_helpers() -> None:
     degrade = decode_runtime_control_metadata(MessageType.DEGRADE_PROFILE, backend.connections[0].control_calls[3][1])
     assert degrade.metadata == CapabilityMetadata(3, 1, 5, 9, 77, 66, 7, 0x02)
     assert degrade.tail == b"degrade"
+
+
+def test_native_client_connection_keeps_hot_paths_on_coarse_runtime_calls() -> None:
+    backend = FakeBackend()
+    with connect_native_client_connection(backend=backend) as client_connection:
+        session = client_connection.open_session()
+
+        client_connection.submit_and_poll_result(
+            session,
+            operation_id=200,
+            frame_id=1,
+            payload=b"submit",
+            result_payload=b"result",
+        )
+        operation = session.submit_operation(operation_id=201, frame_id=2, payload=b"submit")
+        client_connection.poll_result(session, operation)
+        client_connection.cancel_runtime_operation(session, operation_id=201, control_sequence=1)
+
+    assert session.submit_result_calls == 1
+    assert session.submit_operation_calls == 2
+    assert session.poll_result_calls == 1
+    assert len(session.control_calls) == 1
+    assert session.control_calls[0][0] == int(MessageType.CANCEL)
 
 
 def test_select_client_native_backend_can_require_native(tmp_path: Path) -> None:

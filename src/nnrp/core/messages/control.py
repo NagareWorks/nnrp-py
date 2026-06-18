@@ -450,14 +450,20 @@ class TransportPolicy(IntEnum):
     AUTO = 0
     PREFER_QUIC = 1
     PREFER_TCP = 2
-    FORCE_QUIC = 3
-    FORCE_TCP = 4
+    PREFER_IPC = 3
+    PREFER_WEBSOCKET = 4
+    FORCE_QUIC = 5
+    FORCE_TCP = 6
+    FORCE_IPC = 7
+    FORCE_WEBSOCKET = 8
 
 
 class TransportId(IntEnum):
     UNSPECIFIED = 0
     QUIC = 1
     TCP = 2
+    IPC = 3
+    WEBSOCKET = 4
 
 
 class LossTolerance(IntEnum):

@@ -2,12 +2,12 @@
 
 ## Runtime Object API
 
-- [ ] Add Python object descriptor models.
-  - [ ] Object ID.
-  - [ ] Object kind.
-  - [ ] Producer.
-  - [ ] Consumer.
-  - [ ] Lifetime hint.
+- [x] Add Python object descriptor models.
+  - [x] Object ID.
+  - [x] Object kind.
+  - [x] Producer.
+  - [x] Consumer.
+  - [x] Lifetime hint.
 - [ ] Add object declaration API.
 - [ ] Add object reference API.
 - [ ] Add object release API.
@@ -25,16 +25,16 @@
 
 ## Cache References
 
-- [ ] Add cache reference model.
-  - [ ] Cache key.
-  - [ ] Optional lease ID.
-  - [ ] Schema/profile anchor.
-  - [ ] Producer trace.
-- [ ] Add cache miss model.
+- [x] Add cache reference model.
+  - [x] Cache key.
+  - [x] Optional lease ID.
+  - [x] Schema/profile anchor.
+  - [x] Producer trace.
+- [x] Add cache miss model.
 - [ ] Add cache invalidate model.
 - [ ] Add cache policy options.
-  - [ ] Reuse scope.
-  - [ ] Expiration hint.
+  - [x] Reuse scope.
+  - [x] Expiration hint.
   - [ ] Invalidation reason.
 - [ ] Keep cache use explicit per workload.
 - [ ] Add tests that cache miss remains a typed event, not a generic transport error.

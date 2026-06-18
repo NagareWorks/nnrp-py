@@ -41,9 +41,9 @@
 
 ## Diagnostics
 
-- [ ] Add trace context dataclasses.
+- [x] Add trace context dataclasses.
 - [ ] Add result drop reason enum.
-- [ ] Add recoverable error dataclasses.
+- [x] Add recoverable error dataclasses.
 - [ ] Preserve native status family and code in Python exceptions.
 - [ ] Add tests for trace propagation through cancellation and partial results.
 

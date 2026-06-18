@@ -60,7 +60,11 @@ def _preferred_transport_policy_for_id(transport_id: TransportId) -> TransportPo
         return TransportPolicy.PREFER_QUIC
     if transport_id is TransportId.TCP:
         return TransportPolicy.PREFER_TCP
-    raise ValueError("selected transport id must be QUIC or TCP")
+    if transport_id is TransportId.IPC:
+        return TransportPolicy.PREFER_IPC
+    if transport_id is TransportId.WEBSOCKET:
+        return TransportPolicy.PREFER_WEBSOCKET
+    raise ValueError("selected transport id must be QUIC, TCP, IPC, or WEBSOCKET")
 
 
 def _forced_transport_policy_for_id(transport_id: TransportId) -> TransportPolicy:
@@ -68,4 +72,8 @@ def _forced_transport_policy_for_id(transport_id: TransportId) -> TransportPolic
         return TransportPolicy.FORCE_QUIC
     if transport_id is TransportId.TCP:
         return TransportPolicy.FORCE_TCP
-    raise ValueError("forced transport id must be QUIC or TCP")
+    if transport_id is TransportId.IPC:
+        return TransportPolicy.FORCE_IPC
+    if transport_id is TransportId.WEBSOCKET:
+        return TransportPolicy.FORCE_WEBSOCKET
+    raise ValueError("forced transport id must be QUIC, TCP, IPC, or WEBSOCKET")

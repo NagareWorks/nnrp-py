@@ -13,6 +13,7 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 from pathlib import Path
 from typing import Any, Protocol, TypeVar, runtime_checkable
+from urllib.parse import SplitResult, urlsplit
 
 from nnrp.core.messages.control import TransportId, TransportPolicy
 
@@ -38,6 +39,15 @@ NATIVE_TRANSPORT_ID_BY_NAME = {
     "websocket": TransportId.WEBSOCKET,
 }
 NATIVE_TRANSPORT_NAME_BY_ID = {transport_id: name for name, transport_id in NATIVE_TRANSPORT_ID_BY_NAME.items()}
+NATIVE_ENDPOINT_TRANSPORT_BY_SCHEME = {
+    "tcp": "tcp",
+    "quic": "quic",
+    "quic+tls": "quic",
+    "unix": "ipc",
+    "npipe": "ipc",
+    "ws": "websocket",
+    "wss": "websocket",
+}
 RUNTIME_FEATURE_PROTOCOL_CORE = 0x0000000000000001
 RUNTIME_FEATURE_CLIENT_API = 0x0000000000000002
 RUNTIME_FEATURE_SERVER_API = 0x0000000000000004
@@ -201,6 +211,20 @@ class NativeTransportProvider:
     cost: Mapping[str, Any] | None = None
     preference: Mapping[str, Any] | None = None
     limitations: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class NativeTransportEndpoint:
+    uri: str
+    scheme: str
+    transport_name: str
+    transport_id: TransportId
+    address: str
+    secure: bool = False
+
+    @classmethod
+    def from_uri(cls, uri: str) -> NativeTransportEndpoint:
+        return parse_native_transport_endpoint(uri)
 
 
 @dataclass(frozen=True)
@@ -3279,6 +3303,25 @@ def _normalize_native_transport_scope(value: str) -> str:
     raise NativeArtifactError(f"unsupported native transport scope: {value}")
 
 
+def _native_transport_endpoint_address(parsed: SplitResult) -> str:
+    scheme = parsed.scheme.lower()
+    if scheme == "unix":
+        if parsed.netloc or not parsed.path:
+            raise NativeArtifactError("unix native transport endpoints must use unix:///path form")
+        return parsed.path
+    if scheme == "npipe":
+        address = f"{parsed.netloc}{parsed.path}"
+        if not address:
+            raise NativeArtifactError("npipe native transport endpoints must include a pipe path")
+        return address
+    if not parsed.netloc:
+        raise NativeArtifactError(f"{scheme} native transport endpoints must include an authority")
+    address = f"{parsed.netloc}{parsed.path}"
+    if parsed.query:
+        address = f"{address}?{parsed.query}"
+    return address
+
+
 def discover_native_transport_providers(
     root: Path | str | None = None,
     native_platform: NativePlatform | None = None,
@@ -3311,6 +3354,29 @@ def resolve_native_transport_provider(
         if provider.name == normalized:
             return provider
     raise NativeArtifactError(f"native transport provider is not advertised by the native artifact: {name}")
+
+
+def parse_native_transport_endpoint(uri: str) -> NativeTransportEndpoint:
+    raw_uri = uri.strip()
+    if not raw_uri:
+        raise NativeArtifactError("native transport endpoint URI must be non-empty")
+    parsed = urlsplit(raw_uri)
+    scheme = parsed.scheme.lower()
+    try:
+        transport_name = NATIVE_ENDPOINT_TRANSPORT_BY_SCHEME[scheme]
+    except KeyError as error:
+        raise NativeArtifactError(f"unsupported native transport endpoint scheme: {parsed.scheme}") from error
+    if parsed.fragment:
+        raise NativeArtifactError("native transport endpoint URI must not include a fragment")
+    address = _native_transport_endpoint_address(parsed)
+    return NativeTransportEndpoint(
+        uri=raw_uri,
+        scheme=scheme,
+        transport_name=transport_name,
+        transport_id=NATIVE_TRANSPORT_ID_BY_NAME[transport_name],
+        address=address,
+        secure=scheme in {"quic+tls", "wss"},
+    )
 
 
 def select_native_transport_provider(

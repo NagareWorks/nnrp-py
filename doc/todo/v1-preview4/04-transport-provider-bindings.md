@@ -21,8 +21,8 @@
 
 ## IPC Binding
 
-- [ ] Add Python endpoint model for `unix://`.
-- [ ] Add Python endpoint model for `npipe://`.
+- [x] Add Python endpoint model for `unix://`.
+- [x] Add Python endpoint model for `npipe://`.
 - [ ] Bind native IPC provider connect.
 - [ ] Bind native IPC provider listen.
 - [ ] Add loopback smoke tests against preview4 Rust IPC artifacts.
@@ -30,8 +30,8 @@
 
 ## WebSocket Binding
 
-- [ ] Add Python endpoint model for `ws://`.
-- [ ] Add Python endpoint model for `wss://`.
+- [x] Add Python endpoint model for `ws://`.
+- [x] Add Python endpoint model for `wss://`.
 - [ ] Bind native WebSocket provider connect.
 - [ ] Bind native WebSocket provider listen.
 - [ ] Add binary-frame-only validation.

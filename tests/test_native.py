@@ -101,6 +101,7 @@ from nnrp.native import (
     NativeSessionRecoveryOutcome,
     NativeStatus,
     NativeStructuredDiagnostic,
+    NativeTransportEndpoint,
     NativeTransportProbeSample,
     NativeTransportProvider,
     NativeWouldBlockError,
@@ -148,6 +149,7 @@ from nnrp.native import (
     load_native_schema_codec,
     native_library_name,
     native_transport_slot_names,
+    parse_native_transport_endpoint,
     probe_native_artifact,
     raise_for_native_status,
     resolve_native_artifact,
@@ -1211,6 +1213,58 @@ def test_native_transport_slot_names_maps_preview4_slots() -> None:
         "ipc",
         "websocket",
     )
+
+
+@pytest.mark.parametrize(
+    ("uri", "scheme", "transport_name", "transport_id", "address", "secure"),
+    [
+        ("unix:///tmp/nnrp.sock", "unix", "ipc", TransportId.IPC, "/tmp/nnrp.sock", False),
+        ("npipe://./pipe/nnrp", "npipe", "ipc", TransportId.IPC, "./pipe/nnrp", False),
+        ("ws://127.0.0.1:19091/nnrp", "ws", "websocket", TransportId.WEBSOCKET, "127.0.0.1:19091/nnrp", False),
+        (
+            "wss://example.test/nnrp?profile=runtime",
+            "wss",
+            "websocket",
+            TransportId.WEBSOCKET,
+            "example.test/nnrp?profile=runtime",
+            True,
+        ),
+    ],
+)
+def test_parse_native_transport_endpoint_maps_preview4_endpoint_schemes(
+    uri: str,
+    scheme: str,
+    transport_name: str,
+    transport_id: TransportId,
+    address: str,
+    secure: bool,
+) -> None:
+    endpoint = parse_native_transport_endpoint(uri)
+
+    assert endpoint == NativeTransportEndpoint(
+        uri=uri,
+        scheme=scheme,
+        transport_name=transport_name,
+        transport_id=transport_id,
+        address=address,
+        secure=secure,
+    )
+    assert NativeTransportEndpoint.from_uri(uri) == endpoint
+
+
+@pytest.mark.parametrize(
+    ("uri", "match"),
+    [
+        ("", "must be non-empty"),
+        ("stdio:///tmp/nnrp", "unsupported native transport endpoint scheme"),
+        ("unix://host/tmp/nnrp.sock", "unix native transport endpoints"),
+        ("ws:///nnrp", "must include an authority"),
+        ("wss://example.test/nnrp#fragment", "must not include a fragment"),
+    ],
+)
+def test_parse_native_transport_endpoint_rejects_invalid_endpoint_shapes(uri: str, match: str) -> None:
+    with pytest.raises(NativeArtifactError, match=match):
+        parse_native_transport_endpoint(uri)
 
 
 def test_select_native_transport_provider_selects_single_installed_transport(tmp_path: Path) -> None:

@@ -18,7 +18,7 @@
 
 - [ ] Move Python package version to the preview4 line in the release-preparation commit.
 - [ ] Keep preview4 release notes separate from preview3 performance notes.
-- [ ] Add release checks that fail if preview4 wheels embed preview3-only artifacts.
+- [x] Add release checks that fail if preview4 wheels embed preview3-only artifacts.
 
 ## Public API Boundary
 

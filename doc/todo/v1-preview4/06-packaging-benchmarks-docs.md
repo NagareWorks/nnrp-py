@@ -2,16 +2,16 @@
 
 ## Wheel Packaging
 
-- [ ] Package preview4 Rust artifacts into platform wheels.
-- [ ] Include transport-scoped native artifacts.
-  - [ ] TCP.
-  - [ ] QUIC.
-  - [ ] IPC.
-  - [ ] WebSocket.
-- [ ] Include cffi API fast path where supported.
-- [ ] Keep ctypes diagnostic execution available for environments without the cffi API fast path.
-- [ ] Reject universal wheels for native preview4 releases.
-- [ ] Verify wheel contents per platform.
+- [x] Package preview4 Rust artifacts into platform wheels.
+- [x] Include transport-scoped native artifacts.
+  - [x] TCP.
+  - [x] QUIC.
+  - [x] IPC.
+  - [x] WebSocket.
+- [x] Include cffi API fast path where supported.
+- [x] Keep ctypes diagnostic execution available for environments without the cffi API fast path.
+- [x] Reject universal wheels for native preview4 releases.
+- [x] Verify wheel contents per platform.
 
 ## Benchmarks
 
@@ -38,6 +38,6 @@
 - [ ] Run unit tests.
 - [ ] Run adapter conformance.
 - [ ] Run wire conformance dry-run.
-- [ ] Run native wheel inspection.
+- [x] Run native wheel inspection.
 - [ ] Run benchmark smoke thresholds.
-- [ ] Publish only after platform wheel checks pass.
+- [x] Publish only after platform wheel checks pass.

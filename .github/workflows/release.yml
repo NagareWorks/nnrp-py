@@ -308,7 +308,18 @@ jobs:
             --abi3-python-tag "$NNRP_PY_RELEASE_PYTHON_VERSION"
 
       - name: Verify packaged native artifacts
-        run: python scripts/verify_native_wheel.py --dist dist --require-native --reject-universal-native --require-single-platform --verify-platform-tag --require-cffi-api --require-compiled-cffi-api --require-split-transports
+        run: >
+          python scripts/verify_native_wheel.py
+          --dist dist
+          --require-native
+          --reject-universal-native
+          --require-single-platform
+          --verify-platform-tag
+          --require-cffi-api
+          --require-compiled-cffi-api
+          --require-split-transports
+          --require-preview4-native-artifacts
+          --require-abi-version 1.11.0
 
       - name: Upload workflow artifacts
         uses: actions/upload-artifact@v6

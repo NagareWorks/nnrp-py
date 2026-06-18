@@ -16,3 +16,10 @@ def test_release_workflow_downloads_all_preview4_native_transport_artifacts() ->
 
     for transport in ("tcp", "quic", "ipc", "websocket"):
         assert f'--pattern "nnrp-ffi-transport-{transport}-native-*-${{version}}.zip"' in workflow
+
+
+def test_release_workflow_rejects_non_preview4_native_artifact_shape() -> None:
+    workflow = RELEASE_WORKFLOW.read_text(encoding="utf-8")
+
+    assert "--require-preview4-native-artifacts" in workflow
+    assert "--require-abi-version 1.11.0" in workflow

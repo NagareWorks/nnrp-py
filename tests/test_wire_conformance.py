@@ -1,4 +1,5 @@
 import json
+import sys
 
 import pytest
 
@@ -402,6 +403,31 @@ def test_wire_conformance_run_plan_cli_writes_skipped_results(tmp_path) -> None:
     assert report["results"][0]["message"] == (
         "Python wire harness suite_as_server is registered; live endpoint execution is not enabled."
     )
+
+
+def test_wire_conformance_main_reads_sys_argv_when_argv_is_omitted(tmp_path, monkeypatch) -> None:
+    output_path = tmp_path / "target.json"
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "nnrp-wire-conformance",
+            "manifest",
+            "--target-name",
+            "nnrp-py-local",
+            "--mode",
+            "suite_as_client",
+            "--transport",
+            "tcp=127.0.0.1:19091",
+            "--capability",
+            "control.cancel_abort",
+            "--output",
+            str(output_path),
+        ],
+    )
+
+    assert main() == 0
+    assert json.loads(output_path.read_text(encoding="utf-8"))["target_name"] == "nnrp-py-local"
 
 
 def test_run_wire_harness_plan_rejects_missing_mode_scenarios(tmp_path) -> None:

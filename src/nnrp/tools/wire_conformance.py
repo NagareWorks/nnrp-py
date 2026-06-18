@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -240,7 +241,7 @@ def run_wire_harness_plan(
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    args = list(argv) if argv is not None else None
+    args = list(argv) if argv is not None else sys.argv[1:]
     if args and args[0] in {"manifest", "run-plan"}:
         command = args.pop(0)
         if command == "run-plan":
@@ -550,3 +551,7 @@ __all__ = [
     "write_wire_evidence_files",
     "write_wire_target_manifest",
 ]
+
+
+if __name__ == "__main__":  # pragma: no cover
+    raise SystemExit(main())

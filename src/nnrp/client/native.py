@@ -25,6 +25,7 @@ from nnrp.native import (
 )
 from nnrp.runtime import (
     BudgetMetadata,
+    CapabilityMetadata,
     ControlRequestMetadata,
     ResultDropReasonCode,
     RouteHintMetadata,
@@ -478,6 +479,58 @@ class NativeClientConnection:
             flags=flags,
         )
 
+    def negotiate_runtime_capabilities(
+        self,
+        target: NativeControlTarget,
+        *,
+        profile_id: int,
+        capability_count: int = 0,
+        cost_model_id: int = 0,
+        preference_rank: int = 0,
+        limit_bytes: int = 0,
+        limit_units: int = 0,
+        body: bytes | bytearray | memoryview = b"",
+        flags: int = 0,
+    ) -> None:
+        self._send_runtime_capability_control(
+            target,
+            MessageType.CAPABILITY_NEGOTIATION,
+            profile_id=profile_id,
+            capability_count=capability_count,
+            cost_model_id=cost_model_id,
+            preference_rank=preference_rank,
+            limit_bytes=limit_bytes,
+            limit_units=limit_units,
+            body=body,
+            flags=flags,
+        )
+
+    def degrade_runtime_profile(
+        self,
+        target: NativeControlTarget,
+        *,
+        profile_id: int,
+        capability_count: int = 0,
+        cost_model_id: int = 0,
+        preference_rank: int = 0,
+        limit_bytes: int = 0,
+        limit_units: int = 0,
+        body: bytes | bytearray | memoryview = b"",
+        flags: int = 0,
+    ) -> None:
+        self._send_runtime_capability_control(
+            target,
+            MessageType.DEGRADE_PROFILE,
+            profile_id=profile_id,
+            capability_count=capability_count,
+            cost_model_id=cost_model_id,
+            preference_rank=preference_rank,
+            limit_bytes=limit_bytes,
+            limit_units=limit_units,
+            body=body,
+            flags=flags,
+        )
+
     def close(self) -> None:
         if self._closed:
             return
@@ -556,6 +609,32 @@ class NativeClientConnection:
             executor_class=executor_class,
             affinity_class=affinity_class,
             deadline_unix_ms=deadline_unix_ms,
+            body_bytes=memoryview(body).nbytes,
+            flags=flags,
+        )
+        self._send_runtime_control(target, message_type, metadata, tail=body)
+
+    def _send_runtime_capability_control(
+        self,
+        target: NativeControlTarget,
+        message_type: MessageType,
+        *,
+        profile_id: int,
+        capability_count: int,
+        cost_model_id: int,
+        preference_rank: int,
+        limit_bytes: int,
+        limit_units: int,
+        body: bytes | bytearray | memoryview,
+        flags: int,
+    ) -> None:
+        metadata = CapabilityMetadata(
+            profile_id=profile_id,
+            capability_count=capability_count,
+            cost_model_id=cost_model_id,
+            preference_rank=preference_rank,
+            limit_bytes=limit_bytes,
+            limit_units=limit_units,
             body_bytes=memoryview(body).nbytes,
             flags=flags,
         )

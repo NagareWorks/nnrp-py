@@ -13,11 +13,11 @@
   - [x] Expire-at timestamp.
   - [x] Supersede operation.
   - [x] Budget update.
-- [ ] Add client API for route and execution hints.
+- [x] Add client API for route and execution hints.
   - [x] Local subagent route hint.
   - [x] Runtime execution hint.
-  - [ ] Preferred profile list.
-  - [ ] Degrade profile handling.
+  - [x] Preferred profile list.
+  - [x] Degrade profile handling.
 
 ## Server Controls
 

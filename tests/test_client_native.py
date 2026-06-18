@@ -18,6 +18,7 @@ from nnrp.core import MessageType
 from nnrp.native import NativeArtifactError
 from nnrp.runtime import (
     BudgetMetadata,
+    CapabilityMetadata,
     ControlRequestMetadata,
     ResultDropReasonCode,
     RouteHintMetadata,
@@ -579,6 +580,27 @@ def test_native_client_connection_sends_runtime_control_helpers() -> None:
             body=b"exec",
             flags=0x01,
         )
+        client_connection.negotiate_runtime_capabilities(
+            client_connection.connection,
+            profile_id=3,
+            capability_count=2,
+            cost_model_id=4,
+            preference_rank=1,
+            limit_bytes=99,
+            limit_units=88,
+            body=b"profiles",
+        )
+        client_connection.degrade_runtime_profile(
+            client_connection.connection,
+            profile_id=3,
+            capability_count=1,
+            cost_model_id=5,
+            preference_rank=9,
+            limit_bytes=77,
+            limit_units=66,
+            body=b"degrade",
+            flags=0x02,
+        )
 
     assert [control_code for control_code, _ in session.control_calls] == [
         int(MessageType.CANCEL),
@@ -616,6 +638,8 @@ def test_native_client_connection_sends_runtime_control_helpers() -> None:
     assert [control_code for control_code, _ in backend.connections[0].control_calls] == [
         int(MessageType.ROUTE_HINT),
         int(MessageType.EXECUTION_HINT),
+        int(MessageType.CAPABILITY_NEGOTIATION),
+        int(MessageType.DEGRADE_PROFILE),
     ]
     route = decode_runtime_control_metadata(MessageType.ROUTE_HINT, backend.connections[0].control_calls[0][1])
     assert route.metadata == RouteHintMetadata(101, 55, 6, 7, 1_800_000_020_000, 5, 0)
@@ -626,6 +650,15 @@ def test_native_client_connection_sends_runtime_control_helpers() -> None:
     )
     assert execution.metadata == RouteHintMetadata(101, 56, 8, 9, 0, 4, 0x01)
     assert execution.tail == b"exec"
+    capabilities = decode_runtime_control_metadata(
+        MessageType.CAPABILITY_NEGOTIATION,
+        backend.connections[0].control_calls[2][1],
+    )
+    assert capabilities.metadata == CapabilityMetadata(3, 2, 4, 1, 99, 88, 8, 0)
+    assert capabilities.tail == b"profiles"
+    degrade = decode_runtime_control_metadata(MessageType.DEGRADE_PROFILE, backend.connections[0].control_calls[3][1])
+    assert degrade.metadata == CapabilityMetadata(3, 1, 5, 9, 77, 66, 7, 0x02)
+    assert degrade.tail == b"degrade"
 
 
 def test_select_client_native_backend_can_require_native(tmp_path: Path) -> None:

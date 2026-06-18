@@ -9,6 +9,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from nnrp.capabilities import PREVIEW4_TRANSPORT_NAMES
+
 _TARGET_SCHEMA_URL = "https://github.com/NagareWorks/nnrp-conformance/schemas/wire-conformance-target.schema.json"
 _DEFAULT_TARGET_NAME = "nnrp-py"
 _DEFAULT_PROTOCOL_VERSION = "nnrp-1-preview4"
@@ -16,7 +18,7 @@ _DEFAULT_SUITE_VERSION = "0.1.0"
 _DEFAULT_MAX_FRAME_BYTES = 16 * 1024 * 1024
 _DEFAULT_MAX_IN_FLIGHT = 256
 _VALID_MODES = frozenset({"suite_as_client", "suite_as_server", "suite_as_proxy"})
-_VALID_TRANSPORTS = frozenset({"tcp", "quic", "ipc", "websocket"})
+_VALID_TRANSPORTS = frozenset(PREVIEW4_TRANSPORT_NAMES)
 
 
 @dataclass(frozen=True, slots=True)

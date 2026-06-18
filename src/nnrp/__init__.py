@@ -14,6 +14,15 @@ from nnrp.cache import (
     cache_release,
     cache_touch,
 )
+from nnrp.capabilities import (
+    PREVIEW4_CAPABILITY_TOKENS,
+    PREVIEW4_CONTROL_CAPABILITY_TOKENS,
+    PREVIEW4_OBJECT_CAPABILITY_TOKENS,
+    PREVIEW4_TRANSPORT_NAMES,
+    Preview4ControlCapability,
+    Preview4ObjectCapability,
+    Preview4TransportName,
+)
 from nnrp.core import (
     CLIENT_HELLO_LOSS_TOLERANCE_EXTENSION,
     CLIENT_HELLO_PAYLOAD_CAPABILITIES_EXTENSION,
@@ -243,6 +252,13 @@ __all__ = [
     "FlowUpdateMetadata",
     "LossTolerance",
     "PayloadKind",
+    "PREVIEW4_CAPABILITY_TOKENS",
+    "PREVIEW4_CONTROL_CAPABILITY_TOKENS",
+    "PREVIEW4_OBJECT_CAPABILITY_TOKENS",
+    "PREVIEW4_TRANSPORT_NAMES",
+    "Preview4ControlCapability",
+    "Preview4ObjectCapability",
+    "Preview4TransportName",
     "ResultHintBudgetPolicy",
     "ResultHintCongestionState",
     "ResultHintMetadata",

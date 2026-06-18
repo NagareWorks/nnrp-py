@@ -2,7 +2,7 @@
 
 ## Rust Artifact Baseline
 
-- [ ] Pin the preview4 Rust artifact version used by Python.
+- [x] Pin the preview4 Rust artifact version used by Python.
 - [x] Probe preview4 protocol version before accepting native artifacts.
 - [x] Probe ABI version before enabling preview4 native paths.
 - [x] Probe transport slots.

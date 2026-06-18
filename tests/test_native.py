@@ -106,6 +106,8 @@ from nnrp.native import (
     NativeTransportProbeSample,
     NativeTransportProvider,
     NativeWouldBlockError,
+    NnrpEndpoint,
+    NnrpEndpointSupport,
     _load_native_cffi_submit_result_api,
     _NativeCffiSubmitResultApi,
     _NnrpBufferView,
@@ -143,6 +145,7 @@ from nnrp.native import (
     current_native_platform,
     default_artifact_root,
     diagnose_native_transport_endpoint_support,
+    diagnose_nnrp_endpoint_support,
     discover_native_transport_providers,
     load_native_client,
     load_native_library,
@@ -152,6 +155,7 @@ from nnrp.native import (
     native_library_name,
     native_transport_slot_names,
     parse_native_transport_endpoint,
+    parse_nnrp_endpoint,
     probe_native_artifact,
     raise_for_native_status,
     resolve_native_artifact,
@@ -1267,6 +1271,88 @@ def test_parse_native_transport_endpoint_maps_preview4_endpoint_schemes(
 def test_parse_native_transport_endpoint_rejects_invalid_endpoint_shapes(uri: str, match: str) -> None:
     with pytest.raises(NativeArtifactError, match=match):
         parse_native_transport_endpoint(uri)
+
+
+def test_parse_nnrp_endpoint_accepts_application_facing_uri() -> None:
+    endpoint = parse_nnrp_endpoint("nnrps://runtime.example/session/default?tenant=alpha")
+
+    assert endpoint == NnrpEndpoint(
+        uri="nnrps://runtime.example/session/default?tenant=alpha",
+        scheme="nnrps",
+        authority="runtime.example",
+        path="/session/default",
+        query="tenant=alpha",
+        secure=True,
+    )
+
+
+@pytest.mark.parametrize(
+    ("uri", "match"),
+    [
+        ("", "must be non-empty"),
+        ("wss://runtime.example/nnrp", "unsupported NNRP endpoint scheme"),
+        ("nnrp:///session", "must include an authority"),
+        ("nnrp://runtime.example/session#fragment", "must not include a fragment"),
+    ],
+)
+def test_parse_nnrp_endpoint_rejects_non_application_uri_shapes(uri: str, match: str) -> None:
+    with pytest.raises(NativeArtifactError, match=match):
+        parse_nnrp_endpoint(uri)
+
+
+def test_parse_native_transport_endpoint_rejects_application_endpoint_scheme() -> None:
+    with pytest.raises(NativeArtifactError, match="parse_nnrp_endpoint"):
+        parse_native_transport_endpoint("nnrps://runtime.example/session")
+
+
+def test_diagnose_nnrp_endpoint_support_selects_installed_provider(tmp_path: Path) -> None:
+    tcp_artifact = _write_provider_artifact(tmp_path, "tcp")
+
+    support = diagnose_nnrp_endpoint_support(
+        "nnrps://runtime.example/session/default",
+        root=tmp_path,
+        native_platform=NativePlatform("linux", "x86_64"),
+    )
+
+    assert support.endpoint == NnrpEndpoint(
+        uri="nnrps://runtime.example/session/default",
+        scheme="nnrps",
+        authority="runtime.example",
+        path="/session/default",
+        query="",
+        secure=True,
+    )
+    assert support.available is True
+    assert support.selection is not None
+    assert support.selection.selected_provider.artifact_path == tcp_artifact
+    assert support.selection.selected_transport_id is TransportId.TCP
+    assert support.diagnostic == "NNRP endpoint nnrps://runtime.example/session/default selected tcp carrier"
+
+
+def test_diagnose_nnrp_endpoint_support_reports_missing_provider(tmp_path: Path) -> None:
+    support = diagnose_nnrp_endpoint_support(
+        "nnrp://runtime.example/session/default",
+        root=tmp_path,
+        native_platform=NativePlatform("linux", "x86_64"),
+    )
+
+    assert support == NnrpEndpointSupport(
+        endpoint=NnrpEndpoint(
+            uri="nnrp://runtime.example/session/default",
+            scheme="nnrp",
+            authority="runtime.example",
+            path="/session/default",
+            query="",
+            secure=False,
+        ),
+        selection=None,
+        available=False,
+        skip_reason="no native transport providers are advertised by the native artifact",
+        diagnostic=(
+            "skip nnrp://runtime.example/session/default: "
+            "no native transport providers are advertised by the native artifact"
+        ),
+    )
 
 
 def test_diagnose_native_transport_endpoint_support_reports_available_provider(tmp_path: Path) -> None:

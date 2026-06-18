@@ -108,23 +108,28 @@ manifests and rejects names that are not advertised by the artifact tree:
 
 ```python
 from nnrp import (
+	diagnose_nnrp_endpoint_support,
 	discover_native_transport_providers,
 	select_native_transport_provider,
 )
 
 providers = discover_native_transport_providers()
 selection = select_native_transport_provider("auto")
+support = diagnose_nnrp_endpoint_support("nnrps://runtime.example/session/default")
 
 print([provider.name for provider in providers])
-print(selection.transport_name, selection.diagnostic)
+print(selection.selected_transport_name, selection.diagnostic)
+print(support.endpoint.authority, support.available)
 ```
 
 Installations with a single provider select it directly. Multi-provider installations can use `auto`, `probe`,
 or an explicit transport name. Provider metadata reports transport slots, cost/preference hints, platform limitations,
 and enabled native features; it is not a configuration flag over hidden shared transport logic.
 
-Endpoint helpers validate URI shape and expose diagnostic skip messages without pretending a missing native provider
-passed a smoke test:
+Application-facing endpoints use `nnrp://` or `nnrps://`. Provider-local locators such as `unix://`, `npipe://`,
+`ws://`, and `wss://` are lower-level diagnostics, conformance fixture inputs, or explicit provider overrides.
+Their helper validates URI shape and exposes diagnostic skip messages without pretending a missing native provider
+passed a smoke test.
 
 ```python
 from nnrp import diagnose_native_transport_endpoint_support

@@ -214,6 +214,29 @@ class NativeTransportProvider:
 
 
 @dataclass(frozen=True)
+class NnrpEndpoint:
+    uri: str
+    scheme: str
+    authority: str
+    path: str
+    query: str
+    secure: bool = False
+
+    @classmethod
+    def from_uri(cls, uri: str) -> NnrpEndpoint:
+        return parse_nnrp_endpoint(uri)
+
+
+@dataclass(frozen=True)
+class NnrpEndpointSupport:
+    endpoint: NnrpEndpoint
+    selection: NativeTransportSelection | None
+    available: bool
+    skip_reason: str | None = None
+    diagnostic: str | None = None
+
+
+@dataclass(frozen=True)
 class NativeTransportEndpoint:
     uri: str
     scheme: str
@@ -3365,12 +3388,39 @@ def resolve_native_transport_provider(
     raise NativeArtifactError(f"native transport provider is not advertised by the native artifact: {name}")
 
 
+def parse_nnrp_endpoint(uri: str) -> NnrpEndpoint:
+    raw_uri = uri.strip()
+    if not raw_uri:
+        raise NativeArtifactError("NNRP endpoint URI must be non-empty")
+    parsed = urlsplit(raw_uri)
+    scheme = parsed.scheme.lower()
+    if scheme not in {"nnrp", "nnrps"}:
+        raise NativeArtifactError(f"unsupported NNRP endpoint scheme: {parsed.scheme}")
+    if not parsed.netloc:
+        raise NativeArtifactError("NNRP endpoint URI must include an authority")
+    if parsed.fragment:
+        raise NativeArtifactError("NNRP endpoint URI must not include a fragment")
+    return NnrpEndpoint(
+        uri=raw_uri,
+        scheme=scheme,
+        authority=parsed.netloc,
+        path=parsed.path or "/",
+        query=parsed.query,
+        secure=scheme == "nnrps",
+    )
+
+
 def parse_native_transport_endpoint(uri: str) -> NativeTransportEndpoint:
     raw_uri = uri.strip()
     if not raw_uri:
         raise NativeArtifactError("native transport endpoint URI must be non-empty")
     parsed = urlsplit(raw_uri)
     scheme = parsed.scheme.lower()
+    if scheme in {"nnrp", "nnrps"}:
+        raise NativeArtifactError(
+            "NNRP application endpoints must be parsed with parse_nnrp_endpoint; "
+            "native transport endpoint locators are provider-local"
+        )
     try:
         transport_name = NATIVE_ENDPOINT_TRANSPORT_BY_SCHEME[scheme]
     except KeyError as error:
@@ -3385,6 +3435,43 @@ def parse_native_transport_endpoint(uri: str) -> NativeTransportEndpoint:
         transport_id=NATIVE_TRANSPORT_ID_BY_NAME[transport_name],
         address=address,
         secure=scheme in {"quic+tls", "wss"},
+    )
+
+
+def diagnose_nnrp_endpoint_support(
+    uri: str | NnrpEndpoint,
+    policy: TransportPolicy | str | int = TransportPolicy.AUTO,
+    *,
+    root: Path | str | None = None,
+    native_platform: NativePlatform | None = None,
+    supported_transports: (
+        tuple[str | TransportId, ...] | list[str | TransportId] | set[str | TransportId] | None
+    ) = None,
+    probe_samples: tuple[NativeTransportProbeSample, ...] | list[NativeTransportProbeSample] | None = None,
+) -> NnrpEndpointSupport:
+    endpoint = uri if isinstance(uri, NnrpEndpoint) else parse_nnrp_endpoint(uri)
+    try:
+        selection = select_native_transport_provider(
+            policy,
+            root=root,
+            native_platform=native_platform,
+            supported_transports=supported_transports,
+            probe_samples=probe_samples,
+        )
+    except NativeArtifactError as error:
+        message = str(error)
+        return NnrpEndpointSupport(
+            endpoint=endpoint,
+            selection=None,
+            available=False,
+            skip_reason=message,
+            diagnostic=f"skip {endpoint.uri}: {message}",
+        )
+    return NnrpEndpointSupport(
+        endpoint=endpoint,
+        selection=selection,
+        available=True,
+        diagnostic=f"NNRP endpoint {endpoint.uri} selected {selection.selected_transport_name} carrier",
     )
 
 

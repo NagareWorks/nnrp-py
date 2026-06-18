@@ -11,6 +11,7 @@
 - [x] Report provider cost and preference metadata.
 - [x] Report provider platform limitations.
 - [x] Reject provider names that are not advertised by the native artifact.
+- [x] Keep application-facing `nnrp://` / `nnrps://` endpoints separate from provider-local locators.
 
 ## TCP And QUIC Preview4 Runtime Continuity
 

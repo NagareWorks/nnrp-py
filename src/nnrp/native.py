@@ -5,9 +5,10 @@ from __future__ import annotations
 import asyncio
 import ctypes
 import importlib
+import json
 import os
 import platform
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator, Callable, Mapping
 from dataclasses import dataclass, field
 from enum import StrEnum
 from pathlib import Path
@@ -19,6 +20,15 @@ EXPECTED_ABI_MAJOR = 1
 MINIMUM_ABI_MINOR = 4
 TRANSPORT_SLOT_QUIC = 0x00000001
 TRANSPORT_SLOT_TCP = 0x00000002
+TRANSPORT_SLOT_IPC = 0x00000004
+TRANSPORT_SLOT_WEBSOCKET = 0x00000008
+NATIVE_TRANSPORT_SCOPES = ("tcp", "quic", "ipc", "websocket")
+NATIVE_TRANSPORT_SLOT_BY_NAME = {
+    "quic": TRANSPORT_SLOT_QUIC,
+    "tcp": TRANSPORT_SLOT_TCP,
+    "ipc": TRANSPORT_SLOT_IPC,
+    "websocket": TRANSPORT_SLOT_WEBSOCKET,
+}
 RUNTIME_FEATURE_PROTOCOL_CORE = 0x0000000000000001
 RUNTIME_FEATURE_CLIENT_API = 0x0000000000000002
 RUNTIME_FEATURE_SERVER_API = 0x0000000000000004
@@ -167,6 +177,21 @@ class NativeProbeResult:
     sdk_revision: int
     transport_slots: int
     feature_flags: int
+
+
+@dataclass(frozen=True)
+class NativeTransportProvider:
+    name: str
+    artifact_path: Path
+    manifest_path: Path | None
+    transport_slots: tuple[str, ...]
+    enabled_features: tuple[str, ...]
+    package: str | None = None
+    transport_scope: str | None = None
+    platform_tag: str | None = None
+    cost: Mapping[str, Any] | None = None
+    preference: Mapping[str, Any] | None = None
+    limitations: tuple[str, ...] = ()
 
 
 class NativeHandleError(ValueError):
@@ -3173,7 +3198,7 @@ def resolve_native_artifact(
     if transport is not None:
         candidate_dirs = [platform_dir / _normalize_native_transport_scope(transport)]
     else:
-        candidate_dirs = [platform_dir, platform_dir / "tcp", platform_dir / "quic"]
+        candidate_dirs = [platform_dir, *(platform_dir / scope for scope in NATIVE_TRANSPORT_SCOPES)]
 
     for candidate_dir in candidate_dirs:
         artifact_path = candidate_dir / library_name
@@ -3186,11 +3211,49 @@ def resolve_native_artifact(
 
 def _normalize_native_transport_scope(value: str) -> str:
     normalized = value.strip().lower().replace("_", "-")
-    if normalized in {"tcp", "quic"}:
+    if normalized in NATIVE_TRANSPORT_SCOPES:
         return normalized
     if normalized in {"", "auto", "default"}:
         return "tcp"
     raise NativeArtifactError(f"unsupported native transport scope: {value}")
+
+
+def discover_native_transport_providers(
+    root: Path | str | None = None,
+    native_platform: NativePlatform | None = None,
+) -> tuple[NativeTransportProvider, ...]:
+    selected_platform = native_platform or current_native_platform()
+    artifact_root = Path(root) if root is not None else default_artifact_root()
+    platform_dir = artifact_root / selected_platform.tag
+    if not platform_dir.is_dir():
+        return ()
+
+    providers: list[NativeTransportProvider] = []
+    candidate_dirs = [platform_dir, *(platform_dir / scope for scope in NATIVE_TRANSPORT_SCOPES)]
+    for candidate_dir in candidate_dirs:
+        if not candidate_dir.is_dir():
+            continue
+        provider = _provider_from_artifact_dir(candidate_dir, selected_platform)
+        if provider is not None:
+            providers.append(provider)
+    return tuple(providers)
+
+
+def resolve_native_transport_provider(
+    name: str,
+    *,
+    root: Path | str | None = None,
+    native_platform: NativePlatform | None = None,
+) -> NativeTransportProvider:
+    normalized = _normalize_native_transport_scope(name)
+    for provider in discover_native_transport_providers(root, native_platform):
+        if provider.name == normalized:
+            return provider
+    raise NativeArtifactError(f"native transport provider is not advertised by the native artifact: {name}")
+
+
+def native_transport_slot_names(mask: int) -> tuple[str, ...]:
+    return tuple(name for name, slot in NATIVE_TRANSPORT_SLOT_BY_NAME.items() if mask & slot)
 
 
 def load_native_library(artifact_path: Path | str) -> ctypes.CDLL:
@@ -3246,7 +3309,10 @@ def load_native_runtime(
     )
     loaded_library = library if library is not None else load_native_library(resolved_path)
     capabilities = _call_runtime_capabilities(loaded_library)
-    _validate_runtime_capabilities(capabilities)
+    _validate_runtime_capabilities(
+        capabilities,
+        required_transport_slots=_required_transport_slots_for_artifact(resolved_path, transport),
+    )
     resolved_cffi_api = cffi_submit_result_api
     if resolved_cffi_api is None and library is None:
         resolved_cffi_api = _load_native_cffi_submit_result_api(resolved_path)
@@ -3355,7 +3421,10 @@ def probe_native_artifact(
     )
     loaded_library = library if library is not None else load_native_library(resolved_path)
     capabilities = _call_runtime_capabilities(loaded_library)
-    _validate_runtime_capabilities(capabilities)
+    _validate_runtime_capabilities(
+        capabilities,
+        required_transport_slots=_required_transport_slots_for_artifact(resolved_path, transport),
+    )
     return NativeProbeResult(
         artifact_path=resolved_path,
         abi_major=int(capabilities.abi_major),
@@ -3373,7 +3442,11 @@ def probe_native_artifact(
     )
 
 
-def _validate_runtime_capabilities(capabilities: _NnrpRuntimeCapabilities) -> None:
+def _validate_runtime_capabilities(
+    capabilities: _NnrpRuntimeCapabilities,
+    *,
+    required_transport_slots: int = REQUIRED_TRANSPORT_SLOTS,
+) -> None:
     if capabilities.abi_major != EXPECTED_ABI_MAJOR or capabilities.abi_minor < MINIMUM_ABI_MINOR:
         raise NativeArtifactError(
             "native artifact ABI mismatch: "
@@ -3392,11 +3465,125 @@ def _validate_runtime_capabilities(capabilities: _NnrpRuntimeCapabilities) -> No
         raise NativeArtifactError(
             f"native artifact is missing required runtime feature flags: 0x{missing_features:016x}"
         )
-    missing_transport_slots = REQUIRED_TRANSPORT_SLOTS & ~int(capabilities.transport_slots)
+    missing_transport_slots = required_transport_slots & ~int(capabilities.transport_slots)
     if missing_transport_slots:
         raise NativeArtifactError(
             f"native artifact is missing required transport slots: 0x{missing_transport_slots:08x}"
         )
+
+
+def _provider_from_artifact_dir(
+    artifact_dir: Path,
+    native_platform: NativePlatform,
+) -> NativeTransportProvider | None:
+    library_path = artifact_dir / native_library_name(native_platform.os_name)
+    if not library_path.is_file():
+        return None
+    manifest_path = artifact_dir / "manifest.json"
+    manifest = _load_native_artifact_manifest(manifest_path) if manifest_path.is_file() else {}
+    scope = _manifest_transport_scope(manifest, artifact_dir)
+    slots = _manifest_transport_slots(manifest, scope)
+    if scope != "all" and scope not in slots:
+        raise NativeArtifactError(f"native artifact manifest scope {scope!r} is not listed in transport_slots")
+    name = scope if scope != "all" else "tcp"
+    return NativeTransportProvider(
+        name=name,
+        artifact_path=library_path,
+        manifest_path=manifest_path if manifest_path.is_file() else None,
+        transport_slots=slots,
+        enabled_features=_manifest_string_tuple(manifest, "enabled_features"),
+        package=_manifest_optional_string(manifest, "package"),
+        transport_scope=scope,
+        platform_tag=native_platform.tag,
+        cost=_manifest_optional_mapping(manifest, "provider_cost"),
+        preference=_manifest_optional_mapping(manifest, "provider_preference"),
+        limitations=_manifest_string_tuple(manifest, "platform_limitations"),
+    )
+
+
+def _required_transport_slots_for_artifact(artifact_path: Path, transport: str | None) -> int:
+    if transport is not None:
+        return NATIVE_TRANSPORT_SLOT_BY_NAME[_normalize_native_transport_scope(transport)]
+    manifest = _load_native_artifact_manifest(artifact_path.with_name("manifest.json"))
+    scope = _manifest_transport_scope(manifest, artifact_path.parent)
+    if scope == "all":
+        return REQUIRED_TRANSPORT_SLOTS
+    return NATIVE_TRANSPORT_SLOT_BY_NAME[scope]
+
+
+def _load_native_artifact_manifest(manifest_path: Path) -> dict[str, Any]:
+    try:
+        document = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return {}
+    except json.JSONDecodeError as error:
+        raise NativeArtifactError(f"native artifact manifest is invalid JSON: {manifest_path}") from error
+    if not isinstance(document, dict):
+        raise NativeArtifactError(f"native artifact manifest must be a JSON object: {manifest_path}")
+    return document
+
+
+def _manifest_transport_scope(manifest: Mapping[str, Any], artifact_dir: Path) -> str:
+    raw_scope = manifest.get("transport_scope")
+    if raw_scope is None:
+        inferred = artifact_dir.name.lower()
+        return inferred if inferred in NATIVE_TRANSPORT_SCOPES else "all"
+    if not isinstance(raw_scope, str):
+        raise NativeArtifactError("native artifact manifest transport_scope must be a string")
+    scope = raw_scope.strip().lower().replace("_", "-")
+    if scope == "all" or scope in NATIVE_TRANSPORT_SCOPES:
+        return scope
+    raise NativeArtifactError(f"unsupported native transport scope: {raw_scope}")
+
+
+def _manifest_transport_slots(manifest: Mapping[str, Any], scope: str) -> tuple[str, ...]:
+    raw_slots = manifest.get("transport_slots")
+    if raw_slots is None:
+        return NATIVE_TRANSPORT_SCOPES if scope == "all" else (scope,)
+    if not isinstance(raw_slots, list) or not raw_slots:
+        raise NativeArtifactError("native artifact manifest transport_slots must be a non-empty list")
+    slots: list[str] = []
+    for raw_slot in raw_slots:
+        if not isinstance(raw_slot, str):
+            raise NativeArtifactError("native artifact manifest transport_slots entries must be strings")
+        slot = raw_slot.strip().lower().replace("_", "-")
+        if slot not in NATIVE_TRANSPORT_SCOPES:
+            raise NativeArtifactError(f"unsupported native transport slot: {raw_slot}")
+        if slot not in slots:
+            slots.append(slot)
+    return tuple(slots)
+
+
+def _manifest_string_tuple(manifest: Mapping[str, Any], field_name: str) -> tuple[str, ...]:
+    raw_values = manifest.get(field_name)
+    if raw_values is None:
+        return ()
+    if not isinstance(raw_values, list):
+        raise NativeArtifactError(f"native artifact manifest {field_name} must be a list")
+    values: list[str] = []
+    for raw_value in raw_values:
+        if not isinstance(raw_value, str) or not raw_value:
+            raise NativeArtifactError(f"native artifact manifest {field_name} entries must be non-empty strings")
+        values.append(raw_value)
+    return tuple(values)
+
+
+def _manifest_optional_string(manifest: Mapping[str, Any], field_name: str) -> str | None:
+    value = manifest.get(field_name)
+    if value is None:
+        return None
+    if not isinstance(value, str) or not value:
+        raise NativeArtifactError(f"native artifact manifest {field_name} must be a non-empty string")
+    return value
+
+
+def _manifest_optional_mapping(manifest: Mapping[str, Any], field_name: str) -> Mapping[str, Any] | None:
+    value = manifest.get(field_name)
+    if value is None:
+        return None
+    if not isinstance(value, Mapping):
+        raise NativeArtifactError(f"native artifact manifest {field_name} must be an object")
+    return value
 
 
 def _call_runtime_capabilities(library: Any) -> _NnrpRuntimeCapabilities:

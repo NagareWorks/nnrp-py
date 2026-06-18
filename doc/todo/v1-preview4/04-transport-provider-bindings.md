@@ -2,22 +2,22 @@
 
 ## Provider Registry
 
-- [ ] Expose Python transport provider discovery over Rust artifacts.
-- [ ] Report available transport providers.
-  - [ ] TCP.
-  - [ ] QUIC.
-  - [ ] IPC.
-  - [ ] WebSocket.
-- [ ] Report provider cost and preference metadata.
-- [ ] Report provider platform limitations.
-- [ ] Reject provider names that are not advertised by the native artifact.
+- [x] Expose Python transport provider discovery over Rust artifacts.
+- [x] Report available transport providers.
+  - [x] TCP.
+  - [x] QUIC.
+  - [x] IPC.
+  - [x] WebSocket.
+- [x] Report provider cost and preference metadata.
+- [x] Report provider platform limitations.
+- [x] Reject provider names that are not advertised by the native artifact.
 
 ## TCP And QUIC Continuity
 
 - [ ] Keep preview3 TCP binding behavior compatible with preview4 runtime objects.
 - [ ] Keep preview3 QUIC binding behavior compatible with preview4 runtime objects.
 - [ ] Route TCP and QUIC progress/backpressure events through the shared event pump.
-- [ ] Add tests that TCP and QUIC providers remain distinct native artifact slots.
+- [x] Add tests that TCP and QUIC providers remain distinct native artifact slots.
 
 ## IPC Binding
 

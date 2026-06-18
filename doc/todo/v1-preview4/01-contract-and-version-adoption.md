@@ -3,16 +3,16 @@
 ## Rust Artifact Baseline
 
 - [ ] Pin the preview4 Rust artifact version used by Python.
-- [ ] Probe preview4 protocol version before accepting native artifacts.
-- [ ] Probe ABI version before enabling preview4 native paths.
-- [ ] Probe transport slots.
-  - [ ] TCP.
-  - [ ] QUIC.
-  - [ ] IPC.
-  - [ ] WebSocket.
+- [x] Probe preview4 protocol version before accepting native artifacts.
+- [x] Probe ABI version before enabling preview4 native paths.
+- [x] Probe transport slots.
+  - [x] TCP.
+  - [x] QUIC.
+  - [x] IPC.
+  - [x] WebSocket.
 - [ ] Probe runtime-control feature flags.
 - [ ] Probe runtime-object feature flags.
-- [ ] Reject mismatched artifacts with deterministic Python exceptions.
+- [x] Reject mismatched artifacts with deterministic Python exceptions.
 
 ## Package Versioning
 
@@ -58,7 +58,7 @@
 
 ## Internal Ownership
 
-- [ ] Keep native loading in one internal backend module.
-- [ ] Keep cffi API detection in the backend selector.
-- [ ] Keep ctypes execution available only as an explicit development or diagnostic path when cffi API artifacts are unavailable.
-- [ ] Keep diagnostic execution paths labeled as lower-performance non-default paths.
+- [x] Keep native loading in one internal backend module.
+- [x] Keep cffi API detection in the backend selector.
+- [x] Keep ctypes execution available only as an explicit development or diagnostic path when cffi API artifacts are unavailable.
+- [x] Keep diagnostic execution paths labeled as lower-performance non-default paths.

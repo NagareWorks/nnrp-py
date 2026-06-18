@@ -30,12 +30,16 @@ def _write_wheel(path: Path, names: list[str]) -> Path:
                     scope = "tcp"
                 elif "/quic/" in name:
                     scope = "quic"
+                elif "/ipc/" in name:
+                    scope = "ipc"
+                elif "/websocket/" in name:
+                    scope = "websocket"
                 archive.writestr(
                     name,
                     json.dumps(
                         {
                             "transport_scope": scope,
-                            "transport_slots": [scope] if scope != "all" else ["tcp", "quic"],
+                            "transport_slots": [scope] if scope != "all" else ["tcp", "quic", "ipc", "websocket"],
                         }
                     ).encode(),
                 )
@@ -125,10 +129,14 @@ def test_verify_native_wheels_requires_split_transport_artifacts(tmp_path: Path)
             "nnrp/native_artifacts/linux-x86_64/tcp/libnnrp_ffi.so",
             "nnrp/native_artifacts/linux-x86_64/quic/manifest.json",
             "nnrp/native_artifacts/linux-x86_64/quic/libnnrp_ffi.so",
+            "nnrp/native_artifacts/linux-x86_64/ipc/manifest.json",
+            "nnrp/native_artifacts/linux-x86_64/ipc/libnnrp_ffi.so",
+            "nnrp/native_artifacts/linux-x86_64/websocket/manifest.json",
+            "nnrp/native_artifacts/linux-x86_64/websocket/libnnrp_ffi.so",
         ],
     )
 
-    with pytest.raises(ValueError, match="split TCP and QUIC"):
+    with pytest.raises(ValueError, match="split TCP, QUIC, IPC, and WebSocket"):
         verify_native_wheels([inspect_wheel(legacy)], require_native=True, require_split_transports=True)
 
     verify_native_wheels([inspect_wheel(split)], require_native=True, require_split_transports=True)

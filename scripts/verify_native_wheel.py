@@ -171,7 +171,7 @@ def verify_native_wheels(
         if require_split_transports
         and summary.has_native_artifacts
         and (
-            set(summary.transport_scopes) != {"tcp", "quic"}
+            set(summary.transport_scopes) != {"tcp", "quic", "ipc", "websocket"}
             or any(scope == "all" for scope in summary.transport_scopes)
         )
     ]
@@ -180,7 +180,7 @@ def verify_native_wheels(
             f"{summary.wheel.name} has transport scopes {summary.transport_scopes or ('-',)}"
             for summary in split_transport_failures
         )
-        raise ValueError(f"wheel must embed split TCP and QUIC native transport artifacts: {details}")
+        raise ValueError(f"wheel must embed split TCP, QUIC, IPC, and WebSocket native transport artifacts: {details}")
 
 
 def _artifact_tags(names: Iterable[str]) -> set[str]:

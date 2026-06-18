@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import ctypes
+import json
 import time
 from pathlib import Path
 from types import SimpleNamespace
@@ -53,7 +54,9 @@ from nnrp.native import (
     SESSION_ERROR_PRIORITY_REJECTED,
     SESSION_RECOVERY_OUTCOME_RESUME_ENABLED,
     SESSION_RECOVERY_OUTCOME_RESUMED,
+    TRANSPORT_SLOT_IPC,
     TRANSPORT_SLOT_TCP,
+    TRANSPORT_SLOT_WEBSOCKET,
     NativeArtifactError,
     NativeBufferHandle,
     NativeBufferView,
@@ -96,6 +99,7 @@ from nnrp.native import (
     NativeSessionRecoveryOutcome,
     NativeStatus,
     NativeStructuredDiagnostic,
+    NativeTransportProvider,
     NativeWouldBlockError,
     _load_native_cffi_submit_result_api,
     _NativeCffiSubmitResultApi,
@@ -133,15 +137,18 @@ from nnrp.native import (
     _normalize_arch,
     current_native_platform,
     default_artifact_root,
+    discover_native_transport_providers,
     load_native_client,
     load_native_library,
     load_native_recovery_codec,
     load_native_runtime,
     load_native_schema_codec,
     native_library_name,
+    native_transport_slot_names,
     probe_native_artifact,
     raise_for_native_status,
     resolve_native_artifact,
+    resolve_native_transport_provider,
     select_native_runtime_backend,
 )
 from nnrp.schema import (
@@ -983,9 +990,223 @@ def test_resolve_native_artifact_supports_split_transport_artifacts(tmp_path: Pa
     assert resolve_native_artifact(tmp_path, native_platform, transport="quic") == quic_artifact
 
 
+def test_resolve_native_artifact_supports_preview4_ipc_and_websocket_artifacts(tmp_path: Path) -> None:
+    ipc_dir = tmp_path / "linux-x86_64" / "ipc"
+    websocket_dir = tmp_path / "linux-x86_64" / "websocket"
+    ipc_dir.mkdir(parents=True)
+    websocket_dir.mkdir(parents=True)
+    ipc_artifact = ipc_dir / "libnnrp_ffi.so"
+    websocket_artifact = websocket_dir / "libnnrp_ffi.so"
+    ipc_artifact.write_bytes(b"ipc")
+    websocket_artifact.write_bytes(b"websocket")
+    native_platform = NativePlatform("linux", "x86_64")
+
+    assert resolve_native_artifact(tmp_path, native_platform, transport="ipc") == ipc_artifact
+    assert resolve_native_artifact(tmp_path, native_platform, transport="websocket") == websocket_artifact
+
+
 def test_resolve_native_artifact_rejects_unknown_transport_scope(tmp_path: Path) -> None:
     with pytest.raises(NativeArtifactError, match="unsupported native transport scope"):
-        resolve_native_artifact(tmp_path, NativePlatform("linux", "x86_64"), transport="websocket")
+        resolve_native_artifact(tmp_path, NativePlatform("linux", "x86_64"), transport="stdio")
+
+
+def _write_provider_artifact(root: Path, scope: str, *, slots: list[str] | None = None) -> Path:
+    artifact_dir = root / "linux-x86_64" / scope
+    artifact_dir.mkdir(parents=True)
+    artifact = artifact_dir / "libnnrp_ffi.so"
+    artifact.write_bytes(scope.encode("utf-8"))
+    (artifact_dir / "manifest.json").write_text(
+        json.dumps(
+            {
+                "package": f"nnrp-ffi-transport-{scope}",
+                "transport_scope": scope,
+                "transport_slots": slots or [scope],
+                "enabled_features": [f"transport-{scope}"],
+                "provider_cost": {"latency_bias": 1},
+                "provider_preference": {"locality": "node"},
+                "platform_limitations": ["loopback-only"],
+            }
+        ),
+        encoding="utf-8",
+    )
+    return artifact
+
+
+def _write_provider_artifact_with_manifest(root: Path, scope: str, manifest: object) -> Path:
+    artifact_dir = root / "linux-x86_64" / scope
+    artifact_dir.mkdir(parents=True)
+    artifact = artifact_dir / "libnnrp_ffi.so"
+    artifact.write_bytes(scope.encode("utf-8"))
+    (artifact_dir / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+    return artifact
+
+
+def test_discover_native_transport_providers_reports_preview4_artifact_metadata(tmp_path: Path) -> None:
+    tcp_artifact = _write_provider_artifact(tmp_path, "tcp")
+    ipc_artifact = _write_provider_artifact(tmp_path, "ipc")
+    websocket_artifact = _write_provider_artifact(tmp_path, "websocket")
+
+    providers = discover_native_transport_providers(tmp_path, NativePlatform("linux", "x86_64"))
+
+    assert providers == (
+        NativeTransportProvider(
+            name="tcp",
+            artifact_path=tcp_artifact,
+            manifest_path=tcp_artifact.with_name("manifest.json"),
+            transport_slots=("tcp",),
+            enabled_features=("transport-tcp",),
+            package="nnrp-ffi-transport-tcp",
+            transport_scope="tcp",
+            platform_tag="linux-x86_64",
+            cost={"latency_bias": 1},
+            preference={"locality": "node"},
+            limitations=("loopback-only",),
+        ),
+        NativeTransportProvider(
+            name="ipc",
+            artifact_path=ipc_artifact,
+            manifest_path=ipc_artifact.with_name("manifest.json"),
+            transport_slots=("ipc",),
+            enabled_features=("transport-ipc",),
+            package="nnrp-ffi-transport-ipc",
+            transport_scope="ipc",
+            platform_tag="linux-x86_64",
+            cost={"latency_bias": 1},
+            preference={"locality": "node"},
+            limitations=("loopback-only",),
+        ),
+        NativeTransportProvider(
+            name="websocket",
+            artifact_path=websocket_artifact,
+            manifest_path=websocket_artifact.with_name("manifest.json"),
+            transport_slots=("websocket",),
+            enabled_features=("transport-websocket",),
+            package="nnrp-ffi-transport-websocket",
+            transport_scope="websocket",
+            platform_tag="linux-x86_64",
+            cost={"latency_bias": 1},
+            preference={"locality": "node"},
+            limitations=("loopback-only",),
+        ),
+    )
+
+
+def test_discover_native_transport_provider_all_scope_infers_slots_from_manifest(tmp_path: Path) -> None:
+    platform_dir = tmp_path / "linux-x86_64"
+    platform_dir.mkdir()
+    artifact = platform_dir / "libnnrp_ffi.so"
+    artifact.write_bytes(b"all")
+    (platform_dir / "manifest.json").write_text(json.dumps({"transport_scope": "all"}), encoding="utf-8")
+
+    providers = discover_native_transport_providers(tmp_path, NativePlatform("linux", "x86_64"))
+
+    assert providers == (
+        NativeTransportProvider(
+            name="tcp",
+            artifact_path=artifact,
+            manifest_path=artifact.with_name("manifest.json"),
+            transport_slots=("tcp", "quic", "ipc", "websocket"),
+            enabled_features=(),
+            package=None,
+            transport_scope="all",
+            platform_tag="linux-x86_64",
+        ),
+    )
+
+
+def test_resolve_native_transport_provider_rejects_unadvertised_provider(tmp_path: Path) -> None:
+    _write_provider_artifact(tmp_path, "tcp")
+
+    provider = resolve_native_transport_provider(
+        "tcp",
+        root=tmp_path,
+        native_platform=NativePlatform("linux", "x86_64"),
+    )
+
+    assert provider.name == "tcp"
+    with pytest.raises(NativeArtifactError, match="not advertised"):
+        resolve_native_transport_provider("ipc", root=tmp_path, native_platform=NativePlatform("linux", "x86_64"))
+
+
+def test_discover_native_transport_provider_rejects_manifest_scope_slot_mismatch(tmp_path: Path) -> None:
+    _write_provider_artifact(tmp_path, "ipc", slots=["tcp"])
+
+    with pytest.raises(NativeArtifactError, match="not listed in transport_slots"):
+        discover_native_transport_providers(tmp_path, NativePlatform("linux", "x86_64"))
+
+
+@pytest.mark.parametrize(
+    ("manifest_text", "match"),
+    [
+        ("{", "invalid JSON"),
+        ("[]", "must be a JSON object"),
+    ],
+)
+def test_discover_native_transport_provider_rejects_invalid_manifest_document(
+    tmp_path: Path,
+    manifest_text: str,
+    match: str,
+) -> None:
+    artifact_dir = tmp_path / "linux-x86_64" / "ipc"
+    artifact_dir.mkdir(parents=True)
+    (artifact_dir / "libnnrp_ffi.so").write_bytes(b"ipc")
+    (artifact_dir / "manifest.json").write_text(manifest_text, encoding="utf-8")
+
+    with pytest.raises(NativeArtifactError, match=match):
+        discover_native_transport_providers(tmp_path, NativePlatform("linux", "x86_64"))
+
+
+@pytest.mark.parametrize(
+    ("manifest", "match"),
+    [
+        ({"transport_scope": 7}, "transport_scope must be a string"),
+        ({"transport_scope": "stdio"}, "unsupported native transport scope"),
+        ({"transport_scope": "ipc", "transport_slots": []}, "transport_slots must be a non-empty list"),
+        ({"transport_scope": "ipc", "transport_slots": [7]}, "transport_slots entries must be strings"),
+        ({"transport_scope": "ipc", "transport_slots": ["stdio"]}, "unsupported native transport slot"),
+        (
+            {"transport_scope": "ipc", "transport_slots": ["ipc"], "enabled_features": "transport-ipc"},
+            "enabled_features must be a list",
+        ),
+        (
+            {"transport_scope": "ipc", "transport_slots": ["ipc"], "enabled_features": [""]},
+            "enabled_features entries must be non-empty strings",
+        ),
+        (
+            {"transport_scope": "ipc", "transport_slots": ["ipc"], "package": ""},
+            "package must be a non-empty string",
+        ),
+        (
+            {"transport_scope": "ipc", "transport_slots": ["ipc"], "provider_cost": []},
+            "provider_cost must be an object",
+        ),
+        (
+            {"transport_scope": "ipc", "transport_slots": ["ipc"], "provider_preference": []},
+            "provider_preference must be an object",
+        ),
+        (
+            {"transport_scope": "ipc", "transport_slots": ["ipc"], "platform_limitations": "linux"},
+            "platform_limitations must be a list",
+        ),
+    ],
+)
+def test_discover_native_transport_provider_rejects_invalid_manifest_fields(
+    tmp_path: Path,
+    manifest: object,
+    match: str,
+) -> None:
+    _write_provider_artifact_with_manifest(tmp_path, "ipc", manifest)
+
+    with pytest.raises(NativeArtifactError, match=match):
+        discover_native_transport_providers(tmp_path, NativePlatform("linux", "x86_64"))
+
+
+def test_native_transport_slot_names_maps_preview4_slots() -> None:
+    assert native_transport_slot_names(TRANSPORT_SLOT_TCP | TRANSPORT_SLOT_IPC | TRANSPORT_SLOT_WEBSOCKET) == (
+        "tcp",
+        "ipc",
+        "websocket",
+    )
 
 
 def test_resolve_native_artifact_uses_current_platform_when_not_provided(
@@ -1030,6 +1251,39 @@ def test_probe_native_artifact_accepts_matching_protocol(tmp_path: Path) -> None
     assert result.sdk_revision == 6
     assert result.transport_slots == TRANSPORT_SLOT_TCP
     assert result.feature_flags == REQUIRED_RUNTIME_FEATURES
+
+
+@pytest.mark.parametrize(
+    ("transport", "slot"),
+    [
+        ("ipc", TRANSPORT_SLOT_IPC),
+        ("websocket", TRANSPORT_SLOT_WEBSOCKET),
+    ],
+)
+def test_probe_native_artifact_accepts_transport_scoped_preview4_artifacts(
+    tmp_path: Path,
+    transport: str,
+    slot: int,
+) -> None:
+    artifact = _write_provider_artifact(tmp_path, transport)
+
+    result = probe_native_artifact(artifact, library=FakeLibrary(transport_slots=slot))
+
+    assert result.artifact_path == artifact
+    assert result.transport_slots == slot
+
+
+def test_probe_native_artifact_uses_explicit_transport_slot_for_direct_artifact(tmp_path: Path) -> None:
+    artifact = tmp_path / "libnnrp_ffi.so"
+    artifact.write_bytes(b"fake")
+
+    result = probe_native_artifact(
+        artifact,
+        transport="websocket",
+        library=FakeLibrary(transport_slots=TRANSPORT_SLOT_WEBSOCKET),
+    )
+
+    assert result.transport_slots == TRANSPORT_SLOT_WEBSOCKET
 
 
 def test_probe_native_artifact_resolves_path_from_root(tmp_path: Path) -> None:

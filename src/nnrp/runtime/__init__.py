@@ -127,6 +127,56 @@ def encode_runtime_object_metadata(
     return fixed + bytes(tail)
 
 
+def declare_runtime_object(
+    metadata: ObjectDescriptorMetadata,
+    *,
+    metadata_tail: bytes = b"",
+) -> bytes:
+    return encode_runtime_object_metadata(MessageType.OBJECT_DECLARE, metadata, tail=metadata_tail)
+
+
+def reference_runtime_object(
+    metadata: ObjectReferenceMetadata,
+    *,
+    metadata_tail: bytes = b"",
+) -> bytes:
+    return encode_runtime_object_metadata(MessageType.OBJECT_REF, metadata, tail=metadata_tail)
+
+
+def release_runtime_object(
+    metadata: ObjectReleaseMetadata,
+    *,
+    diagnostic_tail: bytes = b"",
+) -> bytes:
+    return encode_runtime_object_metadata(MessageType.OBJECT_RELEASE, metadata, tail=diagnostic_tail)
+
+
+def patch_runtime_object(
+    metadata: ObjectDeltaMetadata,
+    *,
+    metadata_tail: bytes = b"",
+    delta: bytes = b"",
+) -> bytes:
+    return encode_runtime_object_metadata(MessageType.OBJECT_PATCH, metadata, tail=metadata_tail + delta)
+
+
+def delta_runtime_object(
+    metadata: ObjectDeltaMetadata,
+    *,
+    metadata_tail: bytes = b"",
+    delta: bytes = b"",
+) -> bytes:
+    return encode_runtime_object_metadata(MessageType.OBJECT_DELTA, metadata, tail=metadata_tail + delta)
+
+
+def partial_result_runtime_object(
+    metadata: PartialResultMetadata,
+    *,
+    body: bytes = b"",
+) -> bytes:
+    return encode_runtime_control_metadata(MessageType.PARTIAL_RESULT, metadata, tail=body)
+
+
 def decode_runtime_object_metadata(message_type: MessageType, payload: bytes) -> DecodedRuntimeObjectMetadata:
     fixed_type = _metadata_type(_RUNTIME_OBJECT_TYPES, message_type)
     fixed, tail = _split_fixed_tail(payload, fixed_type)
@@ -308,11 +358,17 @@ __all__ = [
     "SchedulingMetadata",
     "SupersedeMetadata",
     "TraceContextMetadata",
+    "declare_runtime_object",
     "decode_runtime_control_metadata",
     "decode_runtime_object_metadata",
     "decode_websocket_binary_frame",
     "decode_websocket_binary_frame_batch",
+    "delta_runtime_object",
     "encode_runtime_control_metadata",
     "encode_runtime_object_metadata",
     "encode_websocket_binary_frame",
+    "partial_result_runtime_object",
+    "patch_runtime_object",
+    "reference_runtime_object",
+    "release_runtime_object",
 ]

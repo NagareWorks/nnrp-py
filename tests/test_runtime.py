@@ -31,13 +31,19 @@ from nnrp.runtime import (
     SchedulingMetadata,
     SupersedeMetadata,
     TraceContextMetadata,
+    declare_runtime_object,
     decode_runtime_control_metadata,
     decode_runtime_object_metadata,
     decode_websocket_binary_frame,
     decode_websocket_binary_frame_batch,
+    delta_runtime_object,
     encode_runtime_control_metadata,
     encode_runtime_object_metadata,
     encode_websocket_binary_frame,
+    partial_result_runtime_object,
+    patch_runtime_object,
+    reference_runtime_object,
+    release_runtime_object,
 )
 from nnrp.runtime.types import _FixedRuntimeMetadata
 
@@ -287,6 +293,92 @@ def test_runtime_object_declare_roundtrip_with_extension() -> None:
 
     assert decoded.metadata == metadata
     assert decoded.tail == b"abc"
+
+
+def test_runtime_object_lifecycle_helpers_encode_frozen_message_types() -> None:
+    descriptor = ObjectDescriptorMetadata(
+        object_id=9,
+        object_kind=RuntimeObjectKind.IMAGE_TILE,
+        producer_role=RuntimeRole.RUNTIME,
+        consumer_role=RuntimeRole.CLIENT,
+        session_id=3,
+        byte_size=4096,
+        compute_cost_units=12,
+        memory_location_hint=MemoryLocationHint.HOST_MEMORY,
+        ownership_hint=OwnershipHint.CONSUMER_OWNED,
+        lifetime_hint_ms=1000,
+        metadata_bytes=3,
+    )
+    object_ref = ObjectReferenceMetadata(
+        object_id=9,
+        operation_id=42,
+        object_version=2,
+        offset=128,
+        length=256,
+        flags=0x01,
+        metadata_bytes=2,
+    )
+    release = ObjectReleaseMetadata(
+        object_id=9,
+        operation_id=42,
+        release_reason=ObjectReleaseReason.COMPLETED,
+        source_role=RuntimeRole.CLIENT,
+        flags=0x01,
+        diagnostic_bytes=2,
+    )
+
+    assert decode_runtime_object_metadata(
+        MessageType.OBJECT_DECLARE,
+        declare_runtime_object(descriptor, metadata_tail=b"abc"),
+    ).metadata == descriptor
+    assert decode_runtime_object_metadata(
+        MessageType.OBJECT_REF,
+        reference_runtime_object(object_ref, metadata_tail=b"md"),
+    ).metadata == object_ref
+    assert decode_runtime_object_metadata(
+        MessageType.OBJECT_RELEASE,
+        release_runtime_object(release, diagnostic_tail=b"ok"),
+    ).metadata == release
+
+
+def test_runtime_object_delta_and_partial_result_helpers_preserve_tail_boundaries() -> None:
+    delta = ObjectDeltaMetadata(
+        object_id=9,
+        delta_sequence=2,
+        region_offset=128,
+        region_bytes=64,
+        delta_bytes=4,
+        flags=0x03,
+        metadata_bytes=2,
+    )
+    partial = PartialResultMetadata(
+        operation_id=4,
+        result_sequence=5,
+        object_id=9,
+        delta_sequence=2,
+        body_bytes=6,
+        flags=0x03,
+    )
+
+    patch = decode_runtime_object_metadata(
+        MessageType.OBJECT_PATCH,
+        patch_runtime_object(delta, metadata_tail=b"md", delta=b"xxxx"),
+    )
+    object_delta = decode_runtime_object_metadata(
+        MessageType.OBJECT_DELTA,
+        delta_runtime_object(delta, metadata_tail=b"md", delta=b"xxxx"),
+    )
+    partial_result = decode_runtime_control_metadata(
+        MessageType.PARTIAL_RESULT,
+        partial_result_runtime_object(partial, body=b"output"),
+    )
+
+    assert patch.metadata == delta
+    assert patch.tail == b"mdxxxx"
+    assert object_delta.metadata == delta
+    assert object_delta.tail == b"mdxxxx"
+    assert partial_result.metadata == partial
+    assert partial_result.tail == b"output"
 
 
 @pytest.mark.parametrize(

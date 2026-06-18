@@ -8,11 +8,11 @@
   - [x] Producer.
   - [x] Consumer.
   - [x] Lifetime hint.
-- [ ] Add object declaration API.
-- [ ] Add object reference API.
-- [ ] Add object release API.
-- [ ] Add object delta API.
-- [ ] Add partial-result object helper API.
+- [x] Add object declaration API.
+- [x] Add object reference API.
+- [x] Add object release API.
+- [x] Add object delta API.
+- [x] Add partial-result object helper API.
 
 ## Native Object Bindings
 

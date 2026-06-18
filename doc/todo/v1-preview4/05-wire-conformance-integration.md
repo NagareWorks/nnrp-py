@@ -22,20 +22,20 @@
 - [ ] Add test harness entrypoint for suite-as-client scenarios.
 - [ ] Add test harness entrypoint for suite-as-server scenarios.
 - [ ] Add test harness entrypoint for proxy scenarios where available.
-- [ ] Write wire result reports with observed frames.
-- [ ] Write evidence files for frame logs and timing.
+- [x] Write wire result reports with observed frames.
+- [x] Write evidence files for frame logs and timing.
 
 ## Result Validation
 
 - [ ] Run `nnrp-conformance-runner wire-plan` in CI.
 - [ ] Run `nnrp-conformance-runner validate-wire-results` in CI when live endpoint tests are enabled.
 - [ ] Keep adapter conformance and wire conformance as separate jobs.
-- [ ] Add skip diagnostics for unavailable native transports.
-- [ ] Ensure skipped transport cases do not masquerade as passed cases.
+- [x] Add skip diagnostics for unavailable native transports.
+- [x] Ensure skipped transport cases do not masquerade as passed cases.
 
 ## Regression Coverage
 
-- [ ] Add Python tests for target manifest generation.
-- [ ] Add Python tests for wire result report generation.
-- [ ] Add negative tests for unsupported transport declarations.
-- [ ] Add negative tests for missing result frames.
+- [x] Add Python tests for target manifest generation.
+- [x] Add Python tests for wire result report generation.
+- [x] Add negative tests for unsupported transport declarations.
+- [x] Add negative tests for missing result frames.

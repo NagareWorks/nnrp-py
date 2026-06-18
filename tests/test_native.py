@@ -102,6 +102,7 @@ from nnrp.native import (
     NativeStatus,
     NativeStructuredDiagnostic,
     NativeTransportEndpoint,
+    NativeTransportEndpointSupport,
     NativeTransportProbeSample,
     NativeTransportProvider,
     NativeWouldBlockError,
@@ -141,6 +142,7 @@ from nnrp.native import (
     _normalize_arch,
     current_native_platform,
     default_artifact_root,
+    diagnose_native_transport_endpoint_support,
     discover_native_transport_providers,
     load_native_client,
     load_native_library,
@@ -1265,6 +1267,69 @@ def test_parse_native_transport_endpoint_maps_preview4_endpoint_schemes(
 def test_parse_native_transport_endpoint_rejects_invalid_endpoint_shapes(uri: str, match: str) -> None:
     with pytest.raises(NativeArtifactError, match=match):
         parse_native_transport_endpoint(uri)
+
+
+def test_diagnose_native_transport_endpoint_support_reports_available_provider(tmp_path: Path) -> None:
+    websocket_artifact = _write_provider_artifact(tmp_path, "websocket")
+
+    support = diagnose_native_transport_endpoint_support(
+        "wss://example.test/nnrp",
+        root=tmp_path,
+        native_platform=NativePlatform("linux", "x86_64"),
+    )
+
+    assert support == NativeTransportEndpointSupport(
+        endpoint=NativeTransportEndpoint(
+            uri="wss://example.test/nnrp",
+            scheme="wss",
+            transport_name="websocket",
+            transport_id=TransportId.WEBSOCKET,
+            address="example.test/nnrp",
+            secure=True,
+        ),
+        provider=NativeTransportProvider(
+            name="websocket",
+            artifact_path=websocket_artifact,
+            manifest_path=websocket_artifact.with_name("manifest.json"),
+            transport_slots=("websocket",),
+            enabled_features=("transport-websocket",),
+            package="nnrp-ffi-transport-websocket",
+            transport_scope="websocket",
+            platform_tag="linux-x86_64",
+            cost={"latency_bias": 1},
+            preference={"locality": "node"},
+            limitations=("loopback-only",),
+        ),
+        available=True,
+        diagnostic="native transport provider 'websocket' exposes websocket",
+    )
+
+
+@pytest.mark.parametrize(
+    ("uri", "transport_name"),
+    [
+        ("unix:///tmp/nnrp.sock", "ipc"),
+        ("ws://example.test/nnrp", "websocket"),
+    ],
+)
+def test_diagnose_native_transport_endpoint_support_skips_missing_provider(
+    tmp_path: Path,
+    uri: str,
+    transport_name: str,
+) -> None:
+    _write_provider_artifact(tmp_path, "tcp")
+
+    support = diagnose_native_transport_endpoint_support(
+        uri,
+        root=tmp_path,
+        native_platform=NativePlatform("linux", "x86_64"),
+    )
+
+    assert support.available is False
+    assert support.provider is None
+    assert support.endpoint.transport_name == transport_name
+    assert support.skip_reason == f"native artifact does not expose {transport_name} transport"
+    assert f"install a preview4 {transport_name} native transport artifact" in str(support.diagnostic)
 
 
 def test_select_native_transport_provider_selects_single_installed_transport(tmp_path: Path) -> None:

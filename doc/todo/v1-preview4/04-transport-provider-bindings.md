@@ -26,7 +26,7 @@
 - [ ] Bind native IPC provider connect.
 - [ ] Bind native IPC provider listen.
 - [ ] Add loopback smoke tests against preview4 Rust IPC artifacts.
-- [ ] Add diagnostic skip behavior when the native artifact does not expose IPC.
+- [x] Add diagnostic skip behavior when the native artifact does not expose IPC.
 
 ## WebSocket Binding
 
@@ -36,7 +36,7 @@
 - [ ] Bind native WebSocket provider listen.
 - [x] Add binary-frame-only validation.
 - [ ] Add loopback smoke tests against preview4 Rust WebSocket artifacts.
-- [ ] Add diagnostic skip behavior when the native artifact does not expose WebSocket.
+- [x] Add diagnostic skip behavior when the native artifact does not expose WebSocket.
 
 ## Probe Policy
 

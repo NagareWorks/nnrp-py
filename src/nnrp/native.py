@@ -228,6 +228,15 @@ class NativeTransportEndpoint:
 
 
 @dataclass(frozen=True)
+class NativeTransportEndpointSupport:
+    endpoint: NativeTransportEndpoint
+    provider: NativeTransportProvider | None
+    available: bool
+    skip_reason: str | None = None
+    diagnostic: str | None = None
+
+
+@dataclass(frozen=True)
 class NativeTransportProbeSample:
     provider_name: str
     transport_name: str
@@ -3376,6 +3385,31 @@ def parse_native_transport_endpoint(uri: str) -> NativeTransportEndpoint:
         transport_id=NATIVE_TRANSPORT_ID_BY_NAME[transport_name],
         address=address,
         secure=scheme in {"quic+tls", "wss"},
+    )
+
+
+def diagnose_native_transport_endpoint_support(
+    uri: str | NativeTransportEndpoint,
+    *,
+    root: Path | str | None = None,
+    native_platform: NativePlatform | None = None,
+) -> NativeTransportEndpointSupport:
+    endpoint = uri if isinstance(uri, NativeTransportEndpoint) else parse_native_transport_endpoint(uri)
+    providers = discover_native_transport_providers(root, native_platform)
+    for provider in providers:
+        if endpoint.transport_name in provider.transport_slots:
+            return NativeTransportEndpointSupport(
+                endpoint=endpoint,
+                provider=provider,
+                available=True,
+                diagnostic=f"native transport provider {provider.name!r} exposes {endpoint.transport_name}",
+            )
+    return NativeTransportEndpointSupport(
+        endpoint=endpoint,
+        provider=None,
+        available=False,
+        skip_reason=f"native artifact does not expose {endpoint.transport_name} transport",
+        diagnostic=f"skip {endpoint.uri}: install a preview4 {endpoint.transport_name} native transport artifact",
     )
 
 

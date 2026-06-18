@@ -137,54 +137,62 @@ def decode_runtime_object_metadata(message_type: MessageType, payload: bytes) ->
 
 def encode_websocket_binary_frame(
     header: RuntimeFrameHeader,
-    metadata: bytes = b"",
-    body: bytes = b"",
+    metadata: bytes | bytearray | memoryview = b"",
+    body: bytes | bytearray | memoryview = b"",
 ) -> bytes:
+    metadata_bytes = _require_websocket_binary_payload("metadata", metadata)
+    body_bytes = _require_websocket_binary_payload("body", body)
     packet_header = NnrpHeader(
         version_major=header.version_major,
         wire_format=header.wire_format,
         msg_type=header.message_type,
         flags=header.flags,
-        meta_len=len(metadata),
-        body_len=len(body),
+        meta_len=len(metadata_bytes),
+        body_len=len(body_bytes),
         session_id=header.session_id,
         frame_id=header.frame_id,
         view_id=header.view_id,
         route_id=header.route_id,
         trace_id=header.trace_id,
     )
-    return packet_header.pack() + bytes(metadata) + bytes(body)
+    return packet_header.pack() + metadata_bytes + body_bytes
 
 
-def decode_websocket_binary_frame(frame: bytes) -> DecodedRuntimeFrame:
-    if len(frame) < HEADER_LENGTH:
+def decode_websocket_binary_frame(frame: bytes | bytearray | memoryview) -> DecodedRuntimeFrame:
+    frame_bytes = _require_websocket_binary_payload("frame", frame)
+    if len(frame_bytes) < HEADER_LENGTH:
         raise ValueError("incomplete WebSocket binary frame header")
-    header = NnrpHeader.unpack(frame[:HEADER_LENGTH])
+    header = NnrpHeader.unpack(frame_bytes[:HEADER_LENGTH])
     total_len = header.header_len + header.meta_len + header.body_len
-    if len(frame) != total_len:
-        raise ValueError(f"expected {total_len} bytes, got {len(frame)}")
+    if len(frame_bytes) != total_len:
+        raise ValueError(f"expected {total_len} bytes, got {len(frame_bytes)}")
     metadata_start = header.header_len
     body_start = metadata_start + header.meta_len
     return DecodedRuntimeFrame(
         header=_runtime_frame_header_from_header(header),
-        metadata=frame[metadata_start:body_start],
-        body=frame[body_start:],
+        metadata=frame_bytes[metadata_start:body_start],
+        body=frame_bytes[body_start:],
     )
 
 
-def decode_websocket_binary_frame_batch(batch: bytes, *, limit: int = 0) -> list[DecodedRuntimeFrame]:
+def decode_websocket_binary_frame_batch(
+    batch: bytes | bytearray | memoryview,
+    *,
+    limit: int = 0,
+) -> list[DecodedRuntimeFrame]:
     if limit < 0:
         raise ValueError("limit must be non-negative")
+    batch_bytes = _require_websocket_binary_payload("batch", batch)
     frames: list[DecodedRuntimeFrame] = []
     cursor = 0
-    while cursor < len(batch) and (limit == 0 or len(frames) < limit):
-        if len(batch) - cursor < HEADER_LENGTH:
+    while cursor < len(batch_bytes) and (limit == 0 or len(frames) < limit):
+        if len(batch_bytes) - cursor < HEADER_LENGTH:
             raise ValueError("incomplete WebSocket binary frame in batch")
-        header = NnrpHeader.unpack(batch[cursor : cursor + HEADER_LENGTH])
+        header = NnrpHeader.unpack(batch_bytes[cursor : cursor + HEADER_LENGTH])
         frame_len = header.header_len + header.meta_len + header.body_len
-        if len(batch) - cursor < frame_len:
+        if len(batch_bytes) - cursor < frame_len:
             raise ValueError("incomplete WebSocket binary frame in batch")
-        frames.append(decode_websocket_binary_frame(batch[cursor : cursor + frame_len]))
+        frames.append(decode_websocket_binary_frame(batch_bytes[cursor : cursor + frame_len]))
         cursor += frame_len
     return frames
 
@@ -220,6 +228,18 @@ def _declared_tail_length(metadata: _FixedRuntimeMetadata) -> int:
         if hasattr(metadata, field_name):
             return int(getattr(metadata, field_name))
     return 0
+
+
+def _require_websocket_binary_payload(name: str, value: bytes | bytearray | memoryview) -> bytes:
+    if isinstance(value, str):
+        raise TypeError(f"WebSocket {name} must be a binary frame payload, not text")
+    try:
+        view = memoryview(value)
+    except TypeError as error:
+        raise TypeError(f"WebSocket {name} must be bytes-like") from error
+    if not view.contiguous:
+        raise ValueError(f"WebSocket {name} memoryview must be contiguous")
+    return view.tobytes()
 
 
 def _runtime_frame_header_from_header(header: NnrpHeader) -> RuntimeFrameHeader:

@@ -34,7 +34,7 @@
 - [x] Add Python endpoint model for `wss://`.
 - [ ] Bind native WebSocket provider connect.
 - [ ] Bind native WebSocket provider listen.
-- [ ] Add binary-frame-only validation.
+- [x] Add binary-frame-only validation.
 - [ ] Add loopback smoke tests against preview4 Rust WebSocket artifacts.
 - [ ] Add diagnostic skip behavior when the native artifact does not expose WebSocket.
 

@@ -483,6 +483,25 @@ def test_websocket_binary_frame_rejects_incomplete_inputs() -> None:
     assert decode_websocket_binary_frame_batch(frame + frame, limit=1) == [decode_websocket_binary_frame(frame)]
 
 
+def test_websocket_binary_frame_rejects_text_frames_and_non_contiguous_views() -> None:
+    header = RuntimeFrameHeader(message_type=MessageType.PROGRESS, session_id=3)
+    frame = encode_websocket_binary_frame(header, metadata=bytearray(b"m"), body=memoryview(b"body"))
+    non_contiguous = memoryview(bytearray(b"abcdef"))[::2]
+
+    assert decode_websocket_binary_frame(memoryview(frame)).body == b"body"
+    assert decode_websocket_binary_frame_batch(bytearray(frame))[0].metadata == b"m"
+    with pytest.raises(TypeError, match="not text"):
+        encode_websocket_binary_frame(header, metadata="text")
+    with pytest.raises(TypeError, match="not text"):
+        decode_websocket_binary_frame("text")
+    with pytest.raises(TypeError, match="bytes-like"):
+        decode_websocket_binary_frame(object())
+    with pytest.raises(ValueError, match="must be contiguous"):
+        encode_websocket_binary_frame(header, metadata=non_contiguous)
+    with pytest.raises(ValueError, match="must be contiguous"):
+        decode_websocket_binary_frame_batch(non_contiguous)
+
+
 def test_preview4_client_dial_policy_maps_ipc_and_websocket() -> None:
     assert ClientDialPolicy(selected_transport_id=TransportId.IPC).to_client_hello_transport_policy() is not None
     assert ClientDialPolicy(

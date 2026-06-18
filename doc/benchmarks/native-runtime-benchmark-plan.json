@@ -1,6 +1,6 @@
 {
   "$schema": "../../schemas/benchmark-execution-plan.schema.json",
-  "protocol_version": "nnrp-1-preview3",
+  "protocol_version": "nnrp-1-preview4",
   "suite_version": "python-native-runtime",
   "implementation_name": "nnrp-py",
   "artifacts": {
@@ -8,6 +8,42 @@
     "evidence_dir": "artifacts/native-runtime-benchmark-evidence"
   },
   "scenarios": [
+    {
+      "id": "l4.runtime.control_metadata.latency",
+      "category": "latency",
+      "feature": "benchmark.runtime_control.metadata",
+      "required_capabilities": [
+        "control.cancel_abort",
+        "control.deadline_expire",
+        "control.progress_partial",
+        "control.credit_backpressure",
+        "control.result_drop_reason"
+      ],
+      "description": "Measure preview4 runtime control metadata encode/decode latency across cancellation, deadline, progress, partial-result, pressure, and drop-reason frames.",
+      "workload": {
+        "operation": "runtime_control_metadata_encode_decode",
+        "payload": "control_frame_metadata",
+        "iterations": 100000,
+        "warmup_iterations": 10000
+      }
+    },
+    {
+      "id": "l4.runtime.object_metadata.latency",
+      "category": "latency",
+      "feature": "benchmark.runtime_object.metadata",
+      "required_capabilities": [
+        "object.lifecycle",
+        "object.delta",
+        "cache.reference"
+      ],
+      "description": "Measure preview4 runtime object and cache metadata encode/decode latency across declare, reference, release, delta, cache-reference, and cache-miss frames.",
+      "workload": {
+        "operation": "runtime_object_metadata_encode_decode",
+        "payload": "object_cache_metadata",
+        "iterations": 100000,
+        "warmup_iterations": 10000
+      }
+    },
     {
       "id": "l4.native.submit_result.throughput",
       "category": "throughput",

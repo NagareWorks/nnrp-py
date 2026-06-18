@@ -41,6 +41,32 @@ from nnrp.native import (
     probe_native_artifact,
     resolve_native_artifact,
 )
+from nnrp.runtime import (
+    CacheMissMetadata,
+    CacheMissReason,
+    CacheReferenceMetadata,
+    CacheReuseScope,
+    ControlRequestMetadata,
+    MemoryLocationHint,
+    ObjectDeltaMetadata,
+    ObjectDescriptorMetadata,
+    ObjectReferenceMetadata,
+    ObjectReleaseMetadata,
+    ObjectReleaseReason,
+    OwnershipHint,
+    PartialResultMetadata,
+    PressureMetadata,
+    ProgressMetadata,
+    ResultDropReasonCode,
+    ResultDropReasonMetadata,
+    RuntimeObjectKind,
+    RuntimeRole,
+    SchedulingMetadata,
+    decode_runtime_control_metadata,
+    decode_runtime_object_metadata,
+    encode_runtime_control_metadata,
+    encode_runtime_object_metadata,
+)
 from nnrp.schema import (
     pack_schema_descriptor,
     pack_typed_payload_descriptor,
@@ -1073,6 +1099,86 @@ def _run_session_lifecycle(scenario_id: str, workload: dict[str, Any]) -> dict[s
     return _measured_latency_result(scenario_id, samples)
 
 
+def _run_runtime_control_metadata_encode_decode(scenario_id: str, workload: dict[str, Any]) -> dict[str, Any]:
+    iterations = _positive_int(workload.get("iterations"), default=100_000)
+    warmup_iterations = _non_negative_int(workload.get("warmup_iterations"), default=min(10_000, iterations))
+    fixtures = (
+        (MessageType.CANCEL, ControlRequestMetadata(1, 10, 1, RuntimeRole.CLIENT, 0x03, 4), b"stop"),
+        (MessageType.DEADLINE, SchedulingMetadata(1, 11, 1, 0, 1_800_000_000_000, 0x03), b""),
+        (MessageType.PROGRESS, ProgressMetadata(1, 12, 7, 5000, 33, 0), b""),
+        (MessageType.PARTIAL_RESULT, PartialResultMetadata(1, 13, 33, 2, 8, 0x03), b"partial!"),
+        (MessageType.BACKPRESSURE, PressureMetadata(1, 4, 2, 6, 25, 0x03), b""),
+        (
+            MessageType.RESULT_DROP_REASON,
+            ResultDropReasonMetadata(1, 14, ResultDropReasonCode.DEADLINE_EXPIRED, RuntimeRole.SERVER, 0, 4),
+            b"late",
+        ),
+    )
+
+    def operation() -> None:
+        for message_type, metadata, tail in fixtures:
+            encoded = encode_runtime_control_metadata(message_type, metadata, tail=tail)
+            decoded = decode_runtime_control_metadata(message_type, encoded)
+            if decoded.metadata != metadata or decoded.tail != tail:
+                raise RuntimeError("runtime control metadata benchmark roundtrip mismatch")
+
+    for _ in range(warmup_iterations):
+        operation()
+
+    samples = _measure_microseconds(operation, iterations)
+    return _measured_latency_result(scenario_id, samples)
+
+
+def _run_runtime_object_metadata_encode_decode(scenario_id: str, workload: dict[str, Any]) -> dict[str, Any]:
+    iterations = _positive_int(workload.get("iterations"), default=100_000)
+    warmup_iterations = _non_negative_int(workload.get("warmup_iterations"), default=min(10_000, iterations))
+    fixtures = (
+        (
+            MessageType.OBJECT_DECLARE,
+            ObjectDescriptorMetadata(
+                33,
+                RuntimeObjectKind.TENSOR,
+                RuntimeRole.RUNTIME,
+                RuntimeRole.CLIENT,
+                7,
+                4096,
+                3,
+                MemoryLocationHint.SHARED_MEMORY,
+                OwnershipHint.BORROWED,
+                1000,
+                0,
+            ),
+            b"",
+        ),
+        (MessageType.OBJECT_REF, ObjectReferenceMetadata(33, 1, 2, 0, 4096, 0x03, 0), b""),
+        (
+            MessageType.OBJECT_RELEASE,
+            ObjectReleaseMetadata(33, 1, ObjectReleaseReason.CANCELLED, RuntimeRole.CLIENT, 0, 4),
+            b"done",
+        ),
+        (MessageType.OBJECT_DELTA, ObjectDeltaMetadata(33, 2, 0, 1024, 8, 0x03, 4), b"meta" + b"delta!!!"),
+        (
+            MessageType.CACHE_REFERENCE,
+            CacheReferenceMetadata(1, 2, 0x0100, CacheReuseScope.SESSION, 9, 19, 5000, 0, 0x03),
+            b"",
+        ),
+        (MessageType.CACHE_MISS, CacheMissMetadata(1, 2, CacheMissReason.EXPIRED, 0x0100, 4), b"miss"),
+    )
+
+    def operation() -> None:
+        for message_type, metadata, tail in fixtures:
+            encoded = encode_runtime_object_metadata(message_type, metadata, tail=tail)
+            decoded = decode_runtime_object_metadata(message_type, encoded)
+            if decoded.metadata != metadata or decoded.tail != tail:
+                raise RuntimeError("runtime object metadata benchmark roundtrip mismatch")
+
+    for _ in range(warmup_iterations):
+        operation()
+
+    samples = _measure_microseconds(operation, iterations)
+    return _measured_latency_result(scenario_id, samples)
+
+
 def _run_transport_loopback(scenario_id: str, workload: dict[str, Any]) -> dict[str, Any]:
     duration_seconds = _positive_float(workload.get("duration_seconds"), default=10.0)
     warmup_iterations = _non_negative_int(workload.get("warmup_iterations"), default=1_000)
@@ -1428,6 +1534,8 @@ _SCENARIO_RUNNERS: dict[str, Callable[[str, dict[str, Any]], dict[str, Any]]] = 
     "native_submit_result_cffi_api_loop": _run_native_submit_result_cffi_api_loop,
     "native_submit_result_allocation_smoke": _run_native_submit_result_allocation_smoke,
     "runtime_probe": _run_runtime_probe,
+    "runtime_control_metadata_encode_decode": _run_runtime_control_metadata_encode_decode,
+    "runtime_object_metadata_encode_decode": _run_runtime_object_metadata_encode_decode,
     "session_lifecycle": _run_session_lifecycle,
     "submit_result_loop": _run_submit_result_loop,
     "transport_loopback": _run_transport_loopback,

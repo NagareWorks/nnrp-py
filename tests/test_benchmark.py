@@ -162,6 +162,42 @@ def _plan_document() -> dict[str, object]:
                 },
             },
             {
+                "id": "l4.runtime.control_metadata.latency",
+                "category": "latency",
+                "feature": "benchmark.runtime_control.metadata",
+                "required_capabilities": [
+                    "control.cancel_abort",
+                    "control.deadline_expire",
+                    "control.progress_partial",
+                    "control.credit_backpressure",
+                    "control.result_drop_reason",
+                ],
+                "description": "Preview4 runtime control metadata encode/decode latency.",
+                "workload": {
+                    "operation": "runtime_control_metadata_encode_decode",
+                    "payload": "control_frame_metadata",
+                    "iterations": 3,
+                    "warmup_iterations": 1,
+                },
+            },
+            {
+                "id": "l4.runtime.object_metadata.latency",
+                "category": "latency",
+                "feature": "benchmark.runtime_object.metadata",
+                "required_capabilities": [
+                    "object.lifecycle",
+                    "object.delta",
+                    "cache.reference",
+                ],
+                "description": "Preview4 runtime object and cache metadata encode/decode latency.",
+                "workload": {
+                    "operation": "runtime_object_metadata_encode_decode",
+                    "payload": "object_cache_metadata",
+                    "iterations": 3,
+                    "warmup_iterations": 1,
+                },
+            },
+            {
                 "id": "l4.native.submit_result.throughput",
                 "category": "throughput",
                 "feature": "benchmark.native.submit_result.throughput",
@@ -274,6 +310,8 @@ def test_build_benchmark_results_report_measures_configured_scenarios(monkeypatc
     assert results["l4.native.schema_descriptor.latency"]["outcome"] == "skip"
     assert results["l4.native.event_polling.latency"]["outcome"] == "skip"
     assert results["l4.native.event_polling.throughput"]["outcome"] == "skip"
+    assert results["l4.runtime.control_metadata.latency"]["outcome"] == "measured"
+    assert results["l4.runtime.object_metadata.latency"]["outcome"] == "measured"
     assert results["l4.native.submit_result.throughput"]["outcome"] == "skip"
     assert results["l4.native.submit_result.allocations"]["outcome"] == "skip"
     assert results["l4.native.artifact_probe.latency"]["outcome"] == "skip"
@@ -733,7 +771,7 @@ def test_main_reads_paths_from_environment_and_writes_report(tmp_path: Path, mon
 
     report = json.loads(output_path.read_text(encoding="utf-8"))
     assert report["protocol_version"] == "nnrp-1"
-    assert len(report["results"]) == 15
+    assert len(report["results"]) == 17
 
 
 def test_main_accepts_explicit_cli_paths_and_creates_parent_directory(tmp_path: Path) -> None:

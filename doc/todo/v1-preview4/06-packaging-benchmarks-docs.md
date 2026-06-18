@@ -15,13 +15,13 @@
 
 ## Benchmarks
 
-- [ ] Extend native-runtime benchmark plan for preview4.
+- [x] Extend native-runtime benchmark plan for preview4.
 - [ ] Add control-frame submit/cancel benchmark.
 - [ ] Add progress/partial-result polling benchmark.
-- [ ] Add runtime object declare/ref/release benchmark.
+- [x] Add runtime object declare/ref/release benchmark.
 - [ ] Add IPC loopback benchmark.
 - [ ] Add WebSocket loopback benchmark.
-- [ ] Compare cffi API and ctypes on the same plan.
+- [x] Compare cffi API and ctypes on the same plan.
 - [ ] Compare preview4 native hot paths against preview3 baselines.
 
 ## Documentation

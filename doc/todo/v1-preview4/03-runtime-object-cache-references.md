@@ -37,7 +37,7 @@
   - [x] Expiration hint.
   - [x] Invalidation reason.
 - [x] Keep cache use explicit per workload.
-- [ ] Add tests that cache miss remains a typed event, not a generic transport error.
+- [x] Add tests that cache miss remains a typed event, not a generic transport error.
 
 ## Copy Boundaries
 

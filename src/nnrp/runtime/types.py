@@ -68,6 +68,19 @@ class ObjectReleaseReason(IntEnum):
     CONFORMANCE_INJECTION = 7
 
 
+class ResultDropReasonCode(IntEnum):
+    NONE = 0
+    DEADLINE_EXPIRED = 1
+    SUPERSEDED = 2
+    PEER_CANCELLED = 3
+    BACKPRESSURE = 4
+    CAPABILITY_MISMATCH = 5
+    BUDGET_EXCEEDED = 6
+    OBJECT_INVALIDATED = 7
+    TRANSPORT_CLOSED = 8
+    CONFORMANCE_INJECTION = 9
+
+
 class CacheReuseScope(IntEnum):
     OPERATION = 0
     SESSION = 1
@@ -436,7 +449,7 @@ class ResultDropReasonMetadata(_FixedRuntimeMetadata):
 
     operation_id: int
     result_sequence: int
-    drop_reason_code: int
+    drop_reason_code: ResultDropReasonCode | int
     source_role: RuntimeRole | int
     flags: int
     diagnostic_bytes: int
@@ -446,7 +459,7 @@ class ResultDropReasonMetadata(_FixedRuntimeMetadata):
         return self.STRUCT.pack(
             self.operation_id,
             self.result_sequence,
-            self.drop_reason_code,
+            int(self.drop_reason_code),
             int(self.source_role),
             self.flags,
             self.diagnostic_bytes,
@@ -457,7 +470,14 @@ class ResultDropReasonMetadata(_FixedRuntimeMetadata):
     def _from_tuple(cls, values: tuple[int, ...]) -> ResultDropReasonMetadata:
         _validate_mask(values[4], 0x03, "result_drop_reason.flags")
         _require_zero(values[6], "result_drop_reason.reserved")
-        return cls(values[0], values[1], values[2], _runtime_role_or_int(values[3]), values[4], values[5])
+        return cls(
+            values[0],
+            values[1],
+            _result_drop_reason_or_int(values[2]),
+            _runtime_role_or_int(values[3]),
+            values[4],
+            values[5],
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -756,5 +776,12 @@ def _validate_percent_x100(value: int) -> None:
 def _runtime_role_or_int(value: int) -> RuntimeRole | int:
     try:
         return RuntimeRole(value)
+    except ValueError:
+        return value
+
+
+def _result_drop_reason_or_int(value: int) -> ResultDropReasonCode | int:
+    try:
+        return ResultDropReasonCode(value)
     except ValueError:
         return value

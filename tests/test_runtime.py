@@ -21,6 +21,7 @@ from nnrp.runtime import (
     PressureMetadata,
     ProgressMetadata,
     RecoverableErrorMetadata,
+    ResultDropReasonCode,
     ResultDropReasonMetadata,
     RetryAfterMetadata,
     RouteHintMetadata,
@@ -214,7 +215,7 @@ def test_runtime_control_rejects_declared_tail_mismatch() -> None:
             ResultDropReasonMetadata(
                 operation_id=17,
                 result_sequence=18,
-                drop_reason_code=19,
+                drop_reason_code=ResultDropReasonCode.PEER_CANCELLED,
                 source_role=99,
                 flags=0x01,
                 diagnostic_bytes=2,
@@ -419,6 +420,24 @@ def test_runtime_metadata_helpers_reject_invalid_payloads_and_reserved_bits() ->
         _FixedRuntimeMetadata().pack()
     with pytest.raises(NotImplementedError):
         _FixedRuntimeMetadata._from_tuple(())
+
+
+def test_result_drop_reason_code_preserves_private_values() -> None:
+    metadata = ResultDropReasonMetadata(
+        operation_id=1,
+        result_sequence=2,
+        drop_reason_code=0x8000,
+        source_role=RuntimeRole.SERVER,
+        flags=0,
+        diagnostic_bytes=0,
+    )
+
+    decoded = decode_runtime_control_metadata(
+        MessageType.RESULT_DROP_REASON,
+        encode_runtime_control_metadata(MessageType.RESULT_DROP_REASON, metadata),
+    )
+
+    assert decoded.metadata.drop_reason_code == 0x8000
 
 
 def test_websocket_binary_frame_roundtrip_and_batch_decode() -> None:

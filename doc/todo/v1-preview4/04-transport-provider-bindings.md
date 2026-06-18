@@ -12,10 +12,10 @@
 - [x] Report provider platform limitations.
 - [x] Reject provider names that are not advertised by the native artifact.
 
-## TCP And QUIC Continuity
+## TCP And QUIC Preview4 Runtime Continuity
 
-- [ ] Keep preview3 TCP binding behavior compatible with preview4 runtime objects.
-- [ ] Keep preview3 QUIC binding behavior compatible with preview4 runtime objects.
+- [ ] Keep TCP provider behavior aligned with preview4 runtime objects.
+- [ ] Keep QUIC provider behavior aligned with preview4 runtime objects.
 - [ ] Route TCP and QUIC progress/backpressure events through the shared event pump.
 - [x] Add tests that TCP and QUIC providers remain distinct native artifact slots.
 

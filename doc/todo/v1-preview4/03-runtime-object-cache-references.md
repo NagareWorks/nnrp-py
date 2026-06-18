@@ -45,4 +45,4 @@
 - [ ] Expose borrowed result views only where native lifetime guards exist.
 - [ ] Benchmark copied snapshot path.
 - [ ] Benchmark borrowed view path in the native lifetime-guard fixture.
-- [ ] Document copy behavior for object metadata and partial results.
+- [x] Document copy behavior for object metadata and partial results.

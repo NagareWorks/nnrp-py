@@ -28,10 +28,10 @@
 
 - [ ] Update quick-start for preview4 client controls.
 - [ ] Update server docs for progress, partial result, and drop reason.
-- [ ] Update native runtime docs for transport providers.
+- [x] Update native runtime docs for transport providers.
 - [ ] Update benchmark docs with preview4 result tables.
 - [ ] Update conformance docs with wire target manifest generation.
-- [ ] Document cache reference as explicit workload behavior, not a universal latency promise.
+- [x] Document cache reference as explicit workload behavior, not a universal latency promise.
 
 ## Release Checks
 

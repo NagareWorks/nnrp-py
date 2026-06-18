@@ -14,6 +14,8 @@ from enum import StrEnum
 from pathlib import Path
 from typing import Any, Protocol, TypeVar, runtime_checkable
 
+from nnrp.core.messages.control import TransportId, TransportPolicy
+
 EXPECTED_PROTOCOL_MAJOR = 1
 EXPECTED_PROTOCOL_WIRE_FORMAT = 0
 EXPECTED_ABI_MAJOR = 1
@@ -29,6 +31,13 @@ NATIVE_TRANSPORT_SLOT_BY_NAME = {
     "ipc": TRANSPORT_SLOT_IPC,
     "websocket": TRANSPORT_SLOT_WEBSOCKET,
 }
+NATIVE_TRANSPORT_ID_BY_NAME = {
+    "quic": TransportId.QUIC,
+    "tcp": TransportId.TCP,
+    "ipc": TransportId.IPC,
+    "websocket": TransportId.WEBSOCKET,
+}
+NATIVE_TRANSPORT_NAME_BY_ID = {transport_id: name for name, transport_id in NATIVE_TRANSPORT_ID_BY_NAME.items()}
 RUNTIME_FEATURE_PROTOCOL_CORE = 0x0000000000000001
 RUNTIME_FEATURE_CLIENT_API = 0x0000000000000002
 RUNTIME_FEATURE_SERVER_API = 0x0000000000000004
@@ -192,6 +201,58 @@ class NativeTransportProvider:
     cost: Mapping[str, Any] | None = None
     preference: Mapping[str, Any] | None = None
     limitations: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class NativeTransportProbeSample:
+    provider_name: str
+    transport_name: str
+    elapsed_us: int
+    rtt_us: int | None = None
+    bytes_sent: int = 0
+    bytes_received: int = 0
+    timed_out: bool = False
+    failed: bool = False
+
+
+@dataclass(frozen=True)
+class NativeTransportProbeScore:
+    sample_count: int
+    failure_count: int
+    failure_rate: float
+    median_rtt_us: int
+    throughput_bytes_per_sec: int
+    score: float
+
+
+@dataclass(frozen=True)
+class NativeTransportProbeCandidate:
+    provider: NativeTransportProvider
+    transport_name: str
+    transport_id: TransportId
+    probe_score: NativeTransportProbeScore
+
+
+@dataclass(frozen=True)
+class NativeTransportRejection:
+    provider_name: str
+    transport_name: str
+    transport_id: TransportId
+    reason: str
+    diagnostic: str | None = None
+
+
+@dataclass(frozen=True)
+class NativeTransportSelection:
+    selected_provider: NativeTransportProvider
+    selected_transport_name: str
+    selected_transport_id: TransportId
+    policy: TransportPolicy
+    available_providers: tuple[NativeTransportProvider, ...]
+    rejected: tuple[NativeTransportRejection, ...] = ()
+    probe_candidates: tuple[NativeTransportProbeCandidate, ...] = ()
+    selected_probe_score: NativeTransportProbeScore | None = None
+    diagnostic: str | None = None
 
 
 class NativeHandleError(ValueError):
@@ -3252,8 +3313,282 @@ def resolve_native_transport_provider(
     raise NativeArtifactError(f"native transport provider is not advertised by the native artifact: {name}")
 
 
+def select_native_transport_provider(
+    policy: TransportPolicy | str | int = TransportPolicy.AUTO,
+    *,
+    root: Path | str | None = None,
+    native_platform: NativePlatform | None = None,
+    supported_transports: (
+        tuple[str | TransportId, ...] | list[str | TransportId] | set[str | TransportId] | None
+    ) = None,
+    probe_samples: tuple[NativeTransportProbeSample, ...] | list[NativeTransportProbeSample] | None = None,
+) -> NativeTransportSelection:
+    resolved_policy = _normalize_native_transport_policy(policy)
+    providers = discover_native_transport_providers(root, native_platform)
+    supported = _normalize_supported_native_transports(supported_transports)
+    candidates, rejected = _select_native_transport_candidates(providers, supported, resolved_policy)
+    if probe_samples is not None:
+        return _select_native_transport_provider_with_probe(
+            resolved_policy,
+            providers,
+            candidates,
+            rejected,
+            tuple(probe_samples),
+        )
+
+    candidates.sort(
+        key=lambda candidate: (
+            _native_transport_preference_rank(resolved_policy, candidate[1]),
+            candidate[0].name,
+        )
+    )
+    if not candidates:
+        raise _native_transport_selection_error(resolved_policy, tuple(rejected))
+    selected_provider, selected_transport = candidates[0]
+    diagnostic = (
+        "single installed transport selected directly"
+        if len(candidates) == 1 and not rejected and len(providers) == 1
+        else "native transport selected by policy"
+    )
+    return NativeTransportSelection(
+        selected_provider=selected_provider,
+        selected_transport_name=selected_transport,
+        selected_transport_id=NATIVE_TRANSPORT_ID_BY_NAME[selected_transport],
+        policy=resolved_policy,
+        available_providers=providers,
+        rejected=tuple(rejected),
+        diagnostic=diagnostic,
+    )
+
+
 def native_transport_slot_names(mask: int) -> tuple[str, ...]:
     return tuple(name for name, slot in NATIVE_TRANSPORT_SLOT_BY_NAME.items() if mask & slot)
+
+
+def _select_native_transport_provider_with_probe(
+    policy: TransportPolicy,
+    providers: tuple[NativeTransportProvider, ...],
+    candidates: list[tuple[NativeTransportProvider, str]],
+    rejected: list[NativeTransportRejection],
+    probe_samples: tuple[NativeTransportProbeSample, ...],
+) -> NativeTransportSelection:
+    scored: list[NativeTransportProbeCandidate] = []
+    for provider, transport_name in candidates:
+        provider_samples = tuple(_matching_native_probe_samples(provider, transport_name, probe_samples))
+        if not provider_samples:
+            rejected.append(
+                _native_transport_rejection(
+                    provider,
+                    transport_name,
+                    "probe_missing",
+                    "native transport probe sample is missing",
+                )
+            )
+            continue
+        probe_score = _score_native_transport_probe(provider, transport_name, provider_samples, policy)
+        if probe_score.failure_rate >= 1.0:
+            rejected.append(
+                _native_transport_rejection(
+                    provider,
+                    transport_name,
+                    "probe_failed",
+                    "all native transport probe samples failed",
+                )
+            )
+            continue
+        scored.append(
+            NativeTransportProbeCandidate(
+                provider=provider,
+                transport_name=transport_name,
+                transport_id=NATIVE_TRANSPORT_ID_BY_NAME[transport_name],
+                probe_score=probe_score,
+            )
+        )
+
+    scored.sort(
+        key=lambda candidate: (
+            candidate.probe_score.score,
+            _native_transport_preference_rank(policy, candidate.transport_name),
+            candidate.provider.name,
+        )
+    )
+    if not scored:
+        raise _native_transport_selection_error(policy, tuple(rejected))
+    selected = scored[0]
+    return NativeTransportSelection(
+        selected_provider=selected.provider,
+        selected_transport_name=selected.transport_name,
+        selected_transport_id=selected.transport_id,
+        policy=policy,
+        available_providers=providers,
+        rejected=tuple(rejected),
+        probe_candidates=tuple(scored),
+        selected_probe_score=selected.probe_score,
+        diagnostic="native transport selected by probe score",
+    )
+
+
+def _select_native_transport_candidates(
+    providers: tuple[NativeTransportProvider, ...],
+    supported_transports: frozenset[str],
+    policy: TransportPolicy,
+) -> tuple[list[tuple[NativeTransportProvider, str]], list[NativeTransportRejection]]:
+    candidates: list[tuple[NativeTransportProvider, str]] = []
+    rejected: list[NativeTransportRejection] = []
+    for provider in providers:
+        for transport_name in provider.transport_slots:
+            if not _native_transport_policy_allows(policy, transport_name):
+                rejected.append(
+                    _native_transport_rejection(
+                        provider,
+                        transport_name,
+                        "policy_disallowed",
+                        "native transport was disallowed by transport policy",
+                    )
+                )
+            elif transport_name not in supported_transports:
+                rejected.append(
+                    _native_transport_rejection(
+                        provider,
+                        transport_name,
+                        "remote_unsupported",
+                        "native transport was not declared by the remote endpoint",
+                    )
+                )
+            else:
+                candidates.append((provider, transport_name))
+    return candidates, rejected
+
+
+def _score_native_transport_probe(
+    provider: NativeTransportProvider,
+    transport_name: str,
+    probe_samples: tuple[NativeTransportProbeSample, ...],
+    policy: TransportPolicy,
+) -> NativeTransportProbeScore:
+    failure_count = sum(1 for sample in probe_samples if sample.failed or sample.timed_out or sample.rtt_us is None)
+    sample_count = len(probe_samples)
+    failure_rate = failure_count / sample_count
+    rtts = sorted(sample.rtt_us for sample in probe_samples if sample.rtt_us is not None)
+    median_rtt_us = rtts[len(rtts) // 2] if rtts else 10_000_000
+    elapsed_us = sum(sample.elapsed_us for sample in probe_samples)
+    transferred = sum(sample.bytes_sent + sample.bytes_received for sample in probe_samples)
+    throughput_bytes_per_sec = transferred * 1_000_000 // elapsed_us if elapsed_us else 0
+    throughput_bonus = min(throughput_bytes_per_sec // 1_000, 500)
+    policy_penalty = _native_transport_preference_rank(policy, transport_name) * 1_000.0
+    score = median_rtt_us + failure_rate * 10_000_000.0 + policy_penalty - throughput_bonus
+    return NativeTransportProbeScore(
+        sample_count=sample_count,
+        failure_count=failure_count,
+        failure_rate=failure_rate,
+        median_rtt_us=median_rtt_us,
+        throughput_bytes_per_sec=throughput_bytes_per_sec,
+        score=score,
+    )
+
+
+def _matching_native_probe_samples(
+    provider: NativeTransportProvider,
+    transport_name: str,
+    samples: tuple[NativeTransportProbeSample, ...],
+) -> tuple[NativeTransportProbeSample, ...]:
+    return tuple(
+        sample
+        for sample in samples
+        if sample.provider_name == provider.name
+        and _normalize_native_transport_scope(sample.transport_name) == transport_name
+    )
+
+
+def _native_transport_selection_error(
+    policy: TransportPolicy,
+    rejected: tuple[NativeTransportRejection, ...],
+) -> NativeArtifactError:
+    forced_transport = _forced_native_transport_name(policy)
+    if forced_transport is not None:
+        return NativeArtifactError(f"forced native transport is not available: {forced_transport}")
+    if rejected:
+        reasons = ", ".join(f"{entry.provider_name}/{entry.transport_name}:{entry.reason}" for entry in rejected)
+        return NativeArtifactError(f"no viable native transport provider after applying policy: {reasons}")
+    return NativeArtifactError("no native transport providers are advertised by the native artifact")
+
+
+def _native_transport_rejection(
+    provider: NativeTransportProvider,
+    transport_name: str,
+    reason: str,
+    diagnostic: str,
+) -> NativeTransportRejection:
+    return NativeTransportRejection(
+        provider_name=provider.name,
+        transport_name=transport_name,
+        transport_id=NATIVE_TRANSPORT_ID_BY_NAME[transport_name],
+        reason=reason,
+        diagnostic=diagnostic,
+    )
+
+
+def _normalize_native_transport_policy(policy: TransportPolicy | str | int) -> TransportPolicy:
+    if isinstance(policy, TransportPolicy):
+        return policy
+    if isinstance(policy, int):
+        return TransportPolicy(policy)
+    normalized = policy.strip().lower().replace("-", "_")
+    if normalized == "auto":
+        return TransportPolicy.AUTO
+    try:
+        return TransportPolicy[normalized.upper()]
+    except KeyError as error:
+        raise NativeArtifactError(f"unsupported native transport policy: {policy}") from error
+
+
+def _normalize_supported_native_transports(
+    supported_transports: tuple[str | TransportId, ...] | list[str | TransportId] | set[str | TransportId] | None,
+) -> frozenset[str]:
+    if supported_transports is None:
+        return frozenset(NATIVE_TRANSPORT_SCOPES)
+    normalized: set[str] = set()
+    for value in supported_transports:
+        if isinstance(value, TransportId):
+            try:
+                normalized.add(NATIVE_TRANSPORT_NAME_BY_ID[value])
+            except KeyError as error:
+                raise NativeArtifactError(f"unsupported native transport id: {value}") from error
+        else:
+            normalized.add(_normalize_native_transport_scope(value))
+    return frozenset(normalized)
+
+
+def _forced_native_transport_name(policy: TransportPolicy) -> str | None:
+    if policy is TransportPolicy.FORCE_QUIC:
+        return "quic"
+    if policy is TransportPolicy.FORCE_TCP:
+        return "tcp"
+    if policy is TransportPolicy.FORCE_IPC:
+        return "ipc"
+    if policy is TransportPolicy.FORCE_WEBSOCKET:
+        return "websocket"
+    return None
+
+
+def _native_transport_policy_allows(policy: TransportPolicy, transport_name: str) -> bool:
+    forced_transport = _forced_native_transport_name(policy)
+    return forced_transport is None or forced_transport == transport_name
+
+
+def _native_transport_preference_rank(policy: TransportPolicy, transport_name: str) -> int:
+    if policy is TransportPolicy.AUTO:
+        return {"ipc": 0, "quic": 1, "tcp": 2, "websocket": 3}[transport_name]
+    if policy is TransportPolicy.PREFER_QUIC:
+        return {"quic": 0, "tcp": 1, "ipc": 2, "websocket": 2}[transport_name]
+    if policy is TransportPolicy.PREFER_TCP:
+        return {"tcp": 0, "quic": 1, "ipc": 2, "websocket": 2}[transport_name]
+    if policy is TransportPolicy.PREFER_IPC:
+        return 0 if transport_name == "ipc" else 1
+    if policy is TransportPolicy.PREFER_WEBSOCKET:
+        return 0 if transport_name == "websocket" else 1
+    forced_transport = _forced_native_transport_name(policy)
+    return 0 if forced_transport == transport_name else 255
 
 
 def load_native_library(artifact_path: Path | str) -> ctypes.CDLL:

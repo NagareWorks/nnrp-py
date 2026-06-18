@@ -40,7 +40,7 @@
 
 ## Probe Policy
 
-- [ ] Select the installed transport directly for single-provider installations.
-- [ ] Probe installed transports by policy for multi-provider installations.
-- [ ] Preserve explicit user transport selection.
-- [ ] Surface probe results in diagnostics.
+- [x] Select the installed transport directly for single-provider installations.
+- [x] Probe installed transports by policy for multi-provider installations.
+- [x] Preserve explicit user transport selection.
+- [x] Surface probe results in diagnostics.

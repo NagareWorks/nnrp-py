@@ -17,6 +17,8 @@ from nnrp.core.messages.control import (
     ResultHintMetadata,
     ResultHintReason,
     SessionMigrateAckMetadata,
+    TransportId,
+    TransportPolicy,
 )
 from nnrp.native import (
     CACHE_ERROR_DEPENDENCY_INVALID,
@@ -99,6 +101,7 @@ from nnrp.native import (
     NativeSessionRecoveryOutcome,
     NativeStatus,
     NativeStructuredDiagnostic,
+    NativeTransportProbeSample,
     NativeTransportProvider,
     NativeWouldBlockError,
     _load_native_cffi_submit_result_api,
@@ -150,6 +153,7 @@ from nnrp.native import (
     resolve_native_artifact,
     resolve_native_transport_provider,
     select_native_runtime_backend,
+    select_native_transport_provider,
 )
 from nnrp.schema import (
     Preview3TypedPayloadDescriptor,
@@ -1207,6 +1211,172 @@ def test_native_transport_slot_names_maps_preview4_slots() -> None:
         "ipc",
         "websocket",
     )
+
+
+def test_select_native_transport_provider_selects_single_installed_transport(tmp_path: Path) -> None:
+    tcp_artifact = _write_provider_artifact(tmp_path, "tcp")
+
+    selection = select_native_transport_provider(root=tmp_path, native_platform=NativePlatform("linux", "x86_64"))
+
+    assert selection.selected_provider.artifact_path == tcp_artifact
+    assert selection.selected_transport_name == "tcp"
+    assert selection.selected_transport_id is TransportId.TCP
+    assert selection.policy is TransportPolicy.AUTO
+    assert selection.rejected == ()
+    assert selection.diagnostic == "single installed transport selected directly"
+
+
+def test_select_native_transport_provider_applies_preview4_policy_order(tmp_path: Path) -> None:
+    _write_provider_artifact(tmp_path, "tcp")
+    _write_provider_artifact(tmp_path, "quic")
+    _write_provider_artifact(tmp_path, "ipc")
+    _write_provider_artifact(tmp_path, "websocket")
+
+    auto = select_native_transport_provider(root=tmp_path, native_platform=NativePlatform("linux", "x86_64"))
+    preferred_websocket = select_native_transport_provider(
+        TransportPolicy.PREFER_WEBSOCKET,
+        root=tmp_path,
+        native_platform=NativePlatform("linux", "x86_64"),
+    )
+    preferred_tcp = select_native_transport_provider(
+        "prefer-tcp",
+        root=tmp_path,
+        native_platform=NativePlatform("linux", "x86_64"),
+    )
+
+    assert auto.selected_transport_id is TransportId.IPC
+    assert preferred_websocket.selected_transport_id is TransportId.WEBSOCKET
+    assert preferred_tcp.selected_transport_id is TransportId.TCP
+
+
+def test_select_native_transport_provider_rejects_missing_forced_transport(tmp_path: Path) -> None:
+    _write_provider_artifact(tmp_path, "tcp")
+
+    with pytest.raises(NativeArtifactError, match="forced native transport is not available: ipc"):
+        select_native_transport_provider(
+            TransportPolicy.FORCE_IPC,
+            root=tmp_path,
+            native_platform=NativePlatform("linux", "x86_64"),
+        )
+
+
+def test_select_native_transport_provider_rejects_empty_provider_registry(tmp_path: Path) -> None:
+    with pytest.raises(NativeArtifactError, match="no native transport providers are advertised"):
+        select_native_transport_provider(root=tmp_path, native_platform=NativePlatform("linux", "x86_64"))
+
+
+def test_select_native_transport_provider_accepts_integer_and_auto_string_policy(tmp_path: Path) -> None:
+    _write_provider_artifact(tmp_path, "websocket")
+
+    auto = select_native_transport_provider("auto", root=tmp_path, native_platform=NativePlatform("linux", "x86_64"))
+    forced = select_native_transport_provider(
+        int(TransportPolicy.FORCE_WEBSOCKET),
+        root=tmp_path,
+        native_platform=NativePlatform("linux", "x86_64"),
+    )
+
+    assert auto.selected_transport_id is TransportId.WEBSOCKET
+    assert forced.selected_transport_id is TransportId.WEBSOCKET
+
+
+def test_select_native_transport_provider_rejects_invalid_policy(tmp_path: Path) -> None:
+    _write_provider_artifact(tmp_path, "tcp")
+
+    with pytest.raises(NativeArtifactError, match="unsupported native transport policy"):
+        select_native_transport_provider(
+            "prefer-stdio",
+            root=tmp_path,
+            native_platform=NativePlatform("linux", "x86_64"),
+        )
+
+
+def test_select_native_transport_provider_rejects_unspecified_supported_transport(tmp_path: Path) -> None:
+    _write_provider_artifact(tmp_path, "tcp")
+
+    with pytest.raises(NativeArtifactError, match="unsupported native transport id"):
+        select_native_transport_provider(
+            root=tmp_path,
+            native_platform=NativePlatform("linux", "x86_64"),
+            supported_transports=(TransportId.UNSPECIFIED,),
+        )
+
+
+def test_select_native_transport_provider_reports_remote_unsupported_transport(tmp_path: Path) -> None:
+    _write_provider_artifact(tmp_path, "tcp")
+    _write_provider_artifact(tmp_path, "ipc")
+    _write_provider_artifact(tmp_path, "quic")
+
+    selection = select_native_transport_provider(
+        root=tmp_path,
+        native_platform=NativePlatform("linux", "x86_64"),
+        supported_transports=(TransportId.TCP, TransportId.QUIC),
+    )
+
+    assert selection.selected_transport_id is TransportId.QUIC
+    assert selection.rejected == (
+        native_module.NativeTransportRejection(
+            provider_name="ipc",
+            transport_name="ipc",
+            transport_id=TransportId.IPC,
+            reason="remote_unsupported",
+            diagnostic="native transport was not declared by the remote endpoint",
+        ),
+    )
+
+
+def test_select_native_transport_provider_scores_probe_samples(tmp_path: Path) -> None:
+    _write_provider_artifact(tmp_path, "tcp")
+    _write_provider_artifact(tmp_path, "quic")
+    _write_provider_artifact(tmp_path, "ipc")
+
+    selection = select_native_transport_provider(
+        root=tmp_path,
+        native_platform=NativePlatform("linux", "x86_64"),
+        probe_samples=[
+            NativeTransportProbeSample(
+                provider_name="tcp",
+                transport_name="tcp",
+                elapsed_us=1_500,
+                rtt_us=1_500,
+                bytes_sent=128,
+                bytes_received=128,
+            ),
+            NativeTransportProbeSample(
+                provider_name="quic",
+                transport_name="quic",
+                elapsed_us=800,
+                rtt_us=800,
+                bytes_sent=512,
+                bytes_received=512,
+            ),
+            NativeTransportProbeSample(
+                provider_name="ipc",
+                transport_name="ipc",
+                elapsed_us=2_000,
+                timed_out=True,
+                failed=True,
+            ),
+        ],
+    )
+
+    assert selection.selected_transport_id is TransportId.QUIC
+    assert selection.selected_probe_score is not None
+    assert selection.selected_probe_score.median_rtt_us == 800
+    assert [candidate.transport_name for candidate in selection.probe_candidates] == ["quic", "tcp"]
+    assert selection.rejected[-1].reason == "probe_failed"
+    assert selection.diagnostic == "native transport selected by probe score"
+
+
+def test_select_native_transport_provider_requires_probe_samples_for_probe_mode(tmp_path: Path) -> None:
+    _write_provider_artifact(tmp_path, "tcp")
+    _write_provider_artifact(tmp_path, "quic")
+
+    with pytest.raises(NativeArtifactError, match="probe_missing"):
+        select_native_transport_provider(
+            root=tmp_path,
+            native_platform=NativePlatform("linux", "x86_64"),
+            probe_samples=[],
+        )
 
 
 def test_resolve_native_artifact_uses_current_platform_when_not_provided(

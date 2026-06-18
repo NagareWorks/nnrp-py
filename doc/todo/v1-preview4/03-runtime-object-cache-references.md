@@ -31,12 +31,12 @@
   - [x] Schema/profile anchor.
   - [x] Producer trace.
 - [x] Add cache miss model.
-- [ ] Add cache invalidate model.
-- [ ] Add cache policy options.
+- [x] Add cache invalidate model.
+- [x] Add cache policy options.
   - [x] Reuse scope.
   - [x] Expiration hint.
-  - [ ] Invalidation reason.
-- [ ] Keep cache use explicit per workload.
+  - [x] Invalidation reason.
+- [x] Keep cache use explicit per workload.
 - [ ] Add tests that cache miss remains a typed event, not a generic transport error.
 
 ## Copy Boundaries

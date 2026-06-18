@@ -2,12 +2,14 @@
 
 from nnrp.cache import (
     CacheDependencyInvalidation,
+    CacheInvalidation,
     CacheInvalidationReason,
     CacheLeaseDescriptor,
     CacheLeaseOutcome,
     CacheLeaseResult,
     CacheObjectIdentity,
     CacheObjectVersion,
+    CachePolicyOptions,
     CacheRuntimeBackend,
     cache_prefetch,
     cache_query,
@@ -217,6 +219,7 @@ from nnrp.recovery import (
     validate_session_recovery_ack,
     validate_session_recovery_request,
 )
+from nnrp.runtime import CacheReuseScope
 from nnrp.schema import (
     DESCRIPTOR_FLAGS_KNOWN_MASK,
     SCHEMA_DESCRIPTOR_HEADER_LENGTH,
@@ -296,6 +299,7 @@ __all__ = [
     "TransportProbeMetadata",
     "TransportPolicy",
     "CacheDependencyInvalidation",
+    "CacheInvalidation",
     "CacheInvalidationReason",
     "CacheLeaseDescriptor",
     "CacheLeaseOutcome",
@@ -303,6 +307,8 @@ __all__ = [
     "CacheObjectIdentity",
     "CacheObjectVersion",
     "CacheObjectKind",
+    "CachePolicyOptions",
+    "CacheReuseScope",
     "CacheRuntimeBackend",
     "DESCRIPTOR_FLAGS_KNOWN_MASK",
     "Preview3TypedPayloadDescriptor",

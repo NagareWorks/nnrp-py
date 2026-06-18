@@ -2,20 +2,20 @@
 
 ## Target Manifest
 
-- [ ] Add command to emit a Python wire target manifest.
-- [ ] Include implementation name and preview4 protocol version.
-- [ ] Include suite version.
-- [ ] Include supported modes.
-  - [ ] Suite as client.
-  - [ ] Suite as server.
-  - [ ] Suite as proxy where Python owns proxy harness.
-- [ ] Include supported transports.
-  - [ ] TCP.
-  - [ ] QUIC.
-  - [ ] IPC.
-  - [ ] WebSocket.
-- [ ] Include supported capabilities.
-- [ ] Include frame and in-flight limits.
+- [x] Add command to emit a Python wire target manifest.
+- [x] Include implementation name and preview4 protocol version.
+- [x] Include suite version.
+- [x] Include supported modes.
+  - [x] Suite as client.
+  - [x] Suite as server.
+  - [x] Suite as proxy where Python owns proxy harness.
+- [x] Include supported transports.
+  - [x] TCP.
+  - [x] QUIC.
+  - [x] IPC.
+  - [x] WebSocket.
+- [x] Include supported capabilities.
+- [x] Include frame and in-flight limits.
 
 ## Live Endpoint Harness
 

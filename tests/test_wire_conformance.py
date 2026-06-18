@@ -11,6 +11,7 @@ from nnrp.tools.wire_conformance import (
     build_wire_target_manifest,
     main,
     parse_wire_target_transport,
+    run_wire_harness_plan,
     validate_wire_case_results_against_plan,
     write_wire_case_results_report,
     write_wire_evidence_files,
@@ -207,6 +208,29 @@ def test_wire_target_manifest_cli_writes_json(tmp_path) -> None:
     ]
 
 
+def test_wire_target_manifest_cli_accepts_manifest_subcommand(tmp_path) -> None:
+    output_path = tmp_path / "target.json"
+
+    assert main(
+        [
+            "manifest",
+            "--target-name",
+            "nnrp-py-local",
+            "--mode",
+            "suite_as_server",
+            "--transport",
+            "tcp=127.0.0.1:19091",
+            "--capability",
+            "control.progress_partial_result",
+            "--output",
+            str(output_path),
+        ]
+    ) == 0
+
+    manifest = json.loads(output_path.read_text(encoding="utf-8"))
+    assert manifest["wire_conformance"]["modes"] == ["suite_as_server"]
+
+
 def test_build_wire_case_results_report_uses_preview4_schema_and_observed_frames() -> None:
     report = build_wire_case_results_report(
         target_name="nnrp-py-local",
@@ -300,6 +324,141 @@ def test_build_wire_skipped_results_from_plan_keeps_skips_explicit() -> None:
             "message": "native tcp provider is not installed",
         }
     ]
+
+
+def test_run_wire_harness_plan_filters_mode_and_writes_evidence(tmp_path) -> None:
+    plan_path = tmp_path / "wire-plan.json"
+    output_path = tmp_path / "wire-results.json"
+    evidence_dir = tmp_path / "wire-evidence"
+    plan_path.write_text(
+        json.dumps(
+            {
+                "protocol_version": "nnrp-1-preview4",
+                "suite_version": "0.1.0",
+                "target_name": "nnrp-py-local",
+                "scenarios": [
+                    {
+                        "id": "wire.control.cancel-abort.client",
+                        "mode": "suite_as_client",
+                        "expect": {"terminal": "cancelled", "frames": ["RESULT_DROP_REASON"]},
+                    },
+                    {
+                        "id": "wire.control.progress.server",
+                        "mode": "suite_as_server",
+                        "expect": {"terminal": "success", "frames": ["PROGRESS"]},
+                    },
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    report = run_wire_harness_plan(
+        plan_path,
+        output_path,
+        mode="suite_as_client",
+        evidence_dir=evidence_dir,
+        skip_message="live suite-as-client endpoint is not configured",
+    )
+
+    assert report["results"] == [
+        {
+            "id": "wire.control.cancel-abort.client",
+            "outcome": "skipped",
+            "terminal": "error",
+            "message": "live suite-as-client endpoint is not configured",
+            "evidence_paths": [str(evidence_dir / "wire-control-cancel-abort-client.jsonl")],
+        }
+    ]
+    assert json.loads(output_path.read_text(encoding="utf-8")) == report
+    evidence = json.loads((evidence_dir / "wire-control-cancel-abort-client.jsonl").read_text(encoding="utf-8"))
+    assert evidence["message"] == "live suite-as-client endpoint is not configured"
+
+
+def test_wire_conformance_run_plan_cli_writes_skipped_results(tmp_path) -> None:
+    plan_path = tmp_path / "wire-plan.json"
+    output_path = tmp_path / "wire-results.json"
+    plan_path.write_text(
+        json.dumps(
+            {
+                "suite_version": "0.1.0",
+                "target_name": "nnrp-py-local",
+                "scenarios": [
+                    {
+                        "id": "wire.control.progress.server",
+                        "mode": "suite_as_server",
+                        "expect": {"terminal": "success", "frames": ["PROGRESS"]},
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    assert main(["run-plan", "--plan", str(plan_path), "--mode", "suite_as_server", "--output", str(output_path)]) == 0
+
+    report = json.loads(output_path.read_text(encoding="utf-8"))
+    assert report["results"][0]["outcome"] == "skipped"
+    assert report["results"][0]["message"] == (
+        "Python wire harness suite_as_server is registered; live endpoint execution is not enabled."
+    )
+
+
+def test_run_wire_harness_plan_rejects_missing_mode_scenarios(tmp_path) -> None:
+    plan_path = tmp_path / "wire-plan.json"
+    plan_path.write_text(
+        json.dumps(
+            {
+                "suite_version": "0.1.0",
+                "target_name": "nnrp-py-local",
+                "scenarios": [{"id": "wire.proxy", "mode": "suite_as_proxy"}],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="contains no scenarios for mode"):
+        run_wire_harness_plan(plan_path, tmp_path / "wire-results.json", mode="suite_as_client")
+
+
+@pytest.mark.parametrize(
+    ("plan_text", "match"),
+    [
+        ("{", "invalid JSON"),
+        ("[]", "must be a JSON object"),
+        (
+            json.dumps(
+                {
+                    "suite_version": "0.1.0",
+                    "target_name": "nnrp-py-local",
+                    "scenarios": [],
+                }
+            ),
+            "wire execution plan must contain scenarios",
+        ),
+        (
+            json.dumps(
+                {
+                    "suite_version": "0.1.0",
+                    "target_name": "nnrp-py-local",
+                    "scenarios": [7],
+                }
+            ),
+            "wire execution plan scenarios must be objects",
+        ),
+    ],
+)
+def test_run_wire_harness_plan_rejects_invalid_plan_file(tmp_path, plan_text: str, match: str) -> None:
+    plan_path = tmp_path / "wire-plan.json"
+    plan_path.write_text(plan_text, encoding="utf-8")
+
+    with pytest.raises(ValueError, match=match):
+        run_wire_harness_plan(plan_path, tmp_path / "wire-results.json", mode="suite_as_client")
+
+
+def test_run_wire_harness_plan_rejects_missing_plan_file(tmp_path) -> None:
+    with pytest.raises(ValueError, match="wire execution plan was not found"):
+        run_wire_harness_plan(tmp_path / "missing.json", tmp_path / "wire-results.json", mode="suite_as_client")
 
 
 def test_validate_wire_case_results_against_plan_accepts_matching_result() -> None:

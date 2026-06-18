@@ -37,6 +37,7 @@ Issues = "https://github.com/NagareWorks/nnrp-py/issues"
 [project.scripts]
 nnrp-run-benchmark = "nnrp.tools.benchmark:main"
 nnrp-quic-smoke = "nnrp.tools.smoke:main"
+nnrp-wire-conformance = "nnrp.tools.wire_conformance:main"
 nnrp-wire-target-manifest = "nnrp.tools.wire_conformance:main"
 
 [project.optional-dependencies]

@@ -215,7 +215,41 @@ def write_wire_evidence_files(report: Mapping[str, Any]) -> None:
             evidence_path.write_text(f"{json.dumps(_evidence_record(result), sort_keys=True)}\n", encoding="utf-8")
 
 
+def run_wire_harness_plan(
+    plan_path: Path,
+    output_path: Path,
+    *,
+    mode: str,
+    evidence_dir: Path | None = None,
+    skip_message: str | None = None,
+) -> dict[str, Any]:
+    normalized_mode = _normalize_wire_mode(mode)
+    plan = _read_json_object(plan_path, description="wire execution plan")
+    scoped_plan = _wire_plan_for_mode(plan, normalized_mode)
+    message = skip_message or (
+        f"Python wire harness {normalized_mode} is registered; live endpoint execution is not enabled."
+    )
+    report = build_wire_skipped_results_from_plan(scoped_plan, message=message)
+    if evidence_dir is not None:
+        report = _attach_wire_evidence_paths(report, evidence_dir)
+    validate_wire_case_results_against_plan(scoped_plan, report)
+    write_wire_case_results_report(output_path, report)
+    if evidence_dir is not None:
+        write_wire_evidence_files(report)
+    return report
+
+
 def main(argv: Sequence[str] | None = None) -> int:
+    args = list(argv) if argv is not None else None
+    if args and args[0] in {"manifest", "run-plan"}:
+        command = args.pop(0)
+        if command == "run-plan":
+            return _run_wire_plan_cli(args)
+        return _target_manifest_cli(args)
+    return _target_manifest_cli(args)
+
+
+def _target_manifest_cli(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="nnrp-wire-target-manifest")
     parser.add_argument("--target-name", default=_DEFAULT_TARGET_NAME)
     parser.add_argument("--suite-version", default=_DEFAULT_SUITE_VERSION)
@@ -246,6 +280,25 @@ def main(argv: Sequence[str] | None = None) -> int:
     return 0
 
 
+def _run_wire_plan_cli(argv: Sequence[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(prog="nnrp-wire-conformance run-plan")
+    parser.add_argument("--plan", required=True)
+    parser.add_argument("--mode", required=True, choices=sorted(_VALID_MODES))
+    parser.add_argument("--output", required=True)
+    parser.add_argument("--evidence-dir")
+    parser.add_argument("--skip-message")
+    args = parser.parse_args(list(argv) if argv is not None else None)
+
+    run_wire_harness_plan(
+        Path(args.plan),
+        Path(args.output),
+        mode=args.mode,
+        evidence_dir=Path(args.evidence_dir) if args.evidence_dir is not None else None,
+        skip_message=args.skip_message,
+    )
+    return 0
+
+
 def parse_wire_target_transport(value: str) -> WireTargetTransport:
     name, separator, endpoint = value.partition("=")
     if not separator:
@@ -261,20 +314,80 @@ def parse_wire_target_transport(value: str) -> WireTargetTransport:
     )
 
 
+def _read_json_object(path: Path, *, description: str) -> dict[str, Any]:
+    try:
+        document = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError as error:
+        raise ValueError(f"{description} was not found: {path}") from error
+    except json.JSONDecodeError as error:
+        raise ValueError(f"{description} is invalid JSON: {path}") from error
+    if not isinstance(document, dict):
+        raise ValueError(f"{description} must be a JSON object: {path}")
+    return document
+
+
+def _wire_plan_for_mode(plan: Mapping[str, Any], mode: str) -> dict[str, Any]:
+    scenarios = plan.get("scenarios")
+    if not isinstance(scenarios, Sequence) or isinstance(scenarios, str) or not scenarios:
+        raise ValueError("wire execution plan must contain scenarios")
+    scoped_scenarios = []
+    for scenario in scenarios:
+        if not isinstance(scenario, Mapping):
+            raise ValueError("wire execution plan scenarios must be objects")
+        scenario_mode = scenario.get("mode")
+        if scenario_mode is not None:
+            scenario_mode = _normalize_wire_mode(_required_string(scenario, "mode"))
+        if scenario_mode is None or scenario_mode == mode:
+            scoped_scenarios.append(dict(scenario))
+    if not scoped_scenarios:
+        raise ValueError(f"wire execution plan contains no scenarios for mode: {mode}")
+    scoped_plan = dict(plan)
+    scoped_plan["scenarios"] = scoped_scenarios
+    return scoped_plan
+
+
+def _attach_wire_evidence_paths(report: Mapping[str, Any], evidence_dir: Path) -> dict[str, Any]:
+    raw_results = report.get("results")
+    if not isinstance(raw_results, Sequence) or isinstance(raw_results, str):
+        raise ValueError("wire result report must contain results")
+    results = []
+    for result in raw_results:
+        if not isinstance(result, Mapping):
+            raise ValueError("wire result entries must be objects")
+        result_id = _required_string(result, "id")
+        entry = dict(result)
+        entry["evidence_paths"] = [str(evidence_dir / f"{_safe_wire_case_filename(result_id)}.jsonl")]
+        results.append(entry)
+    updated = dict(report)
+    updated["results"] = results
+    return updated
+
+
+def _safe_wire_case_filename(case_id: str) -> str:
+    return "".join(character if character.isalnum() or character in {"-", "_"} else "-" for character in case_id)
+
+
 def _normalize_unique_strings(values: Sequence[str], *, field_name: str) -> list[str]:
     normalized: list[str] = []
     seen: set[str] = set()
     for value in values:
         if not value:
             raise ValueError(f"{field_name} entries must be non-empty")
-        if field_name == "modes" and value not in _VALID_MODES:
-            raise ValueError(f"unsupported wire conformance mode: {value}")
+        if field_name == "modes":
+            value = _normalize_wire_mode(value)
         if value in seen:
             continue
         seen.add(value)
         normalized.append(value)
     if not normalized:
         raise ValueError(f"{field_name} must not be empty")
+    return normalized
+
+
+def _normalize_wire_mode(mode: str) -> str:
+    normalized = mode.strip()
+    if normalized not in _VALID_MODES:
+        raise ValueError(f"unsupported wire conformance mode: {mode}")
     return normalized
 
 
@@ -431,6 +544,7 @@ __all__ = [
     "build_wire_target_manifest",
     "main",
     "parse_wire_target_transport",
+    "run_wire_harness_plan",
     "validate_wire_case_results_against_plan",
     "write_wire_case_results_report",
     "write_wire_evidence_files",

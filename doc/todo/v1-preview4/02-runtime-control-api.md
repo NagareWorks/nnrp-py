@@ -45,7 +45,7 @@
 - [x] Add result drop reason enum.
 - [x] Add recoverable error dataclasses.
 - [x] Preserve native status family and code in Python exceptions.
-- [ ] Add tests for trace propagation through cancellation and partial results.
+- [x] Add tests for trace propagation through cancellation and partial results.
 
 ## Native Binding
 

@@ -25,7 +25,9 @@ from nnrp.runtime import (
     RuntimeRole,
     SchedulingMetadata,
     SupersedeMetadata,
+    TraceContextMetadata,
     decode_runtime_control_metadata,
+    encode_runtime_control_metadata,
 )
 
 
@@ -665,6 +667,53 @@ def test_native_client_connection_sends_runtime_control_helpers() -> None:
     degrade = decode_runtime_control_metadata(MessageType.DEGRADE_PROFILE, backend.connections[0].control_calls[3][1])
     assert degrade.metadata == CapabilityMetadata(3, 1, 5, 9, 77, 66, 7, 0x02)
     assert degrade.tail == b"degrade"
+
+
+def test_native_client_connection_keeps_trace_context_adjacent_to_cancellation() -> None:
+    backend = FakeBackend()
+    with connect_native_client_connection(backend=backend) as client_connection:
+        session = client_connection.open_session()
+
+        trace_payload = encode_runtime_control_metadata(
+            MessageType.TRACE_CONTEXT,
+            TraceContextMetadata(
+                trace_id=0xAABBCCDD,
+                span_id=2,
+                parent_span_id=1,
+                stage_code=3,
+                flags=0x01,
+                body_bytes=5,
+            ),
+            tail=b"trace",
+        )
+        client_connection.send_control(session, control_code=int(MessageType.TRACE_CONTEXT), payload=trace_payload)
+        client_connection.cancel_runtime_operation(
+            session,
+            operation_id=42,
+            control_sequence=7,
+            reason_code=ResultDropReasonCode.PEER_CANCELLED,
+            source_role=RuntimeRole.CLIENT,
+            diagnostic=b"cancelled",
+        )
+
+    trace = decode_runtime_control_metadata(MessageType.TRACE_CONTEXT, session.control_calls[0][1])
+    cancel = decode_runtime_control_metadata(MessageType.CANCEL, session.control_calls[1][1])
+
+    assert [control_code for control_code, _ in session.control_calls] == [
+        int(MessageType.TRACE_CONTEXT),
+        int(MessageType.CANCEL),
+    ]
+    assert trace.metadata == TraceContextMetadata(0xAABBCCDD, 2, 1, 3, 0x01, 5)
+    assert trace.tail == b"trace"
+    assert cancel.metadata == ControlRequestMetadata(
+        42,
+        7,
+        ResultDropReasonCode.PEER_CANCELLED,
+        RuntimeRole.CLIENT,
+        0,
+        9,
+    )
+    assert cancel.tail == b"cancelled"
 
 
 def test_native_client_connection_keeps_hot_paths_on_coarse_runtime_calls() -> None:

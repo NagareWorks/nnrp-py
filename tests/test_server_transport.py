@@ -92,6 +92,7 @@ async def test_server_session_sends_preview4_runtime_control_packets() -> None:
         delta_sequence=4,
         body=b"partial",
         control_flags=0x03,
+        trace_id=124,
     )
     await session.send_result_drop_reason(
         operation_id=100,
@@ -99,6 +100,7 @@ async def test_server_session_sends_preview4_runtime_control_packets() -> None:
         drop_reason_code=ResultDropReasonCode.DEADLINE_EXPIRED,
         source_role=RuntimeRole.SERVER,
         diagnostic=b"late",
+        trace_id=125,
     )
     await session.send_backpressure(
         scope_id=77,
@@ -134,6 +136,7 @@ async def test_server_session_sends_preview4_runtime_control_packets() -> None:
         MessageType.PARTIAL_RESULT,
         connection.control_packets[1].metadata,
     )
+    assert connection.control_packets[1].header.trace_id == 124
     assert partial.metadata == PartialResultMetadata(100, 2, 333, 4, 7, 0x03)
     assert partial.tail == b"partial"
 
@@ -141,6 +144,7 @@ async def test_server_session_sends_preview4_runtime_control_packets() -> None:
         MessageType.RESULT_DROP_REASON,
         connection.control_packets[2].metadata,
     )
+    assert connection.control_packets[2].header.trace_id == 125
     assert drop.metadata == ResultDropReasonMetadata(
         100,
         3,

@@ -10,7 +10,7 @@ import os
 import platform
 from collections.abc import AsyncIterator, Callable, Mapping
 from dataclasses import dataclass, field
-from enum import StrEnum
+from enum import IntFlag, StrEnum
 from pathlib import Path
 from typing import Any, Protocol, TypeVar, runtime_checkable
 from urllib.parse import SplitResult, urlsplit
@@ -65,6 +65,64 @@ RUNTIME_FEATURE_EXECUTABLE_RESUME = 0x0000000000002000
 RUNTIME_FEATURE_CLIENT_COMPLETION_HELPERS = 0x0000000000004000
 RUNTIME_FEATURE_CLIENT_COARSE_RESULT_HELPERS = 0x0000000000008000
 RUNTIME_FEATURE_CLIENT_COMPACT_RESULT_HELPERS = 0x0000000000010000
+
+
+class NativeRuntimeFeatureFlag(IntFlag):
+    PROTOCOL_CORE = RUNTIME_FEATURE_PROTOCOL_CORE
+    CLIENT_API = RUNTIME_FEATURE_CLIENT_API
+    SERVER_API = RUNTIME_FEATURE_SERVER_API
+    EVENT_POLLING = RUNTIME_FEATURE_EVENT_POLLING
+    CALLBACK_DISPATCH = RUNTIME_FEATURE_CALLBACK_DISPATCH
+    CACHE_SCHEMA = RUNTIME_FEATURE_CACHE_SCHEMA
+    RECOVERY = RUNTIME_FEATURE_RECOVERY
+    TYPED_PAYLOAD = RUNTIME_FEATURE_TYPED_PAYLOAD
+    TRANSPORT_SLOTS = RUNTIME_FEATURE_TRANSPORT_SLOTS
+    BATCH_POLLING = RUNTIME_FEATURE_BATCH_POLLING
+    CACHE_LEASE_OPS = RUNTIME_FEATURE_CACHE_LEASE_OPS
+    SCHEMA_REGISTRY_HANDLES = RUNTIME_FEATURE_SCHEMA_REGISTRY_HANDLES
+    BUFFER_HANDLES = RUNTIME_FEATURE_BUFFER_HANDLES
+    EXECUTABLE_RESUME = RUNTIME_FEATURE_EXECUTABLE_RESUME
+    CLIENT_COMPLETION_HELPERS = RUNTIME_FEATURE_CLIENT_COMPLETION_HELPERS
+    CLIENT_COARSE_RESULT_HELPERS = RUNTIME_FEATURE_CLIENT_COARSE_RESULT_HELPERS
+    CLIENT_COMPACT_RESULT_HELPERS = RUNTIME_FEATURE_CLIENT_COMPACT_RESULT_HELPERS
+
+
+RUNTIME_CONTROL_FEATURE_FLAGS = (
+    NativeRuntimeFeatureFlag.CLIENT_API
+    | NativeRuntimeFeatureFlag.SERVER_API
+    | NativeRuntimeFeatureFlag.EVENT_POLLING
+    | NativeRuntimeFeatureFlag.CALLBACK_DISPATCH
+    | NativeRuntimeFeatureFlag.BATCH_POLLING
+    | NativeRuntimeFeatureFlag.CLIENT_COMPLETION_HELPERS
+    | NativeRuntimeFeatureFlag.CLIENT_COARSE_RESULT_HELPERS
+    | NativeRuntimeFeatureFlag.CLIENT_COMPACT_RESULT_HELPERS
+)
+RUNTIME_OBJECT_FEATURE_FLAGS = (
+    NativeRuntimeFeatureFlag.CACHE_SCHEMA
+    | NativeRuntimeFeatureFlag.TYPED_PAYLOAD
+    | NativeRuntimeFeatureFlag.CACHE_LEASE_OPS
+    | NativeRuntimeFeatureFlag.SCHEMA_REGISTRY_HANDLES
+    | NativeRuntimeFeatureFlag.BUFFER_HANDLES
+)
+_RUNTIME_FEATURE_FLAG_NAMES = {
+    NativeRuntimeFeatureFlag.PROTOCOL_CORE: "protocol_core",
+    NativeRuntimeFeatureFlag.CLIENT_API: "client_api",
+    NativeRuntimeFeatureFlag.SERVER_API: "server_api",
+    NativeRuntimeFeatureFlag.EVENT_POLLING: "event_polling",
+    NativeRuntimeFeatureFlag.CALLBACK_DISPATCH: "callback_dispatch",
+    NativeRuntimeFeatureFlag.CACHE_SCHEMA: "cache_schema",
+    NativeRuntimeFeatureFlag.RECOVERY: "recovery",
+    NativeRuntimeFeatureFlag.TYPED_PAYLOAD: "typed_payload",
+    NativeRuntimeFeatureFlag.TRANSPORT_SLOTS: "transport_slots",
+    NativeRuntimeFeatureFlag.BATCH_POLLING: "batch_polling",
+    NativeRuntimeFeatureFlag.CACHE_LEASE_OPS: "cache_lease_ops",
+    NativeRuntimeFeatureFlag.SCHEMA_REGISTRY_HANDLES: "schema_registry_handles",
+    NativeRuntimeFeatureFlag.BUFFER_HANDLES: "buffer_handles",
+    NativeRuntimeFeatureFlag.EXECUTABLE_RESUME: "executable_resume",
+    NativeRuntimeFeatureFlag.CLIENT_COMPLETION_HELPERS: "client_completion_helpers",
+    NativeRuntimeFeatureFlag.CLIENT_COARSE_RESULT_HELPERS: "client_coarse_result_helpers",
+    NativeRuntimeFeatureFlag.CLIENT_COMPACT_RESULT_HELPERS: "client_compact_result_helpers",
+}
 SCHEMA_REGISTRY_ACTION_INSTALLED = 0
 SCHEMA_REGISTRY_ACTION_ALREADY_INSTALLED = 1
 SCHEMA_REGISTRY_ACTION_UPDATED = 2
@@ -196,6 +254,26 @@ class NativeProbeResult:
     sdk_revision: int
     transport_slots: int
     feature_flags: int
+
+    @property
+    def feature_flag_names(self) -> tuple[str, ...]:
+        return native_runtime_feature_flag_names(self.feature_flags)
+
+    @property
+    def runtime_control_feature_names(self) -> tuple[str, ...]:
+        return native_runtime_feature_flag_names(self.feature_flags, mask=RUNTIME_CONTROL_FEATURE_FLAGS)
+
+    @property
+    def runtime_object_feature_names(self) -> tuple[str, ...]:
+        return native_runtime_feature_flag_names(self.feature_flags, mask=RUNTIME_OBJECT_FEATURE_FLAGS)
+
+    @property
+    def has_runtime_control_features(self) -> bool:
+        return native_runtime_feature_flags_available(self.feature_flags, RUNTIME_CONTROL_FEATURE_FLAGS)
+
+    @property
+    def has_runtime_object_features(self) -> bool:
+        return native_runtime_feature_flags_available(self.feature_flags, RUNTIME_OBJECT_FEATURE_FLAGS)
 
 
 @dataclass(frozen=True)
@@ -3550,6 +3628,25 @@ def select_native_transport_provider(
 
 def native_transport_slot_names(mask: int) -> tuple[str, ...]:
     return tuple(name for name, slot in NATIVE_TRANSPORT_SLOT_BY_NAME.items() if mask & slot)
+
+
+def native_runtime_feature_flag_names(
+    feature_flags: int | NativeRuntimeFeatureFlag,
+    *,
+    mask: int | NativeRuntimeFeatureFlag | None = None,
+) -> tuple[str, ...]:
+    selected_flags = int(feature_flags)
+    if mask is not None:
+        selected_flags &= int(mask)
+    return tuple(name for flag, name in _RUNTIME_FEATURE_FLAG_NAMES.items() if selected_flags & int(flag))
+
+
+def native_runtime_feature_flags_available(
+    feature_flags: int | NativeRuntimeFeatureFlag,
+    required: int | NativeRuntimeFeatureFlag,
+) -> bool:
+    required_flags = int(required)
+    return int(feature_flags) & required_flags == required_flags
 
 
 def _select_native_transport_provider_with_probe(

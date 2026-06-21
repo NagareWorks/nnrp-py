@@ -52,6 +52,8 @@ from nnrp.native import (
     NATIVE_BINDING_MODE_ENV,
     REQUIRED_RUNTIME_FEATURES,
     RESULT_STATE_COMPLETED,
+    RUNTIME_CONTROL_FEATURE_FLAGS,
+    RUNTIME_OBJECT_FEATURE_FLAGS,
     SCHEMA_ERROR_HASH_CONFLICT,
     SESSION_ERROR_PRIORITY_REJECTED,
     SESSION_RECOVERY_OUTCOME_RESUME_ENABLED,
@@ -89,6 +91,7 @@ from nnrp.native import (
     NativeRuntimeDiagnostic,
     NativeRuntimeEntrypoints,
     NativeRuntimeEvent,
+    NativeRuntimeFeatureFlag,
     NativeRuntimeOperation,
     NativeRuntimePollResult,
     NativeRuntimeResult,
@@ -153,6 +156,8 @@ from nnrp.native import (
     load_native_runtime,
     load_native_schema_codec,
     native_library_name,
+    native_runtime_feature_flag_names,
+    native_runtime_feature_flags_available,
     native_transport_slot_names,
     parse_native_transport_endpoint,
     parse_nnrp_endpoint,
@@ -1626,6 +1631,31 @@ def test_probe_native_artifact_accepts_matching_protocol(tmp_path: Path) -> None
     assert result.sdk_revision == 6
     assert result.transport_slots == TRANSPORT_SLOT_TCP
     assert result.feature_flags == REQUIRED_RUNTIME_FEATURES
+    assert result.has_runtime_control_features is True
+    assert result.has_runtime_object_features is True
+    assert "client_api" in result.runtime_control_feature_names
+    assert "cache_schema" in result.runtime_object_feature_names
+    assert "transport_slots" in result.feature_flag_names
+
+
+def test_native_runtime_feature_flag_helpers_filter_known_feature_groups() -> None:
+    future_unknown_flag = 0x8000000000000000
+    feature_flags = (
+        NativeRuntimeFeatureFlag.CLIENT_API
+        | NativeRuntimeFeatureFlag.CACHE_SCHEMA
+        | NativeRuntimeFeatureFlag.TRANSPORT_SLOTS
+        | future_unknown_flag
+    )
+
+    assert native_runtime_feature_flag_names(feature_flags) == (
+        "client_api",
+        "cache_schema",
+        "transport_slots",
+    )
+    assert native_runtime_feature_flag_names(feature_flags, mask=RUNTIME_CONTROL_FEATURE_FLAGS) == ("client_api",)
+    assert native_runtime_feature_flag_names(feature_flags, mask=RUNTIME_OBJECT_FEATURE_FLAGS) == ("cache_schema",)
+    assert native_runtime_feature_flags_available(feature_flags, NativeRuntimeFeatureFlag.CLIENT_API) is True
+    assert native_runtime_feature_flags_available(feature_flags, RUNTIME_CONTROL_FEATURE_FLAGS) is False
 
 
 @pytest.mark.parametrize(

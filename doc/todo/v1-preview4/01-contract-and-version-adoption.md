@@ -10,8 +10,8 @@
   - [x] QUIC.
   - [x] IPC.
   - [x] WebSocket.
-- [ ] Probe runtime-control feature flags.
-- [ ] Probe runtime-object feature flags.
+- [x] Probe runtime-control feature flags.
+- [x] Probe runtime-object feature flags.
 - [x] Reject mismatched artifacts with deterministic Python exceptions.
 
 ## Package Versioning

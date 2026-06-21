@@ -4,14 +4,19 @@ import pytest
 
 import nnrp.client as client_module
 from nnrp import (
+    RUNTIME_CONTROL_FEATURE_FLAGS,
+    RUNTIME_OBJECT_FEATURE_FLAGS,
     CacheLeaseDescriptor,
     CacheObjectIdentity,
+    NativeRuntimeFeatureFlag,
     Preview3TypedPayloadDescriptor,
     SchemaDescriptorHeader,
     SchemaRegistryCatalog,
     SessionRecoveryReport,
     StandardProfile,
     StreamSemantics,
+    native_runtime_feature_flag_names,
+    native_runtime_feature_flags_available,
     should_replay_frame_after_migration,
     token_delta_payload_descriptor,
     token_delta_schema_descriptor,
@@ -386,6 +391,16 @@ def test_current_typed_models_are_exported() -> None:
     assert StreamSemantics.APPEND == 2
     assert token_delta_schema_descriptor().profile_id is StandardProfile.TOKEN
     assert token_delta_payload_descriptor(offset=0, length=1).profile_id is StandardProfile.TOKEN
+
+
+def test_preview4_native_feature_flag_helpers_are_exported() -> None:
+    feature_flags = NativeRuntimeFeatureFlag.CLIENT_API | NativeRuntimeFeatureFlag.CACHE_SCHEMA
+
+    assert native_runtime_feature_flag_names(feature_flags) == ("client_api", "cache_schema")
+    assert native_runtime_feature_flag_names(feature_flags, mask=RUNTIME_CONTROL_FEATURE_FLAGS) == ("client_api",)
+    assert native_runtime_feature_flag_names(feature_flags, mask=RUNTIME_OBJECT_FEATURE_FLAGS) == ("cache_schema",)
+    assert native_runtime_feature_flags_available(feature_flags, NativeRuntimeFeatureFlag.CLIENT_API) is True
+    assert native_runtime_feature_flags_available(feature_flags, RUNTIME_CONTROL_FEATURE_FLAGS) is False
 
 
 def test_current_result_helpers_expose_payload_kinds_without_tensor_coverage() -> None:

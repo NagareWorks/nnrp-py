@@ -30,7 +30,7 @@
 - [x] Update server docs for progress, partial result, and drop reason.
 - [x] Update native runtime docs for transport providers.
 - [ ] Update benchmark docs with preview4 result tables.
-- [ ] Update conformance docs with wire target manifest generation.
+- [x] Update conformance docs with wire target manifest generation.
 - [x] Document cache reference as explicit workload behavior, not a universal latency promise.
 
 ## Release Checks

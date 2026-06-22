@@ -1309,6 +1309,76 @@ def _run_runtime_object_metadata_encode_decode(scenario_id: str, workload: dict[
     return _measured_latency_result(scenario_id, samples)
 
 
+def _run_native_object_metadata_copy_snapshot(scenario_id: str, workload: dict[str, Any]) -> dict[str, Any]:
+    iterations = _positive_int(workload.get("iterations"), default=100_000)
+    warmup_iterations = _non_negative_int(workload.get("warmup_iterations"), default=min(10_000, iterations))
+    payload_bytes = _positive_int(workload.get("payload_bytes"), default=1024)
+    payload = b"x" * payload_bytes
+    try:
+        connection = load_native_client().connect(
+            connection_id=1,
+            generation=1,
+            transport_id=2,
+        )
+    except NativeArtifactError as error:
+        return _skip_result(scenario_id, f"native client unavailable: {error}")
+
+    def operation() -> None:
+        buffer = connection.acquire_object_metadata_copy(payload)
+        try:
+            snapshot = buffer.to_bytes()
+            if snapshot != payload:
+                raise RuntimeError("native object metadata copy benchmark snapshot mismatch")
+        finally:
+            buffer.close()
+
+    try:
+        for _ in range(warmup_iterations):
+            operation()
+
+        samples = _measure_microseconds(operation, iterations)
+        return _measured_latency_result(scenario_id, samples)
+    finally:
+        connection.close()
+
+
+def _run_native_object_metadata_borrowed_view(scenario_id: str, workload: dict[str, Any]) -> dict[str, Any]:
+    iterations = _positive_int(workload.get("iterations"), default=100_000)
+    warmup_iterations = _non_negative_int(workload.get("warmup_iterations"), default=min(10_000, iterations))
+    payload_bytes = _positive_int(workload.get("payload_bytes"), default=1024)
+    payload = b"x" * payload_bytes
+    try:
+        connection = load_native_client().connect(
+            connection_id=1,
+            generation=1,
+            transport_id=2,
+        )
+    except NativeArtifactError as error:
+        return _skip_result(scenario_id, f"native client unavailable: {error}")
+
+    def operation() -> None:
+        buffer = connection.acquire_object_metadata_copy(payload)
+        try:
+            with buffer.borrow_view() as view:
+                if view.nbytes != payload_bytes:
+                    raise RuntimeError("native object metadata borrow benchmark size mismatch")
+                if payload_bytes > 0 and view[0] != payload[0]:
+                    raise RuntimeError("native object metadata borrow benchmark payload mismatch")
+                if not view.readonly:
+                    raise RuntimeError("native object metadata borrow benchmark expected readonly view")
+        finally:
+            buffer.close()
+
+    try:
+        for _ in range(warmup_iterations):
+            operation()
+
+        samples = _measure_microseconds(operation, iterations)
+        return _measured_latency_result(scenario_id, samples)
+    finally:
+        connection.close()
+
+
 def _run_transport_loopback(scenario_id: str, workload: dict[str, Any]) -> dict[str, Any]:
     duration_seconds = _positive_float(workload.get("duration_seconds"), default=10.0)
     warmup_iterations = _non_negative_int(workload.get("warmup_iterations"), default=1_000)
@@ -1668,6 +1738,8 @@ _SCENARIO_RUNNERS: dict[str, Callable[[str, dict[str, Any]], dict[str, Any]]] = 
     "runtime_probe": _run_runtime_probe,
     "runtime_control_metadata_encode_decode": _run_runtime_control_metadata_encode_decode,
     "runtime_object_metadata_encode_decode": _run_runtime_object_metadata_encode_decode,
+    "native_object_metadata_copy_snapshot": _run_native_object_metadata_copy_snapshot,
+    "native_object_metadata_borrowed_view": _run_native_object_metadata_borrowed_view,
     "session_lifecycle": _run_session_lifecycle,
     "submit_result_loop": _run_submit_result_loop,
     "transport_loopback": _run_transport_loopback,

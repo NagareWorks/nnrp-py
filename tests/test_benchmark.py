@@ -198,6 +198,34 @@ def _plan_document() -> dict[str, object]:
                 },
             },
             {
+                "id": "l4.native.object_metadata.copy.latency",
+                "category": "latency",
+                "feature": "benchmark.native.object_metadata.copy",
+                "required_capabilities": ["object.lifecycle"],
+                "description": "Native object metadata copied snapshot latency.",
+                "workload": {
+                    "operation": "native_object_metadata_copy_snapshot",
+                    "payload": "object_metadata_copy",
+                    "iterations": 3,
+                    "warmup_iterations": 1,
+                    "payload_bytes": 8,
+                },
+            },
+            {
+                "id": "l4.native.object_metadata.borrow.latency",
+                "category": "latency",
+                "feature": "benchmark.native.object_metadata.borrow",
+                "required_capabilities": ["object.lifecycle"],
+                "description": "Native object metadata borrowed view latency.",
+                "workload": {
+                    "operation": "native_object_metadata_borrowed_view",
+                    "payload": "object_metadata_borrow",
+                    "iterations": 3,
+                    "warmup_iterations": 1,
+                    "payload_bytes": 8,
+                },
+            },
+            {
                 "id": "l4.native.submit_result.throughput",
                 "category": "throughput",
                 "feature": "benchmark.native.submit_result.throughput",
@@ -346,6 +374,8 @@ def test_build_benchmark_results_report_measures_configured_scenarios(monkeypatc
     assert results["l4.native.event_polling.throughput"]["outcome"] == "skip"
     assert results["l4.runtime.control_metadata.latency"]["outcome"] == "measured"
     assert results["l4.runtime.object_metadata.latency"]["outcome"] == "measured"
+    assert results["l4.native.object_metadata.copy.latency"]["outcome"] == "skip"
+    assert results["l4.native.object_metadata.borrow.latency"]["outcome"] == "skip"
     assert results["l4.native.submit_result.throughput"]["outcome"] == "skip"
     assert results["l4.native.submit_cancel.throughput"]["outcome"] == "skip"
     assert results["l4.native.progress_partial.polling.throughput"]["outcome"] == "skip"
@@ -435,6 +465,12 @@ def test_build_benchmark_results_report_measures_native_scenarios_when_artifacts
     native_event_throughput_result = results["l4.native.event_polling.throughput"]
     assert native_event_throughput_result["outcome"] == "measured"
     assert native_event_throughput_result["metrics"]["throughput_ops_per_sec"] > 0
+    native_object_copy = results["l4.native.object_metadata.copy.latency"]
+    assert native_object_copy["outcome"] == "measured"
+    assert native_object_copy["metrics"]["p50_us"] >= 0
+    native_object_borrow = results["l4.native.object_metadata.borrow.latency"]
+    assert native_object_borrow["outcome"] == "measured"
+    assert native_object_borrow["metrics"]["p50_us"] >= 0
     native_submit_result = results["l4.native.submit_result.throughput"]
     assert native_submit_result["outcome"] == "measured"
     assert native_submit_result["metrics"]["throughput_ops_per_sec"] > 0
@@ -482,6 +518,7 @@ def test_build_benchmark_results_report_measures_native_scenarios_when_artifacts
     assert set(native_client.connection.submitted_payloads) == {b"x" * 8}
     assert len(native_client.connection.cancelled_frames) >= 1
     assert len(native_client.connection.result_hints) >= 1
+    assert native_client.connection.object_metadata_payloads == [b"x" * 8] * 8
     assert native_client.connection.closed is True
     assert native_probe.calls == [(None, None)] * 5
 
@@ -751,6 +788,10 @@ def test_build_benchmark_results_report_skips_native_scenarios_without_artifacts
     assert "missing client artifact" in results["l4.native.event_polling.latency"]["message"]
     assert results["l4.native.event_polling.throughput"]["outcome"] == "skip"
     assert "missing client artifact" in results["l4.native.event_polling.throughput"]["message"]
+    assert results["l4.native.object_metadata.copy.latency"]["outcome"] == "skip"
+    assert "missing client artifact" in results["l4.native.object_metadata.copy.latency"]["message"]
+    assert results["l4.native.object_metadata.borrow.latency"]["outcome"] == "skip"
+    assert "missing client artifact" in results["l4.native.object_metadata.borrow.latency"]["message"]
     assert results["l4.native.submit_result.throughput"]["outcome"] == "skip"
     assert "missing client artifact" in results["l4.native.submit_result.throughput"]["message"]
     assert results["l4.native.submit_cancel.throughput"]["outcome"] == "skip"
@@ -836,7 +877,7 @@ def test_main_reads_paths_from_environment_and_writes_report(tmp_path: Path, mon
 
     report = json.loads(output_path.read_text(encoding="utf-8"))
     assert report["protocol_version"] == "nnrp-1"
-    assert len(report["results"]) == 19
+    assert len(report["results"]) == 21
 
 
 def test_main_accepts_explicit_cli_paths_and_creates_parent_directory(tmp_path: Path) -> None:
@@ -941,6 +982,7 @@ class FakeNativeConnection:
         self.polled_results: list[int | None] = []
         self.cancelled_frames: list[int] = []
         self.result_hints: list[bytes] = []
+        self.object_metadata_payloads: list[bytes] = []
         self.opened_session: FakeNativeSession | None = None
         self.closed = False
 
@@ -964,8 +1006,47 @@ class FakeNativeConnection:
     def poll_events(self):
         return ()
 
+    def acquire_object_metadata_copy(self, payload: bytes | bytearray | memoryview):
+        copied_payload = bytes(payload)
+        self.object_metadata_payloads.append(copied_payload)
+        return FakeNativeObjectMetadataBuffer(copied_payload)
+
     def close(self) -> None:
         self.closed = True
+
+
+class FakeNativeObjectMetadataBuffer:
+    def __init__(self, payload: bytes) -> None:
+        self.payload = payload
+        self.borrow_count = 0
+        self.closed = False
+
+    def to_bytes(self) -> bytes:
+        if self.closed:
+            raise RuntimeError("fake native object metadata buffer is closed")
+        return self.payload
+
+    def borrow_view(self) -> "FakeNativeBorrowedBufferView":
+        if self.closed:
+            raise RuntimeError("fake native object metadata buffer is closed")
+        return FakeNativeBorrowedBufferView(self)
+
+    def close(self) -> None:
+        if self.borrow_count != 0:
+            raise RuntimeError("fake native object metadata buffer still has active borrows")
+        self.closed = True
+
+
+class FakeNativeBorrowedBufferView:
+    def __init__(self, buffer: FakeNativeObjectMetadataBuffer) -> None:
+        self.buffer = buffer
+
+    def __enter__(self):
+        self.buffer.borrow_count += 1
+        return memoryview(self.buffer.payload)
+
+    def __exit__(self, exc_type, exc, traceback) -> None:
+        self.buffer.borrow_count -= 1
 
 
 class FakeNativeSession:

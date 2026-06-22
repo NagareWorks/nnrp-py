@@ -45,6 +45,38 @@
       }
     },
     {
+      "id": "l4.native.object_metadata.copy.latency",
+      "category": "latency",
+      "feature": "benchmark.native.object_metadata.copy",
+      "required_capabilities": [
+        "object.lifecycle"
+      ],
+      "description": "Measure native object metadata acquisition plus Python-owned snapshot copy latency.",
+      "workload": {
+        "operation": "native_object_metadata_copy_snapshot",
+        "payload": "object_metadata_copy",
+        "payload_bytes": 1024,
+        "iterations": 100000,
+        "warmup_iterations": 10000
+      }
+    },
+    {
+      "id": "l4.native.object_metadata.borrow.latency",
+      "category": "latency",
+      "feature": "benchmark.native.object_metadata.borrow",
+      "required_capabilities": [
+        "object.lifecycle"
+      ],
+      "description": "Measure native object metadata acquisition plus guarded borrowed-view inspection latency.",
+      "workload": {
+        "operation": "native_object_metadata_borrowed_view",
+        "payload": "object_metadata_borrow",
+        "payload_bytes": 1024,
+        "iterations": 100000,
+        "warmup_iterations": 10000
+      }
+    },
+    {
       "id": "l4.native.submit_result.throughput",
       "category": "throughput",
       "feature": "benchmark.native.submit_result.throughput",

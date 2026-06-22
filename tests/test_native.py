@@ -11,6 +11,7 @@ import pytest
 
 import nnrp.native as native_module
 from nnrp.cache import CacheLeaseOutcome, CacheObjectIdentity
+from nnrp.core import MessageType
 from nnrp.core.messages.control import (
     ResultHintBudgetPolicy,
     ResultHintCongestionState,
@@ -173,7 +174,19 @@ from nnrp.native import (
     select_native_runtime_backend,
     select_native_transport_provider,
 )
-from nnrp.runtime import MemoryLocationHint, ObjectDescriptorMetadata, OwnershipHint, RuntimeObjectKind, RuntimeRole
+from nnrp.runtime import (
+    MemoryLocationHint,
+    ObjectDescriptorMetadata,
+    OwnershipHint,
+    PartialResultMetadata,
+    ProgressMetadata,
+    ResultDropReasonCode,
+    ResultDropReasonMetadata,
+    RuntimeObjectKind,
+    RuntimeRole,
+    decode_runtime_control_metadata,
+    encode_runtime_control_metadata,
+)
 from nnrp.schema import (
     Preview3TypedPayloadDescriptor,
     SchemaDescriptorHeader,
@@ -838,6 +851,45 @@ class FakeRuntimeLibrary(FakeEntrypointLibrary):
             )
             events[index].diagnostic.status = NativeStatus.ok().to_ffi()
         count_target.value = event_capacity
+        return self.status
+
+
+class BatchControlRuntimeLibrary(FakeRuntimeLibrary):
+    def __init__(self, events: list[tuple[int, bytes]]) -> None:
+        super().__init__()
+        self._batch_events = events
+        self._batch_payload_owners = [ctypes.create_string_buffer(payload, len(payload)) for _, payload in events]
+
+    def _await_events(
+        self,
+        handle: _NnrpHandle,
+        out_events: object,
+        event_capacity: int,
+        out_event_count: object,
+    ) -> _NnrpFfiStatus:
+        count_target = getattr(out_event_count, "_obj", None)
+        if count_target is None:
+            count_target = ctypes.cast(out_event_count, ctypes.POINTER(ctypes.c_size_t)).contents
+        count_target.value = 0
+        if event_capacity <= 0:
+            return _NnrpFfiStatus(FFI_STATUS_INVALID_ARGUMENT, 0, 0, 0)
+
+        emitted = min(event_capacity, len(self._batch_events))
+        if emitted == 0:
+            return _NnrpFfiStatus(FFI_STATUS_WOULD_BLOCK, 0, 0, 0)
+
+        events = ctypes.cast(out_events, ctypes.POINTER(_NnrpEvent))
+        for index in range(emitted):
+            kind, payload = self._batch_events[index]
+            owner = self._batch_payload_owners[index]
+            events[index].kind = kind
+            events[index].connection = handle
+            events[index].session = _NnrpHandle(HANDLE_KIND_SESSION, 41 + index, 3, 0)
+            events[index].operation = _NnrpHandle(HANDLE_KIND_OPERATION, 99 + index, 1, 0)
+            events[index].frame_id = 7 + index
+            events[index].payload = _NnrpBufferView(ctypes.cast(owner, ctypes.c_void_p), len(payload))
+            events[index].diagnostic.status = NativeStatus.ok().to_ffi()
+        count_target.value = emitted
         return self.status
 
 
@@ -2678,6 +2730,85 @@ def test_native_runtime_connection_polls_event_delivery_model(tmp_path: Path) ->
     with pytest.raises(ValueError, match="max_events"):
         connection.poll_events_batch(max_events=-1)
     assert connection.poll_events_batch(max_events=0) == ()
+
+
+def test_native_runtime_connection_batch_polls_preview4_control_events(tmp_path: Path) -> None:
+    artifact = tmp_path / "nnrp_ffi.dll"
+    artifact.write_bytes(b"fake")
+    progress_payload = encode_runtime_control_metadata(
+        MessageType.PROGRESS,
+        ProgressMetadata(
+            operation_id=101,
+            progress_sequence=1,
+            stage_code=2,
+            percent_x100=5000,
+            object_id=33,
+            body_bytes=8,
+        ),
+        tail=b"progress",
+    )
+    partial_payload = encode_runtime_control_metadata(
+        MessageType.PARTIAL_RESULT,
+        PartialResultMetadata(
+            operation_id=101,
+            result_sequence=2,
+            object_id=33,
+            delta_sequence=4,
+            body_bytes=7,
+            flags=0x01,
+        ),
+        tail=b"partial",
+    )
+    drop_payload = encode_runtime_control_metadata(
+        MessageType.RESULT_DROP_REASON,
+        ResultDropReasonMetadata(
+            operation_id=101,
+            result_sequence=3,
+            drop_reason_code=ResultDropReasonCode.BACKPRESSURE,
+            source_role=RuntimeRole.SERVER,
+            flags=0,
+            diagnostic_bytes=4,
+        ),
+        tail=b"drop",
+    )
+    library = BatchControlRuntimeLibrary(
+        [
+            (EVENT_KIND_CONTROL, progress_payload),
+            (EVENT_KIND_CONTROL, partial_payload),
+            (EVENT_KIND_CONTROL, drop_payload),
+        ]
+    )
+    connection = load_native_client(artifact, library=library).connect(
+        connection_id=12,
+        generation=2,
+        transport_id=TRANSPORT_SLOT_TCP,
+    )
+
+    events = connection.poll_events_batch(max_events=3, event_kind=EVENT_KIND_CONTROL)
+    decoded = [
+        decode_runtime_control_metadata(message_type, event.payload)
+        for message_type, event in zip(
+            (MessageType.PROGRESS, MessageType.PARTIAL_RESULT, MessageType.RESULT_DROP_REASON),
+            events,
+            strict=True,
+        )
+    ]
+
+    assert [event.kind for event in events] == [EVENT_KIND_CONTROL, EVENT_KIND_CONTROL, EVENT_KIND_CONTROL]
+    assert library.nnrp_client_await_events.calls[0][2] == 3
+    assert decoded[0].metadata == ProgressMetadata(101, 1, 2, 5000, 33, 8)
+    assert decoded[0].tail == b"progress"
+    assert decoded[1].metadata == PartialResultMetadata(101, 2, 33, 4, 7, 0x01)
+    assert decoded[1].tail == b"partial"
+    assert decoded[2].metadata == ResultDropReasonMetadata(
+        101,
+        3,
+        ResultDropReasonCode.BACKPRESSURE,
+        RuntimeRole.SERVER,
+        0,
+        4,
+    )
+    assert decoded[2].tail == b"drop"
 
 
 def test_native_runtime_connection_batch_poll_maps_would_block_to_empty(tmp_path: Path) -> None:

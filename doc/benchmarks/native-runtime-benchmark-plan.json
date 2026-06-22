@@ -152,6 +152,40 @@
       }
     },
     {
+      "id": "l4.transport.ipc.loopback.throughput",
+      "category": "throughput",
+      "feature": "benchmark.transport.ipc",
+      "required_capabilities": [
+        "transport.ipc"
+      ],
+      "description": "Measure IPC transport probe loopback packet encode/decode throughput with the shared transport benchmark workload.",
+      "workload": {
+        "operation": "transport_loopback",
+        "payload": "request_result_stream",
+        "transport": "ipc",
+        "probe_payload_bytes": 32768,
+        "warmup_iterations": 1000,
+        "duration_seconds": 10
+      }
+    },
+    {
+      "id": "l4.transport.websocket.loopback.throughput",
+      "category": "throughput",
+      "feature": "benchmark.transport.websocket",
+      "required_capabilities": [
+        "transport.websocket"
+      ],
+      "description": "Measure WebSocket transport probe loopback packet encode/decode throughput with the shared transport benchmark workload.",
+      "workload": {
+        "operation": "transport_loopback",
+        "payload": "request_result_stream",
+        "transport": "websocket",
+        "probe_payload_bytes": 32768,
+        "warmup_iterations": 1000,
+        "duration_seconds": 10
+      }
+    },
+    {
       "id": "l4.native.event_polling.throughput",
       "category": "throughput",
       "feature": "benchmark.native.event_polling.throughput",

@@ -82,6 +82,36 @@ def _plan_document() -> dict[str, object]:
                 },
             },
             {
+                "id": "l4.transport.ipc.loopback.throughput",
+                "category": "throughput",
+                "feature": "benchmark.transport.ipc",
+                "required_capabilities": ["transport.ipc"],
+                "description": "IPC transport loopback throughput.",
+                "workload": {
+                    "operation": "transport_loopback",
+                    "payload": "request_result_stream",
+                    "transport": "ipc",
+                    "probe_payload_bytes": 8,
+                    "duration_seconds": 0.01,
+                    "warmup_iterations": 1,
+                },
+            },
+            {
+                "id": "l4.transport.websocket.loopback.throughput",
+                "category": "throughput",
+                "feature": "benchmark.transport.websocket",
+                "required_capabilities": ["transport.websocket"],
+                "description": "WebSocket transport loopback throughput.",
+                "workload": {
+                    "operation": "transport_loopback",
+                    "payload": "request_result_stream",
+                    "transport": "websocket",
+                    "probe_payload_bytes": 8,
+                    "duration_seconds": 0.01,
+                    "warmup_iterations": 1,
+                },
+            },
+            {
                 "id": "l4.metadata.submit_result.latency",
                 "category": "latency",
                 "feature": "benchmark.metadata.submit_result",
@@ -365,6 +395,8 @@ def test_build_benchmark_results_report_measures_configured_scenarios(monkeypatc
     assert transport_result["metrics"]["throughput_ops_per_sec"] > 0
     assert "cpu_percent" not in transport_result["metrics"]
     assert "peak_memory_bytes" not in transport_result["metrics"]
+    assert results["l4.transport.ipc.loopback.throughput"]["outcome"] == "measured"
+    assert results["l4.transport.websocket.loopback.throughput"]["outcome"] == "measured"
 
     assert results["l4.metadata.submit_result.latency"]["outcome"] == "measured"
     assert results["l4.typed_payload.tensor_pack_unpack.latency"]["outcome"] == "measured"
@@ -412,6 +444,8 @@ def test_build_benchmark_results_report_can_profile_throughput_metrics(
     for scenario_id in (
         "l4.submit_result.inline_tensor.throughput",
         "l4.transport.quic.loopback.throughput",
+        "l4.transport.ipc.loopback.throughput",
+        "l4.transport.websocket.loopback.throughput",
         "l4.transport.tcp.loopback.throughput",
     ):
         result = results[scenario_id]
@@ -877,7 +911,7 @@ def test_main_reads_paths_from_environment_and_writes_report(tmp_path: Path, mon
 
     report = json.loads(output_path.read_text(encoding="utf-8"))
     assert report["protocol_version"] == "nnrp-1"
-    assert len(report["results"]) == 21
+    assert len(report["results"]) == 23
 
 
 def test_main_accepts_explicit_cli_paths_and_creates_parent_directory(tmp_path: Path) -> None:

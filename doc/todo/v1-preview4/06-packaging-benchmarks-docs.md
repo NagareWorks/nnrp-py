@@ -19,8 +19,8 @@
 - [x] Add control-frame submit/cancel benchmark.
 - [x] Add progress/partial-result polling benchmark.
 - [x] Add runtime object declare/ref/release benchmark.
-- [ ] Add IPC loopback benchmark.
-- [ ] Add WebSocket loopback benchmark.
+- [x] Add IPC loopback benchmark.
+- [x] Add WebSocket loopback benchmark.
 - [x] Compare cffi API and ctypes on the same plan.
 - [ ] Compare preview4 native hot paths against preview3 baselines.
 

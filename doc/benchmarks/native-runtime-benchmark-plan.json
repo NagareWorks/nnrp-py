@@ -82,6 +82,24 @@
       }
     },
     {
+      "id": "l4.native.submit_cancel.throughput",
+      "category": "throughput",
+      "feature": "benchmark.native.submit_cancel.throughput",
+      "required_capabilities": [
+        "session.open_close",
+        "operation.submit",
+        "control.cancel_abort"
+      ],
+      "description": "Measure native runtime submit/cancel throughput with connection and session setup outside the measured loop.",
+      "workload": {
+        "operation": "native_submit_cancel_loop",
+        "payload": "inline_payload",
+        "payload_bytes": 1024,
+        "warmup_iterations": 1000,
+        "duration_seconds": 10
+      }
+    },
+    {
       "id": "l4.native.event_polling.throughput",
       "category": "throughput",
       "feature": "benchmark.native.event_polling.throughput",

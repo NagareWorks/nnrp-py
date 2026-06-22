@@ -16,7 +16,7 @@
 ## Benchmarks
 
 - [x] Extend native-runtime benchmark plan for preview4.
-- [ ] Add control-frame submit/cancel benchmark.
+- [x] Add control-frame submit/cancel benchmark.
 - [ ] Add progress/partial-result polling benchmark.
 - [x] Add runtime object declare/ref/release benchmark.
 - [ ] Add IPC loopback benchmark.

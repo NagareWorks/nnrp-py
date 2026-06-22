@@ -212,6 +212,20 @@ def _plan_document() -> dict[str, object]:
                 },
             },
             {
+                "id": "l4.native.submit_cancel.throughput",
+                "category": "throughput",
+                "feature": "benchmark.native.submit_cancel.throughput",
+                "required_capabilities": ["session.open_close", "operation.submit", "control.cancel_abort"],
+                "description": "Native submit/cancel runtime throughput.",
+                "workload": {
+                    "operation": "native_submit_cancel_loop",
+                    "payload": "inline_payload",
+                    "duration_seconds": 0.01,
+                    "warmup_iterations": 1,
+                    "payload_bytes": 8,
+                },
+            },
+            {
                 "id": "l4.native.submit_result.allocations",
                 "category": "memory",
                 "feature": "benchmark.native.submit_result.allocations",
@@ -313,6 +327,7 @@ def test_build_benchmark_results_report_measures_configured_scenarios(monkeypatc
     assert results["l4.runtime.control_metadata.latency"]["outcome"] == "measured"
     assert results["l4.runtime.object_metadata.latency"]["outcome"] == "measured"
     assert results["l4.native.submit_result.throughput"]["outcome"] == "skip"
+    assert results["l4.native.submit_cancel.throughput"]["outcome"] == "skip"
     assert results["l4.native.submit_result.allocations"]["outcome"] == "skip"
     assert results["l4.native.artifact_probe.latency"]["outcome"] == "skip"
     assert results["l4.session.lifecycle.latency"]["outcome"] == "measured"
@@ -410,6 +425,17 @@ def test_build_benchmark_results_report_measures_native_scenarios_when_artifacts
     assert native_submit_result["metrics"]["native_ffi_client_complete_operation_calls_per_op"] == 0
     assert native_submit_result["metrics"]["native_ffi_client_await_events_calls_per_op"] == 0
     assert native_submit_result["metrics"]["native_binding_mode"] == "ctypes"
+    native_submit_cancel = results["l4.native.submit_cancel.throughput"]
+    assert native_submit_cancel["outcome"] == "measured"
+    assert native_submit_cancel["metrics"]["throughput_ops_per_sec"] > 0
+    assert native_submit_cancel["metrics"]["completed_operations"] > 0
+    assert native_submit_cancel["metrics"]["native_ffi_calls_per_op"] == 2
+    assert native_submit_cancel["metrics"]["native_ffi_client_submit_calls_per_op"] == 1
+    assert native_submit_cancel["metrics"]["native_ffi_client_cancel_calls_per_op"] == 1
+    assert native_submit_cancel["metrics"]["native_ffi_client_submit_result_compact_calls_per_op"] == 0
+    assert native_submit_cancel["metrics"]["native_ffi_client_submit_result_calls_per_op"] == 0
+    assert native_submit_cancel["metrics"]["native_ffi_client_complete_operation_calls_per_op"] == 0
+    assert native_submit_cancel["metrics"]["native_binding_mode"] == "ctypes"
     allocation_result = results["l4.native.submit_result.allocations"]
     assert allocation_result["outcome"] == "measured"
     assert allocation_result["metrics"]["allocated_blocks_delta_per_op"] >= 0
@@ -421,6 +447,7 @@ def test_build_benchmark_results_report_measures_native_scenarios_when_artifacts
     assert set(native_client.connection.polled_batches) == {2}
     assert len(native_client.connection.submitted_payloads) >= 4
     assert set(native_client.connection.submitted_payloads) == {b"x" * 8}
+    assert len(native_client.connection.cancelled_frames) >= 1
     assert native_client.connection.closed is True
     assert native_probe.calls == [(None, None)] * 5
 
@@ -771,7 +798,7 @@ def test_main_reads_paths_from_environment_and_writes_report(tmp_path: Path, mon
 
     report = json.loads(output_path.read_text(encoding="utf-8"))
     assert report["protocol_version"] == "nnrp-1"
-    assert len(report["results"]) == 17
+    assert len(report["results"]) == 18
 
 
 def test_main_accepts_explicit_cli_paths_and_creates_parent_directory(tmp_path: Path) -> None:
@@ -874,6 +901,7 @@ class FakeNativeConnection:
         self.submitted_payloads: list[bytes] = []
         self.completed_payloads: list[bytes] = []
         self.polled_results: list[int | None] = []
+        self.cancelled_frames: list[int] = []
         self.opened_session: FakeNativeSession | None = None
         self.closed = False
 
@@ -916,7 +944,7 @@ class FakeNativeSession:
     ):
         assert operation_id == frame_id
         self.entrypoints.client_submit(payload)
-        return FakeNativeOperation(operation_id, frame_id)
+        return FakeNativeOperation(self.entrypoints, operation_id, frame_id)
 
     def complete_operation(
         self,
@@ -977,11 +1005,28 @@ class FakeNativeEntrypoints:
     def client_await_events(self, max_events: int | None) -> None:
         self.session.connection.polled_results.append(max_events)
 
+    def client_cancel(self, frame_id: int) -> None:
+        self.session.connection.cancelled_frames.append(frame_id)
+
 
 class FakeNativeOperation:
+    def __init__(self, entrypoints: FakeNativeEntrypoints | None, operation_id: int, frame_id: int) -> None:
+        self.entrypoints = entrypoints
+        self.operation_id = operation_id
+        self.frame_id = frame_id
+
+    def cancel(self) -> None:
+        assert self.entrypoints is not None
+        self.entrypoints.client_cancel(self.frame_id)
+
+
+class WouldBlockNativeOperation:
     def __init__(self, operation_id: int, frame_id: int) -> None:
         self.operation_id = operation_id
         self.frame_id = frame_id
+
+    def cancel(self) -> None:
+        raise NativeWouldBlockError(NativeStatus(FFI_STATUS_WOULD_BLOCK))
 
 
 class WouldBlockNativeClient(FakeNativeClient):
@@ -1013,7 +1058,7 @@ class WouldBlockNativeSession:
         frame_id: int,
         payload: bytes | bytearray | memoryview = b"",
     ):
-        return FakeNativeOperation(operation_id, frame_id)
+        return WouldBlockNativeOperation(operation_id, frame_id)
 
     def complete_operation(
         self,

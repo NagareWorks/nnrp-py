@@ -1,4 +1,5 @@
 import asyncio
+import inspect
 
 import pytest
 
@@ -8,7 +9,11 @@ from nnrp import (
     RUNTIME_OBJECT_FEATURE_FLAGS,
     CacheLeaseDescriptor,
     CacheObjectIdentity,
+    NativeRuntimeClient,
     NativeRuntimeFeatureFlag,
+    NativeRuntimeServer,
+    NativeRuntimeServerOperation,
+    NativeRuntimeServerSession,
     Preview3TypedPayloadDescriptor,
     SchemaDescriptorHeader,
     SchemaRegistryCatalog,
@@ -360,6 +365,36 @@ def test_connect_client_session_is_exported() -> None:
     assert callable(validate_session_recovery_ack)
     assert callable(validate_migration_recovery)
     assert callable(should_replay_frame_after_migration)
+
+
+def test_preview4_host_runtime_api_keeps_request_options_off_packet_helpers() -> None:
+    assert callable(NativeRuntimeClient.bind_server)
+    assert callable(NativeRuntimeServer.accept_session)
+    assert callable(NativeRuntimeServerSession.receive_submit)
+    assert callable(NativeRuntimeServerOperation.send_result)
+
+    assert set(NativeClientConnectionOptions.__annotations__) == {
+        "connection_id",
+        "connection_generation",
+        "transport_id",
+    }
+    assert set(NativeClientSessionOpenOptions.__annotations__) == {
+        "requested_session_id",
+        "session_generation",
+        "profile_id",
+        "schema_id",
+        "schema_version",
+    }
+    assert "deadline_unix_ms" not in SubmitRequest.__dataclass_fields__
+    assert "priority_class" not in SubmitRequest.__dataclass_fields__
+
+    priority_signature = inspect.signature(NativeClientConnection.update_runtime_priority)
+    deadline_signature = inspect.signature(NativeClientConnection.update_runtime_deadline)
+    expire_signature = inspect.signature(NativeClientConnection.expire_runtime_operation_at)
+
+    assert "priority_class" in priority_signature.parameters
+    assert "deadline_unix_ms" in deadline_signature.parameters
+    assert "expire_at_unix_ms" in expire_signature.parameters
 
 
 def test_legacy_packet_session_helpers_warn_as_tooling_only() -> None:

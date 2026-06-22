@@ -22,8 +22,8 @@
 
 ## Public API Boundary
 
-- [ ] Keep host-facing client and server entrypoints stable where semantics match preview3.
-- [ ] Add preview4-specific request options without overloading preview3 packet helper APIs.
+- [x] Keep host-facing client and server entrypoints stable where semantics match preview3.
+- [x] Add preview4-specific request options without overloading preview3 packet helper APIs.
 - [x] Keep fixture builders out of runtime quick-start paths.
 - [x] Document explicit native requirement for preview4 runtime-control hot paths.
 

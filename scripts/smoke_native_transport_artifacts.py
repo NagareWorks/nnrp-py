@@ -7,20 +7,12 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from nnrp.native import (
-    TRANSPORT_SLOT_IPC,
-    TRANSPORT_SLOT_QUIC,
-    TRANSPORT_SLOT_TCP,
-    TRANSPORT_SLOT_WEBSOCKET,
+    NATIVE_TRANSPORT_ID_BY_NAME,
     NativeArtifactError,
     load_native_client,
 )
 
-TRANSPORT_SLOTS = {
-    "tcp": TRANSPORT_SLOT_TCP,
-    "quic": TRANSPORT_SLOT_QUIC,
-    "ipc": TRANSPORT_SLOT_IPC,
-    "websocket": TRANSPORT_SLOT_WEBSOCKET,
-}
+TRANSPORT_NAMES = frozenset(NATIVE_TRANSPORT_ID_BY_NAME)
 
 
 @dataclass(frozen=True)
@@ -40,13 +32,13 @@ def smoke_native_transport_artifacts(
     results: list[NativeTransportSmokeResult] = []
     for index, transport in enumerate(transports, start=1):
         normalized_transport = _normalize_transport(transport)
-        transport_slot = TRANSPORT_SLOTS[normalized_transport]
+        transport_id = NATIVE_TRANSPORT_ID_BY_NAME[normalized_transport]
         base_id = 40_000 + (index * 100)
         client = load_native_client(root=root, transport=normalized_transport)
         server = client.bind_server(
             server_id=base_id,
             generation=1,
-            transport_id=transport_slot,
+            transport_id=int(transport_id),
         )
         session = server.accept_session(
             session_id=base_id + 1,
@@ -77,7 +69,7 @@ def smoke_native_transport_artifacts(
 
 def _normalize_transport(value: str) -> str:
     normalized = value.strip().lower().replace("_", "-")
-    if normalized not in TRANSPORT_SLOTS:
+    if normalized not in TRANSPORT_NAMES:
         raise NativeArtifactError(f"unsupported native transport smoke target: {value}")
     return normalized
 

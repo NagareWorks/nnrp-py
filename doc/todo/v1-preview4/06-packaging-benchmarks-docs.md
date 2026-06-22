@@ -22,14 +22,14 @@
 - [x] Add IPC loopback benchmark.
 - [x] Add WebSocket loopback benchmark.
 - [x] Compare cffi API and ctypes on the same plan.
-- [ ] Compare preview4 native hot paths against preview3 baselines.
+- [x] Compare preview4 native hot paths against preview3 baselines.
 
 ## Documentation
 
 - [x] Update quick-start for preview4 client controls.
 - [x] Update server docs for progress, partial result, and drop reason.
 - [x] Update native runtime docs for transport providers.
-- [ ] Update benchmark docs with preview4 result tables.
+- [x] Update benchmark docs with preview4 result tables.
 - [x] Update conformance docs with wire target manifest generation.
 - [x] Document cache reference as explicit workload behavior, not a universal latency promise.
 

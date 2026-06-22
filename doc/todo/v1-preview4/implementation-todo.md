@@ -9,7 +9,7 @@ Preview4 Python work adapts the SDK to runtime control frames, runtime objects, 
 - [x] [03 - Runtime object and cache references](03-runtime-object-cache-references.md)
 - [x] [04 - Transport provider bindings](04-transport-provider-bindings.md)
 - [x] [05 - Wire conformance integration](05-wire-conformance-integration.md)
-- [ ] [06 - Packaging, benchmarks, and docs](06-packaging-benchmarks-docs.md)
+- [x] [06 - Packaging, benchmarks, and docs](06-packaging-benchmarks-docs.md)
 
 ## Coordination Rules
 

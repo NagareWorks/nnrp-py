@@ -18,7 +18,12 @@ from typing import Any
 
 from nnrp.core.enums import HeaderFlags, MessageType, WireFormat
 from nnrp.core.header import HEADER_LENGTH, NnrpHeader
-from nnrp.core.messages.control import ClientHelloMetadata, ServerHelloAckMetadata, TransportProbeAckMetadata
+from nnrp.core.messages.control import (
+    ClientHelloMetadata,
+    ResultHintMetadata,
+    ServerHelloAckMetadata,
+    TransportProbeAckMetadata,
+)
 from nnrp.core.messages.data import InputProfile, TensorDType, TensorLayout, TileIndexMode
 from nnrp.core.packet import (
     NnrpPacket,
@@ -33,8 +38,9 @@ from nnrp.core.packet import (
     unpack_tile_index_block,
 )
 from nnrp.native import (
+    FFI_STATUS_WOULD_BLOCK,
     NativeArtifactError,
-    NativeOperationLifecycle,
+    NativeStatus,
     NativeWouldBlockError,
     default_artifact_root,
     load_native_client,
@@ -546,6 +552,7 @@ def _run_native_progress_partial_polling_loop(scenario_id: str, workload: dict[s
     )
     _drain_native_setup_events(connection)
     payload = b"x" * payload_bytes
+    result_hint = ResultHintMetadata(retry_after_ms=1).pack()
     counter = 0
 
     def operation() -> None:
@@ -556,8 +563,15 @@ def _run_native_progress_partial_polling_loop(scenario_id: str, workload: dict[s
             frame_id=counter,
             payload=payload,
         )
-        session.send_result_hint(payload)
-        session.poll_result(submitted, state=NativeOperationLifecycle.PARTIAL, max_events=max_events)
+        session.send_result_hint(result_hint)
+        hints = connection.poll_result_hints(max_events=max_events)
+        if not hints:
+            raise NativeWouldBlockError(
+                NativeStatus(FFI_STATUS_WOULD_BLOCK),
+                "native progress/partial polling loop result hint was not available",
+            )
+        if submitted.operation_id != counter:
+            raise RuntimeError("native progress/partial polling loop operation mismatch")
 
     try:
         for _ in range(warmup_iterations):
@@ -1362,7 +1376,8 @@ def _run_native_object_metadata_borrowed_view(scenario_id: str, workload: dict[s
             with buffer.borrow_view() as view:
                 if view.nbytes != payload_bytes:
                     raise RuntimeError("native object metadata borrow benchmark size mismatch")
-                if payload_bytes > 0 and view[0] != payload[0]:
+                byte_view = view.cast("B")
+                if payload_bytes > 0 and byte_view[0] != payload[0]:
                     raise RuntimeError("native object metadata borrow benchmark payload mismatch")
                 if not view.readonly:
                     raise RuntimeError("native object metadata borrow benchmark expected readonly view")

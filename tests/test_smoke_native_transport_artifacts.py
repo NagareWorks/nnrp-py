@@ -90,14 +90,14 @@ def test_smoke_native_transport_artifacts_routes_ipc_and_websocket(monkeypatch: 
         NativeTransportSmokeResult("websocket", 40_200, 40_201, 40_202),
     )
     assert loaded == [(Path("native-root"), "ipc"), (Path("native-root"), "websocket")]
-    assert calls[0] == ("bind", (40_100, 1, _MODULE.TRANSPORT_SLOT_IPC))
+    assert calls[0] == ("bind", (40_100, 1, int(_MODULE.NATIVE_TRANSPORT_ID_BY_NAME["ipc"])))
     assert calls[1] == ("accept", (40_100, 40_101, 1, 2, 0x1001, 1))
     assert calls[2] == ("receive_submit", (40_101, 40_102, 1, b"preview4-native-transport-smoke"))
     assert calls[3] == ("send_result", (40_102, b"preview4-native-transport-smoke"))
     assert calls[4] == ("send_flow_update", (40_101, 1))
     assert calls[5] == ("close_session", 40_101)
     assert calls[6] == ("close_server", 40_100)
-    assert calls[7] == ("bind", (40_200, 1, _MODULE.TRANSPORT_SLOT_WEBSOCKET))
+    assert calls[7] == ("bind", (40_200, 1, int(_MODULE.NATIVE_TRANSPORT_ID_BY_NAME["websocket"])))
 
 
 def test_smoke_native_transport_artifacts_rejects_unknown_transport() -> None:

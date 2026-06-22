@@ -1,3 +1,4 @@
+import ctypes
 import json
 from pathlib import Path
 from types import SimpleNamespace
@@ -557,6 +558,70 @@ def test_build_benchmark_results_report_measures_native_scenarios_when_artifacts
     assert native_probe.calls == [(None, None)] * 5
 
 
+def test_native_progress_partial_loop_skips_when_result_hint_poll_would_block(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    native_client = FakeNativeClient()
+
+    def poll_no_result_hints(*, max_events: int):
+        native_client.connection.polled_batches.append(max_events)
+        return ()
+
+    native_client.connection.poll_result_hints = poll_no_result_hints
+    monkeypatch.setattr(benchmark, "load_native_client", lambda: native_client)
+
+    result = benchmark._run_native_progress_partial_polling_loop(
+        "native.progress",
+        {"duration_seconds": 0.001, "warmup_iterations": 1, "payload_bytes": 8, "max_events": 2},
+    )
+
+    assert result["outcome"] == "skip"
+    assert "result hint was not available" in result["message"]
+    assert native_client.connection.closed is True
+
+
+def test_native_progress_partial_loop_rejects_operation_mismatch(monkeypatch: pytest.MonkeyPatch) -> None:
+    class MismatchedNativeSession(FakeNativeSession):
+        def submit_operation(
+            self,
+            *,
+            operation_id: int,
+            frame_id: int,
+            payload: bytes | bytearray | memoryview = b"",
+        ):
+            super().submit_operation(operation_id=operation_id, frame_id=frame_id, payload=payload)
+            return FakeNativeOperation(self.entrypoints, operation_id + 1, frame_id)
+
+    class MismatchedNativeConnection(FakeNativeConnection):
+        def open_session(
+            self,
+            *,
+            requested_session_id: int,
+            generation: int,
+            profile_id: int,
+            schema_id: int,
+            schema_version: int,
+        ):
+            assert (requested_session_id, generation, profile_id, schema_id, schema_version) == (1, 1, 0, 0, 0)
+            self.opened_session = MismatchedNativeSession(self)
+            return self.opened_session
+
+    class MismatchedNativeClient(FakeNativeClient):
+        def __init__(self) -> None:
+            self.connection = MismatchedNativeConnection()
+
+    native_client = MismatchedNativeClient()
+    monkeypatch.setattr(benchmark, "load_native_client", lambda: native_client)
+
+    with pytest.raises(RuntimeError, match="operation mismatch"):
+        benchmark._run_native_progress_partial_polling_loop(
+            "native.progress",
+            {"duration_seconds": 0.001, "warmup_iterations": 1, "payload_bytes": 8, "max_events": 2},
+        )
+
+    assert native_client.connection.closed is True
+
+
 def test_native_submit_result_cffi_api_loop_measures_when_wrapper_is_available(monkeypatch: pytest.MonkeyPatch) -> None:
     class FakeFFI:
         def from_buffer(self, payload: bytes):
@@ -1040,6 +1105,10 @@ class FakeNativeConnection:
     def poll_events(self):
         return ()
 
+    def poll_result_hints(self, *, max_events: int):
+        self.polled_batches.append(max_events)
+        return (object(),)
+
     def acquire_object_metadata_copy(self, payload: bytes | bytearray | memoryview):
         copied_payload = bytes(payload)
         self.object_metadata_payloads.append(copied_payload)
@@ -1063,7 +1132,7 @@ class FakeNativeObjectMetadataBuffer:
     def borrow_view(self) -> "FakeNativeBorrowedBufferView":
         if self.closed:
             raise RuntimeError("fake native object metadata buffer is closed")
-        return FakeNativeBorrowedBufferView(self)
+        return FakeNativeCtypesBorrowedBufferView(self)
 
     def close(self) -> None:
         if self.borrow_count != 0:
@@ -1081,6 +1150,21 @@ class FakeNativeBorrowedBufferView:
 
     def __exit__(self, exc_type, exc, traceback) -> None:
         self.buffer.borrow_count -= 1
+
+
+class FakeNativeCtypesObjectMetadataBuffer(FakeNativeObjectMetadataBuffer):
+    def borrow_view(self) -> "FakeNativeCtypesBorrowedBufferView":
+        if self.closed:
+            raise RuntimeError("fake native object metadata buffer is closed")
+        return FakeNativeCtypesBorrowedBufferView(self)
+
+
+class FakeNativeCtypesBorrowedBufferView(FakeNativeBorrowedBufferView):
+    def __enter__(self):
+        self.buffer.borrow_count += 1
+        array_type = ctypes.c_ubyte * len(self.buffer.payload)
+        self._owner = array_type.from_buffer_copy(self.buffer.payload)
+        return memoryview(self._owner).toreadonly()
 
 
 class FakeNativeSession:

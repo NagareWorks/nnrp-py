@@ -9,7 +9,7 @@ on:
       ref:
         description: Git ref to release when running manually
         required: true
-        default: develop
+        default: main
       rust_native_version:
         description: nnrp-rs native artifact version to embed in wheels
         required: true

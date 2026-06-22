@@ -3,6 +3,14 @@ from pathlib import Path
 RELEASE_WORKFLOW = Path(__file__).resolve().parents[1] / ".github" / "workflows" / "release.yml"
 
 
+def test_release_workflow_manual_ref_defaults_to_main() -> None:
+    workflow = RELEASE_WORKFLOW.read_text(encoding="utf-8")
+
+    assert "description: Git ref to release when running manually" in workflow
+    assert "default: main" in workflow
+    assert "default: develop" not in workflow
+
+
 def test_release_workflow_pins_preview4_rust_native_artifacts() -> None:
     workflow = RELEASE_WORKFLOW.read_text(encoding="utf-8")
 

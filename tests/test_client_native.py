@@ -535,6 +535,38 @@ def test_native_client_connection_suppresses_cancelled_frame_results() -> None:
         assert session.poll_result_calls == 0
 
 
+def test_native_client_connection_bounds_cancelled_result_suppressions(monkeypatch) -> None:
+    monkeypatch.setattr(client_native_module, "_MAX_CANCELLED_RESULT_SUPPRESSIONS_PER_SESSION", 2)
+    backend = FakeBackend()
+    with connect_native_client_connection(backend=backend) as connection:
+        session = connection.open_session()
+
+        connection.cancel_frame(session, frame_id=1)
+        connection.cancel_frame(session, frame_id=2)
+        connection.cancel_frame(session, frame_id=3)
+        connection.cancel_runtime_operation(session, operation_id=10, control_sequence=1)
+        connection.cancel_runtime_operation(session, operation_id=11, control_sequence=2)
+        connection.cancel_runtime_operation(session, operation_id=12, control_sequence=3)
+
+        assert list(connection._cancelled_frames[session.requested_session_id]) == [2, 3]
+        assert list(connection._cancelled_operations[session.requested_session_id]) == [11, 12]
+
+
+def test_native_client_connection_clears_cancelled_result_suppressions_on_close() -> None:
+    backend = FakeBackend()
+    with connect_native_client_connection(backend=backend) as connection:
+        session = connection.open_session()
+        connection.cancel_frame(session, frame_id=7)
+        connection.cancel_runtime_operation(session, operation_id=100, control_sequence=1)
+
+        assert connection._cancelled_frames
+        assert connection._cancelled_operations
+        connection.close()
+
+        assert connection._cancelled_frames == {}
+        assert connection._cancelled_operations == {}
+
+
 def test_native_client_connection_suppresses_late_result_after_poll() -> None:
     backend = FakeBackend()
     with connect_native_client_connection(backend=backend) as connection:

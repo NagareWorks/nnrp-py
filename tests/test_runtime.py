@@ -587,6 +587,15 @@ def test_runtime_metadata_helpers_reject_invalid_payloads_and_reserved_bits() ->
             object_id=1,
             body_bytes=0,
         ).pack()
+    with pytest.raises(ValueError, match="progress.percent_x100"):
+        ProgressMetadata(
+            operation_id=1,
+            progress_sequence=1,
+            stage_code=1,
+            percent_x100=-1,
+            object_id=1,
+            body_bytes=0,
+        ).pack()
     with pytest.raises(NotImplementedError):
         _FixedRuntimeMetadata().pack()
     with pytest.raises(NotImplementedError):

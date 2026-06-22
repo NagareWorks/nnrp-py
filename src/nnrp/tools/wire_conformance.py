@@ -251,7 +251,7 @@ def main(argv: Sequence[str] | None = None) -> int:
 
 
 def _target_manifest_cli(argv: Sequence[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(prog="nnrp-wire-target-manifest")
+    parser = argparse.ArgumentParser()
     parser.add_argument("--target-name", default=_DEFAULT_TARGET_NAME)
     parser.add_argument("--suite-version", default=_DEFAULT_SUITE_VERSION)
     parser.add_argument("--mode", action="append", dest="modes", required=True)

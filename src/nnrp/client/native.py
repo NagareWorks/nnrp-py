@@ -41,6 +41,8 @@ from nnrp.runtime.types import _FixedRuntimeMetadata
 
 NativeControlTarget = NativeRuntimeConnection | NativeRuntimeSession
 
+_MAX_CANCELLED_RESULT_SUPPRESSIONS_PER_SESSION = 4096
+
 
 @dataclass(frozen=True, slots=True)
 class NativeClientSessionOptions:
@@ -100,8 +102,8 @@ class NativeClientOperationScope:
 class NativeClientConnection:
     connection: NativeRuntimeConnection
     _sessions: list[NativeRuntimeSession] = field(default_factory=list, init=False, repr=False)
-    _cancelled_frames: dict[int, set[int]] = field(default_factory=dict, init=False, repr=False)
-    _cancelled_operations: dict[int, set[int]] = field(default_factory=dict, init=False, repr=False)
+    _cancelled_frames: dict[int, dict[int, None]] = field(default_factory=dict, init=False, repr=False)
+    _cancelled_operations: dict[int, dict[int, None]] = field(default_factory=dict, init=False, repr=False)
     _closed: bool = field(default=False, init=False, repr=False)
 
     def open_session(self, options: NativeClientSessionOpenOptions | None = None) -> NativeRuntimeSession:
@@ -551,11 +553,20 @@ class NativeClientConnection:
         if self._closed:
             return
         if hasattr(self.connection, "close"):
-            self.connection.close()
+            try:
+                self.connection.close()
+            finally:
+                self._cancelled_frames.clear()
+                self._cancelled_operations.clear()
         else:
-            for session in reversed(self._sessions):
-                if not getattr(session, "_closed", False):
-                    session.close()
+            try:
+                for session in reversed(self._sessions):
+                    if not getattr(session, "_closed", False):
+                        session.close()
+            finally:
+                self._cancelled_frames.clear()
+                self._cancelled_operations.clear()
+        self._sessions.clear()
         self._closed = True
 
     def _ensure_open(self) -> None:
@@ -587,7 +598,7 @@ class NativeClientConnection:
             self._remember_cancelled_frame_by_handle(session_id, frame_id)
 
     def _remember_cancelled_frame_by_handle(self, session_id: int, frame_id: int) -> None:
-        self._cancelled_frames.setdefault(session_id, set()).add(int(frame_id))
+        self._remember_cancelled_result_identity(self._cancelled_frames, session_id, frame_id)
 
     def _remember_cancelled_operation(self, session: object, operation_id: int) -> None:
         session_id = self._session_identity(session)
@@ -595,15 +606,26 @@ class NativeClientConnection:
             self._remember_cancelled_operation_by_handle(session_id, operation_id)
 
     def _remember_cancelled_operation_by_handle(self, session_id: int, operation_id: int) -> None:
-        self._cancelled_operations.setdefault(session_id, set()).add(int(operation_id))
+        self._remember_cancelled_result_identity(self._cancelled_operations, session_id, operation_id)
+
+    def _remember_cancelled_result_identity(
+        self,
+        suppressions: dict[int, dict[int, None]],
+        session_id: int,
+        value: int,
+    ) -> None:
+        values = suppressions.setdefault(int(session_id), {})
+        values[int(value)] = None
+        while len(values) > _MAX_CANCELLED_RESULT_SUPPRESSIONS_PER_SESSION:
+            values.pop(next(iter(values)))
 
     def _is_cancelled_result(self, session: object, *, operation_id: int, frame_id: int) -> bool:
         session_id = self._session_identity(session)
         if session_id is None:
             return False
-        return int(frame_id) in self._cancelled_frames.get(session_id, set()) or int(
+        return int(frame_id) in self._cancelled_frames.get(session_id, {}) or int(
             operation_id,
-        ) in self._cancelled_operations.get(session_id, set())
+        ) in self._cancelled_operations.get(session_id, {})
 
     def _send_runtime_control_request(
         self,

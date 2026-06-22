@@ -430,6 +430,17 @@ def test_wire_conformance_main_reads_sys_argv_when_argv_is_omitted(tmp_path, mon
     assert json.loads(output_path.read_text(encoding="utf-8"))["target_name"] == "nnrp-py-local"
 
 
+def test_wire_conformance_manifest_cli_uses_invocation_program_name(monkeypatch, capsys) -> None:
+    monkeypatch.setattr(sys, "argv", ["nnrp-wire-conformance", "manifest"])
+
+    with pytest.raises(SystemExit):
+        main()
+
+    stderr = capsys.readouterr().err
+    assert "nnrp-wire-conformance" in stderr
+    assert "nnrp-wire-target-manifest" not in stderr
+
+
 def test_run_wire_harness_plan_rejects_missing_mode_scenarios(tmp_path) -> None:
     plan_path = tmp_path / "wire-plan.json"
     plan_path.write_text(

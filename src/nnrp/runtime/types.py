@@ -768,7 +768,7 @@ def _require_zero(value: int, field: str) -> None:
 
 
 def _validate_percent_x100(value: int) -> None:
-    if value <= 10_000 or value == 0xFFFF:
+    if 0 <= value <= 10_000 or value == 0xFFFF:
         return
     raise ValueError("progress.percent_x100 must be 0..10000 or 0xffff")
 

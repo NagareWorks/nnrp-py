@@ -100,6 +100,26 @@
       }
     },
     {
+      "id": "l4.native.progress_partial.polling.throughput",
+      "category": "throughput",
+      "feature": "benchmark.native.progress_partial.polling",
+      "required_capabilities": [
+        "session.open_close",
+        "operation.submit",
+        "control.progress_partial",
+        "event.polling.batch"
+      ],
+      "description": "Measure native result-hint control send plus partial-result polling throughput with setup outside the measured loop.",
+      "workload": {
+        "operation": "native_progress_partial_polling_loop",
+        "payload": "inline_payload",
+        "payload_bytes": 1024,
+        "max_events": 2,
+        "warmup_iterations": 1000,
+        "duration_seconds": 10
+      }
+    },
+    {
       "id": "l4.native.event_polling.throughput",
       "category": "throughput",
       "feature": "benchmark.native.event_polling.throughput",

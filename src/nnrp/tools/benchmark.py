@@ -34,6 +34,7 @@ from nnrp.core.packet import (
 )
 from nnrp.native import (
     NativeArtifactError,
+    NativeOperationLifecycle,
     NativeWouldBlockError,
     default_artifact_root,
     load_native_client,
@@ -521,6 +522,57 @@ def _run_native_submit_cancel_loop(scenario_id: str, workload: dict[str, Any]) -
         connection.close()
 
 
+def _run_native_progress_partial_polling_loop(scenario_id: str, workload: dict[str, Any]) -> dict[str, Any]:
+    duration_seconds = _positive_float(workload.get("duration_seconds"), default=10.0)
+    warmup_iterations = _non_negative_int(workload.get("warmup_iterations"), default=1_000)
+    payload_bytes = _positive_int(workload.get("payload_bytes"), default=1024)
+    max_events = _positive_int(workload.get("max_events"), default=2)
+    profile = _bool(workload.get("profile"), default=False)
+    try:
+        connection = load_native_client().connect(
+            connection_id=1,
+            generation=1,
+            transport_id=2,
+        )
+    except NativeArtifactError as error:
+        return _skip_result(scenario_id, f"native client unavailable: {error}")
+
+    session = connection.open_session(
+        requested_session_id=1,
+        generation=1,
+        profile_id=0,
+        schema_id=0,
+        schema_version=0,
+    )
+    _drain_native_setup_events(connection)
+    payload = b"x" * payload_bytes
+    counter = 0
+
+    def operation() -> None:
+        nonlocal counter
+        counter += 1
+        submitted = session.submit_operation(
+            operation_id=counter,
+            frame_id=counter,
+            payload=payload,
+        )
+        session.send_result_hint(payload)
+        session.poll_result(submitted, state=NativeOperationLifecycle.PARTIAL, max_events=max_events)
+
+    try:
+        for _ in range(warmup_iterations):
+            operation()
+
+        metrics = _measure_throughput_metrics(operation, duration_seconds, profile=profile, include_completed=True)
+        _add_native_progress_partial_call_metrics(metrics, int(metrics["completed_operations"]))
+        metrics["native_binding_mode"] = _native_binding_mode(session)
+        return _measured_throughput_result(scenario_id, metrics)
+    except NativeWouldBlockError as error:
+        return _skip_result(scenario_id, f"native progress/partial polling loop unavailable: {error}")
+    finally:
+        connection.close()
+
+
 def _run_native_submit_result_cffi_api_loop(scenario_id: str, workload: dict[str, Any]) -> dict[str, Any]:
     duration_seconds = _positive_float(workload.get("duration_seconds"), default=10.0)
     warmup_iterations = _non_negative_int(workload.get("warmup_iterations"), default=1_000)
@@ -768,6 +820,21 @@ def _add_native_submit_cancel_call_metrics(metrics: dict[str, float | int], comp
     metrics["native_ffi_client_complete_operation_calls_per_op"] = 0.0
     metrics["native_ffi_client_await_event_calls_per_op"] = 0.0
     metrics["native_ffi_client_await_events_calls_per_op"] = 0.0
+    metrics.setdefault("native_binding_mode", "unknown")
+
+
+def _add_native_progress_partial_call_metrics(metrics: dict[str, float | int], completed_operations: int) -> None:
+    if completed_operations <= 0:
+        return
+    metrics["native_ffi_calls_per_op"] = 3.0
+    metrics["native_ffi_client_submit_calls_per_op"] = 1.0
+    metrics["native_ffi_client_send_result_hint_calls_per_op"] = 1.0
+    metrics["native_ffi_client_await_event_calls_per_op"] = 0.0
+    metrics["native_ffi_client_await_events_calls_per_op"] = 1.0
+    metrics["native_ffi_client_submit_result_compact_calls_per_op"] = 0.0
+    metrics["native_ffi_client_submit_result_calls_per_op"] = 0.0
+    metrics["native_ffi_client_complete_operation_calls_per_op"] = 0.0
+    metrics["native_ffi_client_cancel_calls_per_op"] = 0.0
     metrics.setdefault("native_binding_mode", "unknown")
 
 
@@ -1595,6 +1662,7 @@ _SCENARIO_RUNNERS: dict[str, Callable[[str, dict[str, Any]], dict[str, Any]]] = 
     "native_artifact_probe": _run_native_artifact_probe,
     "native_submit_result_loop": _run_native_submit_result_loop,
     "native_submit_cancel_loop": _run_native_submit_cancel_loop,
+    "native_progress_partial_polling_loop": _run_native_progress_partial_polling_loop,
     "native_submit_result_cffi_api_loop": _run_native_submit_result_cffi_api_loop,
     "native_submit_result_allocation_smoke": _run_native_submit_result_allocation_smoke,
     "runtime_probe": _run_runtime_probe,

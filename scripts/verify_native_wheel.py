@@ -47,6 +47,11 @@ class WheelNativeSummary:
     platform_tag: str
     cffi_api_entries: tuple[str, ...] = ()
     transport_scopes: tuple[str, ...] = ()
+    manifest_packages: tuple[str, ...] = ()
+    transport_names: tuple[str, ...] = ()
+    protocol_versions: tuple[str, ...] = ()
+    abi_versions: tuple[str, ...] = ()
+    enabled_features: tuple[str, ...] = ()
 
     @property
     def has_native_artifacts(self) -> bool:
@@ -65,7 +70,7 @@ def inspect_wheel(path: Path) -> WheelNativeSummary:
     platform_tag = _wheel_platform_tag(path)
     with zipfile.ZipFile(path) as archive:
         names = tuple(archive.namelist())
-        transport_scopes = _transport_scopes(archive, names)
+        manifest_metadata = _manifest_metadata(archive, names)
     manifests = tuple(
         name for name in names if name.startswith(NATIVE_ARTIFACT_PREFIX) and name.endswith("/manifest.json")
     )
@@ -85,7 +90,12 @@ def inspect_wheel(path: Path) -> WheelNativeSummary:
         artifact_tags,
         platform_tag,
         cffi_api_entries,
-        transport_scopes,
+        manifest_metadata["transport_scopes"],
+        manifest_metadata["manifest_packages"],
+        manifest_metadata["transport_names"],
+        manifest_metadata["protocol_versions"],
+        manifest_metadata["abi_versions"],
+        manifest_metadata["enabled_features"],
     )
 
 
@@ -106,6 +116,8 @@ def verify_native_wheels(
     require_cffi_api: bool = False,
     require_compiled_cffi_api: bool = False,
     require_split_transports: bool = False,
+    require_preview4_native_artifacts: bool = False,
+    require_abi_version: str | None = None,
 ) -> None:
     summary_list = list(summaries)
     failures = [
@@ -171,7 +183,7 @@ def verify_native_wheels(
         if require_split_transports
         and summary.has_native_artifacts
         and (
-            set(summary.transport_scopes) != {"tcp", "quic"}
+            set(summary.transport_scopes) != {"tcp", "quic", "ipc", "websocket"}
             or any(scope == "all" for scope in summary.transport_scopes)
         )
     ]
@@ -180,7 +192,40 @@ def verify_native_wheels(
             f"{summary.wheel.name} has transport scopes {summary.transport_scopes or ('-',)}"
             for summary in split_transport_failures
         )
-        raise ValueError(f"wheel must embed split TCP and QUIC native transport artifacts: {details}")
+        raise ValueError(f"wheel must embed split TCP, QUIC, IPC, and WebSocket native transport artifacts: {details}")
+
+    preview4_native_failures = [
+        summary
+        for summary in summary_list
+        if require_preview4_native_artifacts
+        and summary.has_native_artifacts
+        and not _has_preview4_native_artifact_shape(summary)
+    ]
+    if preview4_native_failures:
+        details = ", ".join(
+            (
+                f"{summary.wheel.name} packages={summary.manifest_packages or ('-',)} "
+                f"transports={summary.transport_names or ('-',)} "
+                f"features={summary.enabled_features or ('-',)} "
+                f"protocols={summary.protocol_versions or ('-',)}"
+            )
+            for summary in preview4_native_failures
+        )
+        raise ValueError(f"wheel embeds non-preview4 native artifact metadata: {details}")
+
+    abi_mismatches = [
+        summary
+        for summary in summary_list
+        if require_abi_version
+        and summary.has_native_artifacts
+        and set(summary.abi_versions) != {require_abi_version}
+    ]
+    if abi_mismatches:
+        details = ", ".join(
+            f"{summary.wheel.name} abi_versions={summary.abi_versions or ('-',)}"
+            for summary in abi_mismatches
+        )
+        raise ValueError(f"wheel native artifact ABI version mismatch: {details}")
 
 
 def _artifact_tags(names: Iterable[str]) -> set[str]:
@@ -193,8 +238,13 @@ def _artifact_tags(names: Iterable[str]) -> set[str]:
     }
 
 
-def _transport_scopes(archive: zipfile.ZipFile, names: Iterable[str]) -> tuple[str, ...]:
+def _manifest_metadata(archive: zipfile.ZipFile, names: Iterable[str]) -> dict[str, tuple[str, ...]]:
     scopes: set[str] = set()
+    packages: set[str] = set()
+    transport_names: set[str] = set()
+    protocol_versions: set[str] = set()
+    abi_versions: set[str] = set()
+    enabled_features: set[str] = set()
     for name in names:
         if not name.startswith(NATIVE_ARTIFACT_PREFIX) or not name.endswith("/manifest.json"):
             continue
@@ -203,10 +253,32 @@ def _transport_scopes(archive: zipfile.ZipFile, names: Iterable[str]) -> tuple[s
         except json.JSONDecodeError:
             continue
         if isinstance(manifest, dict):
+            package = manifest.get("package")
+            if isinstance(package, str) and package:
+                packages.add(package)
+            transport_name = manifest.get("transport_name")
+            if isinstance(transport_name, str) and transport_name:
+                transport_names.add(transport_name)
+            protocol_version = manifest.get("protocol_version")
+            if isinstance(protocol_version, str) and protocol_version:
+                protocol_versions.add(protocol_version)
+            abi_version = manifest.get("abi_version")
+            if isinstance(abi_version, str) and abi_version:
+                abi_versions.add(abi_version)
             scope = manifest.get("transport_scope")
             if isinstance(scope, str) and scope:
                 scopes.add(scope)
-    return tuple(sorted(scopes))
+            features = manifest.get("enabled_features")
+            if isinstance(features, list):
+                enabled_features.update(feature for feature in features if isinstance(feature, str) and feature)
+    return {
+        "transport_scopes": tuple(sorted(scopes)),
+        "manifest_packages": tuple(sorted(packages)),
+        "transport_names": tuple(sorted(transport_names)),
+        "protocol_versions": tuple(sorted(protocol_versions)),
+        "abi_versions": tuple(sorted(abi_versions)),
+        "enabled_features": tuple(sorted(enabled_features)),
+    }
 
 
 def _wheel_platform_tag(path: Path) -> str:
@@ -226,6 +298,21 @@ def _matches_artifact_platform_tag(summary: WheelNativeSummary) -> bool:
     return expected is not None and expected == summary.platform_tag
 
 
+def _has_preview4_native_artifact_shape(summary: WheelNativeSummary) -> bool:
+    expected_transports = {"tcp", "quic", "ipc", "websocket"}
+    expected_packages = {f"nnrp-ffi-transport-{transport}" for transport in expected_transports}
+    expected_features = {f"transport-{transport}" for transport in expected_transports}
+    return (
+        set(summary.transport_scopes) == expected_transports
+        and set(summary.transport_names) == expected_transports
+        and set(summary.manifest_packages) == expected_packages
+        and set(summary.protocol_versions) == {"NNRP/1"}
+        and expected_features.issubset(summary.enabled_features)
+        and "all" not in summary.transport_scopes
+        and "nnrp-ffi" not in summary.manifest_packages
+    )
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Verify nnrp-py wheel native artifact contents.")
     parser.add_argument("--dist", type=Path, default=Path("dist"))
@@ -236,6 +323,8 @@ def main() -> int:
     parser.add_argument("--require-cffi-api", action="store_true")
     parser.add_argument("--require-compiled-cffi-api", action="store_true")
     parser.add_argument("--require-split-transports", action="store_true")
+    parser.add_argument("--require-preview4-native-artifacts", action="store_true")
+    parser.add_argument("--require-abi-version")
     args = parser.parse_args()
 
     try:
@@ -249,6 +338,8 @@ def main() -> int:
             require_cffi_api=args.require_cffi_api,
             require_compiled_cffi_api=args.require_compiled_cffi_api,
             require_split_transports=args.require_split_transports,
+            require_preview4_native_artifacts=args.require_preview4_native_artifacts,
+            require_abi_version=args.require_abi_version,
         )
     except ValueError as error:
         print(error, file=sys.stderr)
@@ -262,6 +353,8 @@ def main() -> int:
             f"{len(summary.manifests)} manifest(s), {library_count} native {library_label}, "
             f"platform={summary.platform_tag}, artifacts={','.join(summary.artifact_tags) or '-'}, "
             f"transports={','.join(summary.transport_scopes) or '-'}, "
+            f"packages={','.join(summary.manifest_packages) or '-'}, "
+            f"abi={','.join(summary.abi_versions) or '-'}, "
             f"cffi_api={len(summary.cffi_api_entries)}, "
             f"compiled_cffi_api={1 if summary.has_compiled_cffi_api else 0}"
         )

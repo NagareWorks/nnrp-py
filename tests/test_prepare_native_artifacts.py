@@ -40,7 +40,9 @@ def _write_package(
                 "library": library,
                 "libraries": [library],
                 "transport_scope": transport_scope,
-                "transport_slots": [transport_scope] if transport_scope != "all" else ["tcp", "quic"],
+                "transport_slots": (
+                    [transport_scope] if transport_scope != "all" else ["tcp", "quic", "ipc", "websocket"]
+                ),
             }
         ),
         encoding="utf-8",
@@ -86,12 +88,30 @@ def test_prepare_native_artifacts_keeps_split_transport_artifacts_side_by_side(t
         library="libnnrp_ffi.so",
         transport_scope="quic",
     )
+    ipc_package = _write_package(
+        tmp_path,
+        "ipc-linux-x86_64",
+        os_name="linux",
+        arch="x86_64",
+        library="libnnrp_ffi.so",
+        transport_scope="ipc",
+    )
+    websocket_package = _write_package(
+        tmp_path,
+        "websocket-linux-x86_64",
+        os_name="linux",
+        arch="x86_64",
+        library="libnnrp_ffi.so",
+        transport_scope="websocket",
+    )
     output = tmp_path / "out"
 
-    prepare_native_artifacts([tcp_package, quic_package], output)
+    prepare_native_artifacts([tcp_package, quic_package, ipc_package, websocket_package], output)
 
     assert output.joinpath("linux-x86_64", "tcp", "libnnrp_ffi.so").read_bytes() == b"native"
     assert output.joinpath("linux-x86_64", "quic", "libnnrp_ffi.so").read_bytes() == b"native"
+    assert output.joinpath("linux-x86_64", "ipc", "libnnrp_ffi.so").read_bytes() == b"native"
+    assert output.joinpath("linux-x86_64", "websocket", "libnnrp_ffi.so").read_bytes() == b"native"
 
 
 def test_prepare_native_artifacts_normalizes_ios_simulator_arch(tmp_path: Path) -> None:

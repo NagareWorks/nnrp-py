@@ -5,13 +5,17 @@ from __future__ import annotations
 import asyncio
 import ctypes
 import importlib
+import json
 import os
 import platform
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator, Callable, Mapping
 from dataclasses import dataclass, field
-from enum import StrEnum
+from enum import IntFlag, StrEnum
 from pathlib import Path
 from typing import Any, Protocol, TypeVar, runtime_checkable
+from urllib.parse import SplitResult, urlsplit
+
+from nnrp.core.messages.control import TransportId, TransportPolicy
 
 EXPECTED_PROTOCOL_MAJOR = 1
 EXPECTED_PROTOCOL_WIRE_FORMAT = 0
@@ -19,6 +23,31 @@ EXPECTED_ABI_MAJOR = 1
 MINIMUM_ABI_MINOR = 4
 TRANSPORT_SLOT_QUIC = 0x00000001
 TRANSPORT_SLOT_TCP = 0x00000002
+TRANSPORT_SLOT_IPC = 0x00000004
+TRANSPORT_SLOT_WEBSOCKET = 0x00000008
+NATIVE_TRANSPORT_SCOPES = ("tcp", "quic", "ipc", "websocket")
+NATIVE_TRANSPORT_SLOT_BY_NAME = {
+    "quic": TRANSPORT_SLOT_QUIC,
+    "tcp": TRANSPORT_SLOT_TCP,
+    "ipc": TRANSPORT_SLOT_IPC,
+    "websocket": TRANSPORT_SLOT_WEBSOCKET,
+}
+NATIVE_TRANSPORT_ID_BY_NAME = {
+    "quic": TransportId.QUIC,
+    "tcp": TransportId.TCP,
+    "ipc": TransportId.IPC,
+    "websocket": TransportId.WEBSOCKET,
+}
+NATIVE_TRANSPORT_NAME_BY_ID = {transport_id: name for name, transport_id in NATIVE_TRANSPORT_ID_BY_NAME.items()}
+NATIVE_ENDPOINT_TRANSPORT_BY_SCHEME = {
+    "tcp": "tcp",
+    "quic": "quic",
+    "quic+tls": "quic",
+    "unix": "ipc",
+    "npipe": "ipc",
+    "ws": "websocket",
+    "wss": "websocket",
+}
 RUNTIME_FEATURE_PROTOCOL_CORE = 0x0000000000000001
 RUNTIME_FEATURE_CLIENT_API = 0x0000000000000002
 RUNTIME_FEATURE_SERVER_API = 0x0000000000000004
@@ -36,6 +65,64 @@ RUNTIME_FEATURE_EXECUTABLE_RESUME = 0x0000000000002000
 RUNTIME_FEATURE_CLIENT_COMPLETION_HELPERS = 0x0000000000004000
 RUNTIME_FEATURE_CLIENT_COARSE_RESULT_HELPERS = 0x0000000000008000
 RUNTIME_FEATURE_CLIENT_COMPACT_RESULT_HELPERS = 0x0000000000010000
+
+
+class NativeRuntimeFeatureFlag(IntFlag):
+    PROTOCOL_CORE = RUNTIME_FEATURE_PROTOCOL_CORE
+    CLIENT_API = RUNTIME_FEATURE_CLIENT_API
+    SERVER_API = RUNTIME_FEATURE_SERVER_API
+    EVENT_POLLING = RUNTIME_FEATURE_EVENT_POLLING
+    CALLBACK_DISPATCH = RUNTIME_FEATURE_CALLBACK_DISPATCH
+    CACHE_SCHEMA = RUNTIME_FEATURE_CACHE_SCHEMA
+    RECOVERY = RUNTIME_FEATURE_RECOVERY
+    TYPED_PAYLOAD = RUNTIME_FEATURE_TYPED_PAYLOAD
+    TRANSPORT_SLOTS = RUNTIME_FEATURE_TRANSPORT_SLOTS
+    BATCH_POLLING = RUNTIME_FEATURE_BATCH_POLLING
+    CACHE_LEASE_OPS = RUNTIME_FEATURE_CACHE_LEASE_OPS
+    SCHEMA_REGISTRY_HANDLES = RUNTIME_FEATURE_SCHEMA_REGISTRY_HANDLES
+    BUFFER_HANDLES = RUNTIME_FEATURE_BUFFER_HANDLES
+    EXECUTABLE_RESUME = RUNTIME_FEATURE_EXECUTABLE_RESUME
+    CLIENT_COMPLETION_HELPERS = RUNTIME_FEATURE_CLIENT_COMPLETION_HELPERS
+    CLIENT_COARSE_RESULT_HELPERS = RUNTIME_FEATURE_CLIENT_COARSE_RESULT_HELPERS
+    CLIENT_COMPACT_RESULT_HELPERS = RUNTIME_FEATURE_CLIENT_COMPACT_RESULT_HELPERS
+
+
+RUNTIME_CONTROL_FEATURE_FLAGS = (
+    NativeRuntimeFeatureFlag.CLIENT_API
+    | NativeRuntimeFeatureFlag.SERVER_API
+    | NativeRuntimeFeatureFlag.EVENT_POLLING
+    | NativeRuntimeFeatureFlag.CALLBACK_DISPATCH
+    | NativeRuntimeFeatureFlag.BATCH_POLLING
+    | NativeRuntimeFeatureFlag.CLIENT_COMPLETION_HELPERS
+    | NativeRuntimeFeatureFlag.CLIENT_COARSE_RESULT_HELPERS
+    | NativeRuntimeFeatureFlag.CLIENT_COMPACT_RESULT_HELPERS
+)
+RUNTIME_OBJECT_FEATURE_FLAGS = (
+    NativeRuntimeFeatureFlag.CACHE_SCHEMA
+    | NativeRuntimeFeatureFlag.TYPED_PAYLOAD
+    | NativeRuntimeFeatureFlag.CACHE_LEASE_OPS
+    | NativeRuntimeFeatureFlag.SCHEMA_REGISTRY_HANDLES
+    | NativeRuntimeFeatureFlag.BUFFER_HANDLES
+)
+_RUNTIME_FEATURE_FLAG_NAMES = {
+    NativeRuntimeFeatureFlag.PROTOCOL_CORE: "protocol_core",
+    NativeRuntimeFeatureFlag.CLIENT_API: "client_api",
+    NativeRuntimeFeatureFlag.SERVER_API: "server_api",
+    NativeRuntimeFeatureFlag.EVENT_POLLING: "event_polling",
+    NativeRuntimeFeatureFlag.CALLBACK_DISPATCH: "callback_dispatch",
+    NativeRuntimeFeatureFlag.CACHE_SCHEMA: "cache_schema",
+    NativeRuntimeFeatureFlag.RECOVERY: "recovery",
+    NativeRuntimeFeatureFlag.TYPED_PAYLOAD: "typed_payload",
+    NativeRuntimeFeatureFlag.TRANSPORT_SLOTS: "transport_slots",
+    NativeRuntimeFeatureFlag.BATCH_POLLING: "batch_polling",
+    NativeRuntimeFeatureFlag.CACHE_LEASE_OPS: "cache_lease_ops",
+    NativeRuntimeFeatureFlag.SCHEMA_REGISTRY_HANDLES: "schema_registry_handles",
+    NativeRuntimeFeatureFlag.BUFFER_HANDLES: "buffer_handles",
+    NativeRuntimeFeatureFlag.EXECUTABLE_RESUME: "executable_resume",
+    NativeRuntimeFeatureFlag.CLIENT_COMPLETION_HELPERS: "client_completion_helpers",
+    NativeRuntimeFeatureFlag.CLIENT_COARSE_RESULT_HELPERS: "client_coarse_result_helpers",
+    NativeRuntimeFeatureFlag.CLIENT_COMPACT_RESULT_HELPERS: "client_compact_result_helpers",
+}
 SCHEMA_REGISTRY_ACTION_INSTALLED = 0
 SCHEMA_REGISTRY_ACTION_ALREADY_INSTALLED = 1
 SCHEMA_REGISTRY_ACTION_UPDATED = 2
@@ -120,6 +207,8 @@ HANDLE_KIND_EVENT_PUMP = 4
 HANDLE_KIND_BUFFER = 5
 HANDLE_KIND_SCHEMA_REGISTRY = 6
 HANDLE_KIND_CACHE_LEASE = 7
+HANDLE_KIND_OBJECT_DESCRIPTOR = 8
+HANDLE_KIND_CACHE_REFERENCE_DESCRIPTOR = 9
 EVENT_KIND_NONE = 0
 EVENT_KIND_CONNECTION_OPENED = 1
 EVENT_KIND_SESSION_OPENED = 2
@@ -167,6 +256,139 @@ class NativeProbeResult:
     sdk_revision: int
     transport_slots: int
     feature_flags: int
+
+    @property
+    def feature_flag_names(self) -> tuple[str, ...]:
+        return native_runtime_feature_flag_names(self.feature_flags)
+
+    @property
+    def runtime_control_feature_names(self) -> tuple[str, ...]:
+        return native_runtime_feature_flag_names(self.feature_flags, mask=RUNTIME_CONTROL_FEATURE_FLAGS)
+
+    @property
+    def runtime_object_feature_names(self) -> tuple[str, ...]:
+        return native_runtime_feature_flag_names(self.feature_flags, mask=RUNTIME_OBJECT_FEATURE_FLAGS)
+
+    @property
+    def has_runtime_control_features(self) -> bool:
+        return native_runtime_feature_flags_available(self.feature_flags, RUNTIME_CONTROL_FEATURE_FLAGS)
+
+    @property
+    def has_runtime_object_features(self) -> bool:
+        return native_runtime_feature_flags_available(self.feature_flags, RUNTIME_OBJECT_FEATURE_FLAGS)
+
+
+@dataclass(frozen=True)
+class NativeTransportProvider:
+    name: str
+    artifact_path: Path
+    manifest_path: Path | None
+    transport_slots: tuple[str, ...]
+    enabled_features: tuple[str, ...]
+    package: str | None = None
+    transport_scope: str | None = None
+    platform_tag: str | None = None
+    cost: Mapping[str, Any] | None = None
+    preference: Mapping[str, Any] | None = None
+    limitations: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class NnrpEndpoint:
+    uri: str
+    scheme: str
+    authority: str
+    path: str
+    query: str
+    secure: bool = False
+
+    @classmethod
+    def from_uri(cls, uri: str) -> NnrpEndpoint:
+        return parse_nnrp_endpoint(uri)
+
+
+@dataclass(frozen=True)
+class NnrpEndpointSupport:
+    endpoint: NnrpEndpoint
+    selection: NativeTransportSelection | None
+    available: bool
+    skip_reason: str | None = None
+    diagnostic: str | None = None
+
+
+@dataclass(frozen=True)
+class NativeTransportEndpoint:
+    uri: str
+    scheme: str
+    transport_name: str
+    transport_id: TransportId
+    address: str
+    secure: bool = False
+
+    @classmethod
+    def from_uri(cls, uri: str) -> NativeTransportEndpoint:
+        return parse_native_transport_endpoint(uri)
+
+
+@dataclass(frozen=True)
+class NativeTransportEndpointSupport:
+    endpoint: NativeTransportEndpoint
+    provider: NativeTransportProvider | None
+    available: bool
+    skip_reason: str | None = None
+    diagnostic: str | None = None
+
+
+@dataclass(frozen=True)
+class NativeTransportProbeSample:
+    provider_name: str
+    transport_name: str
+    elapsed_us: int
+    rtt_us: int | None = None
+    bytes_sent: int = 0
+    bytes_received: int = 0
+    timed_out: bool = False
+    failed: bool = False
+
+
+@dataclass(frozen=True)
+class NativeTransportProbeScore:
+    sample_count: int
+    failure_count: int
+    failure_rate: float
+    median_rtt_us: int
+    throughput_bytes_per_sec: int
+    score: float
+
+
+@dataclass(frozen=True)
+class NativeTransportProbeCandidate:
+    provider: NativeTransportProvider
+    transport_name: str
+    transport_id: TransportId
+    probe_score: NativeTransportProbeScore
+
+
+@dataclass(frozen=True)
+class NativeTransportRejection:
+    provider_name: str
+    transport_name: str
+    transport_id: TransportId
+    reason: str
+    diagnostic: str | None = None
+
+
+@dataclass(frozen=True)
+class NativeTransportSelection:
+    selected_provider: NativeTransportProvider
+    selected_transport_name: str
+    selected_transport_id: TransportId
+    policy: TransportPolicy
+    available_providers: tuple[NativeTransportProvider, ...]
+    rejected: tuple[NativeTransportRejection, ...] = ()
+    probe_candidates: tuple[NativeTransportProbeCandidate, ...] = ()
+    selected_probe_score: NativeTransportProbeScore | None = None
+    diagnostic: str | None = None
 
 
 class NativeHandleError(ValueError):
@@ -447,6 +669,21 @@ class NativeCacheLeaseHandle:
 
 
 @dataclass(frozen=True)
+class NativeObjectDescriptorHandle:
+    handle: NativeHandle
+
+    def __post_init__(self) -> None:
+        self.handle.require_kind(HANDLE_KIND_OBJECT_DESCRIPTOR)
+
+    @classmethod
+    def from_ffi(cls, handle: _NnrpHandle) -> NativeObjectDescriptorHandle:
+        return cls(NativeHandle.from_ffi(handle))
+
+    def to_ffi(self) -> _NnrpHandle:
+        return self.handle.to_ffi()
+
+
+@dataclass(frozen=True)
 class NativeBufferView:
     ptr: int
     length: int
@@ -484,6 +721,34 @@ class NativeMutableBufferView:
 
     def to_ffi(self) -> _NnrpBufferViewMut:
         return _NnrpBufferViewMut(_void_pointer(self.ptr), self.length)
+
+
+@dataclass
+class NativeBorrowedBufferView:
+    owner: Any
+    view: NativeBufferView
+    _active: bool = field(default=False, init=False, repr=False, compare=False)
+
+    def __enter__(self) -> memoryview:
+        if self._active:
+            raise NativeInvalidStateError(
+                NativeStatus(FFI_STATUS_INVALID_STATE),
+                "native borrowed buffer view is already active",
+            )
+        self.owner._ensure_open()
+        self.owner._borrow_count += 1
+        self._active = True
+        try:
+            return _borrow_buffer_view(self.view)
+        except Exception:
+            self._active = False
+            self.owner._borrow_count -= 1
+            raise
+
+    def __exit__(self, exc_type: object, exc: object, traceback: object) -> None:
+        if self._active:
+            self._active = False
+            self.owner._borrow_count -= 1
 
 
 class _NnrpProtocolVersion(ctypes.Structure):
@@ -669,6 +934,22 @@ class _NnrpClientSubmitResultRequest(ctypes.Structure):
         ("submit_payload", _NnrpBufferView),
         ("result_payload", _NnrpBufferView),
         ("max_events", ctypes.c_size_t),
+    ]
+
+
+class _NnrpRuntimeObjectDescriptor(ctypes.Structure):
+    _fields_ = [
+        ("object_id", ctypes.c_uint64),
+        ("object_kind", ctypes.c_uint16),
+        ("producer_role", ctypes.c_uint8),
+        ("consumer_role", ctypes.c_uint8),
+        ("session_id", ctypes.c_uint32),
+        ("byte_size", ctypes.c_uint64),
+        ("compute_cost_units", ctypes.c_uint32),
+        ("memory_location_hint", ctypes.c_uint16),
+        ("ownership_hint", ctypes.c_uint16),
+        ("lifetime_hint_ms", ctypes.c_uint32),
+        ("metadata_bytes", ctypes.c_uint32),
     ]
 
 
@@ -1034,6 +1315,42 @@ class NativeRuntimeEntrypoints:
             [_NnrpHandle, ctypes.POINTER(_NnrpBufferView)],
         )
         self.buffer_release = _bind_native_function(library, "nnrp_buffer_release", _NnrpFfiStatus, [_NnrpHandle])
+        self.object_metadata_buffer_acquire_copy = _bind_native_function(
+            library,
+            "nnrp_object_metadata_buffer_acquire_copy",
+            _NnrpFfiStatus,
+            [_NnrpBufferView, ctypes.POINTER(_NnrpHandle), ctypes.POINTER(_NnrpBufferView)],
+        )
+        self.object_metadata_buffer_view = _bind_native_function(
+            library,
+            "nnrp_object_metadata_buffer_view",
+            _NnrpFfiStatus,
+            [_NnrpHandle, ctypes.POINTER(_NnrpBufferView)],
+        )
+        self.object_metadata_buffer_release = _bind_native_function(
+            library, "nnrp_object_metadata_buffer_release", _NnrpFfiStatus, [_NnrpHandle]
+        )
+        self.object_descriptor_create = _bind_native_function(
+            library,
+            "nnrp_object_descriptor_create",
+            _NnrpFfiStatus,
+            [_NnrpRuntimeObjectDescriptor, _NnrpBufferView, ctypes.POINTER(_NnrpHandle)],
+        )
+        self.object_descriptor_view = _bind_native_function(
+            library,
+            "nnrp_object_descriptor_view",
+            _NnrpFfiStatus,
+            [_NnrpHandle, ctypes.POINTER(_NnrpRuntimeObjectDescriptor), ctypes.POINTER(_NnrpBufferView)],
+        )
+        self.object_descriptor_metadata_snapshot = _bind_native_function(
+            library,
+            "nnrp_object_descriptor_metadata_snapshot",
+            _NnrpFfiStatus,
+            [_NnrpHandle, ctypes.POINTER(_NnrpHandle), ctypes.POINTER(_NnrpBufferView)],
+        )
+        self.object_descriptor_release = _bind_native_function(
+            library, "nnrp_object_descriptor_release", _NnrpFfiStatus, [_NnrpHandle]
+        )
         self.cache_query = _bind_native_function(
             library,
             "nnrp_cache_query",
@@ -1266,6 +1583,7 @@ class NativeOwnedBuffer:
     handle: NativeBufferHandle
     view: NativeBufferView
     _released: bool = field(default=False, init=False, repr=False, compare=False)
+    _borrow_count: int = field(default=0, init=False, repr=False, compare=False)
 
     @classmethod
     def acquire_copy(
@@ -1294,8 +1612,17 @@ class NativeOwnedBuffer:
         raise_for_native_status(status)
         return _copy_buffer_view(out_view)
 
+    def borrow_view(self) -> NativeBorrowedBufferView:
+        self._ensure_open()
+        return NativeBorrowedBufferView(self, self.refresh_view())
+
     def close(self) -> None:
         self._ensure_open()
+        if self._borrow_count:
+            raise NativeInvalidStateError(
+                NativeStatus(FFI_STATUS_INVALID_STATE),
+                "native buffer has active borrowed views",
+            )
         status = self.entrypoints.buffer_release(self.handle.to_ffi())
         raise_for_native_status(status)
         self._released = True
@@ -1303,6 +1630,146 @@ class NativeOwnedBuffer:
     def _ensure_open(self) -> None:
         if self._released:
             raise NativeInvalidStateError(NativeStatus(FFI_STATUS_INVALID_STATE), "native buffer is released")
+
+
+@dataclass
+class NativeObjectMetadataBuffer:
+    entrypoints: NativeRuntimeEntrypoints
+    handle: NativeBufferHandle
+    view: NativeBufferView
+    _released: bool = field(default=False, init=False, repr=False, compare=False)
+    _borrow_count: int = field(default=0, init=False, repr=False, compare=False)
+
+    @classmethod
+    def acquire_copy(
+        cls, entrypoints: NativeRuntimeEntrypoints, payload: bytes | bytearray | memoryview
+    ) -> NativeObjectMetadataBuffer:
+        source, _owner = _buffer_view_from_payload(payload)
+        out_buffer = _NnrpHandle()
+        out_view = _NnrpBufferView()
+        status = entrypoints.object_metadata_buffer_acquire_copy(
+            source,
+            ctypes.byref(out_buffer),
+            ctypes.byref(out_view),
+        )
+        raise_for_native_status(status)
+        return cls(entrypoints, NativeBufferHandle.from_ffi(out_buffer), NativeBufferView.from_ffi(out_view))
+
+    def refresh_view(self) -> NativeBufferView:
+        self._ensure_open()
+        out_view = _NnrpBufferView()
+        status = self.entrypoints.object_metadata_buffer_view(self.handle.to_ffi(), ctypes.byref(out_view))
+        raise_for_native_status(status)
+        view = NativeBufferView.from_ffi(out_view)
+        self.view = view
+        return view
+
+    def to_bytes(self) -> bytes:
+        self._ensure_open()
+        out_view = _NnrpBufferView()
+        status = self.entrypoints.object_metadata_buffer_view(self.handle.to_ffi(), ctypes.byref(out_view))
+        raise_for_native_status(status)
+        return _copy_buffer_view(out_view)
+
+    def borrow_view(self) -> NativeBorrowedBufferView:
+        self._ensure_open()
+        return NativeBorrowedBufferView(self, self.refresh_view())
+
+    def close(self) -> None:
+        self._ensure_open()
+        if self._borrow_count:
+            raise NativeInvalidStateError(
+                NativeStatus(FFI_STATUS_INVALID_STATE),
+                "native object metadata buffer has active borrowed views",
+            )
+        status = self.entrypoints.object_metadata_buffer_release(self.handle.to_ffi())
+        raise_for_native_status(status)
+        self._released = True
+
+    def _ensure_open(self) -> None:
+        if self._released:
+            raise NativeInvalidStateError(
+                NativeStatus(FFI_STATUS_INVALID_STATE),
+                "native object metadata buffer is released",
+            )
+
+
+@dataclass
+class NativeObjectDescriptor:
+    entrypoints: NativeRuntimeEntrypoints
+    handle: NativeObjectDescriptorHandle
+    descriptor: Any
+    metadata_view: NativeBufferView
+    _released: bool = field(default=False, init=False, repr=False, compare=False)
+
+    @classmethod
+    def create(
+        cls,
+        entrypoints: NativeRuntimeEntrypoints,
+        descriptor: Any,
+        metadata: bytes | bytearray | memoryview = b"",
+    ) -> NativeObjectDescriptor:
+        metadata_view, _owner = _buffer_view_from_payload(metadata)
+        out_handle = _NnrpHandle()
+        status = entrypoints.object_descriptor_create(
+            _runtime_object_descriptor_to_ffi(descriptor),
+            metadata_view,
+            ctypes.byref(out_handle),
+        )
+        raise_for_native_status(status)
+        native_descriptor = cls(
+            entrypoints,
+            NativeObjectDescriptorHandle.from_ffi(out_handle),
+            descriptor,
+            NativeBufferView.empty(),
+        )
+        native_descriptor.refresh_view()
+        return native_descriptor
+
+    def refresh_view(self) -> tuple[Any, NativeBufferView]:
+        self._ensure_open()
+        out_descriptor = _NnrpRuntimeObjectDescriptor()
+        out_metadata = _NnrpBufferView()
+        status = self.entrypoints.object_descriptor_view(
+            self.handle.to_ffi(),
+            ctypes.byref(out_descriptor),
+            ctypes.byref(out_metadata),
+        )
+        raise_for_native_status(status)
+        descriptor = _runtime_object_descriptor_from_ffi(out_descriptor)
+        metadata_view = NativeBufferView.from_ffi(out_metadata)
+        self.descriptor = descriptor
+        self.metadata_view = metadata_view
+        return descriptor, metadata_view
+
+    def metadata_snapshot(self) -> NativeObjectMetadataBuffer:
+        self._ensure_open()
+        out_buffer = _NnrpHandle()
+        out_view = _NnrpBufferView()
+        status = self.entrypoints.object_descriptor_metadata_snapshot(
+            self.handle.to_ffi(),
+            ctypes.byref(out_buffer),
+            ctypes.byref(out_view),
+        )
+        raise_for_native_status(status)
+        return NativeObjectMetadataBuffer(
+            self.entrypoints,
+            NativeBufferHandle.from_ffi(out_buffer),
+            NativeBufferView.from_ffi(out_view),
+        )
+
+    def close(self) -> None:
+        self._ensure_open()
+        status = self.entrypoints.object_descriptor_release(self.handle.to_ffi())
+        raise_for_native_status(status)
+        self._released = True
+
+    def _ensure_open(self) -> None:
+        if self._released:
+            raise NativeInvalidStateError(
+                NativeStatus(FFI_STATUS_INVALID_STATE),
+                "native object descriptor is released",
+            )
 
 
 @dataclass(frozen=True)
@@ -2242,6 +2709,57 @@ class NativeRuntimeClient:
         raise_for_native_status(status)
         return NativeRuntimeConnection(self.entrypoints, NativeConnectionHandle.from_ffi(out_connection))
 
+    def bind_server(self, *, server_id: int, generation: int, transport_id: int) -> NativeRuntimeServer:
+        request = _NnrpServerBindRequest(server_id, generation, transport_id)
+        out_server = _NnrpHandle()
+        status = self.entrypoints.server_bind(request, ctypes.byref(out_server))
+        raise_for_native_status(status)
+        return NativeRuntimeServer(self.entrypoints, NativeConnectionHandle.from_ffi(out_server))
+
+
+@dataclass(frozen=True)
+class NativeRuntimeServer:
+    entrypoints: NativeRuntimeEntrypoints
+    handle: NativeConnectionHandle
+    _closed: bool = field(default=False, init=False, repr=False, compare=False)
+
+    def accept_session(
+        self,
+        *,
+        session_id: int,
+        generation: int,
+        profile_id: int,
+        schema_id: int,
+        schema_version: int,
+    ) -> NativeRuntimeServerSession:
+        self._ensure_open()
+        request = _NnrpServerAcceptRequest(
+            self.handle.to_ffi(),
+            session_id,
+            generation,
+            profile_id,
+            schema_id,
+            schema_version,
+        )
+        out_session = _NnrpHandle()
+        status = self.entrypoints.server_accept(request, ctypes.byref(out_session))
+        raise_for_native_status(status)
+        return NativeRuntimeServerSession(
+            self.entrypoints,
+            self.handle,
+            NativeSessionHandle.from_ffi(out_session),
+        )
+
+    def close(self) -> None:
+        self._ensure_open()
+        status = self.entrypoints.client_close_connection(self.handle.to_ffi())
+        raise_for_native_status(status)
+        object.__setattr__(self, "_closed", True)
+
+    def _ensure_open(self) -> None:
+        if self._closed:
+            raise NativeInvalidStateError(NativeStatus(FFI_STATUS_INVALID_STATE), "native runtime server is closed")
+
 
 @dataclass(frozen=True)
 class NativeRuntimeConnection:
@@ -2322,6 +2840,45 @@ class NativeRuntimeConnection:
     def acquire_buffer_copy(self, payload: bytes | bytearray | memoryview) -> NativeOwnedBuffer:
         self._ensure_open()
         return NativeOwnedBuffer.acquire_copy(self.entrypoints, payload)
+
+    def acquire_object_metadata_copy(self, payload: bytes | bytearray | memoryview) -> NativeObjectMetadataBuffer:
+        self._ensure_open()
+        return NativeObjectMetadataBuffer.acquire_copy(self.entrypoints, payload)
+
+    def acquire_object_patch_metadata_copy(
+        self,
+        metadata: Any,
+        *,
+        metadata_tail: bytes | bytearray | memoryview = b"",
+        delta: bytes | bytearray | memoryview = b"",
+    ) -> NativeObjectMetadataBuffer:
+        from nnrp.runtime import patch_runtime_object
+
+        return self.acquire_object_metadata_copy(
+            patch_runtime_object(metadata, metadata_tail=metadata_tail, delta=delta)
+        )
+
+    def acquire_object_delta_metadata_copy(
+        self,
+        metadata: Any,
+        *,
+        metadata_tail: bytes | bytearray | memoryview = b"",
+        delta: bytes | bytearray | memoryview = b"",
+    ) -> NativeObjectMetadataBuffer:
+        from nnrp.runtime import delta_runtime_object
+
+        return self.acquire_object_metadata_copy(
+            delta_runtime_object(metadata, metadata_tail=metadata_tail, delta=delta)
+        )
+
+    def create_object_descriptor(
+        self,
+        descriptor: Any,
+        *,
+        metadata: bytes | bytearray | memoryview = b"",
+    ) -> NativeObjectDescriptor:
+        self._ensure_open()
+        return NativeObjectDescriptor.create(self.entrypoints, descriptor, metadata)
 
     def cache_backend(self, *, now_ms: int = 0, ttl_ms: int = 0, expected_version: int = 0) -> NativeCacheLeaseBackend:
         return NativeCacheLeaseBackend(
@@ -3087,6 +3644,76 @@ class NativeRuntimeSession:
             raise NativeInvalidStateError(NativeStatus(FFI_STATUS_INVALID_STATE), "native runtime session is closed")
 
 
+@dataclass(frozen=True)
+class NativeRuntimeServerOperation:
+    entrypoints: NativeRuntimeEntrypoints
+    session: NativeSessionHandle
+    handle: NativeOperationHandle
+    operation_id: int
+    frame_id: int
+
+    def send_result(self, payload: bytes | bytearray | memoryview = b"") -> None:
+        payload_view, _payload_owner = _buffer_view_from_payload(payload)
+        request = _NnrpServerSendResultRequest(self.handle.to_ffi(), payload_view)
+        status = self.entrypoints.server_send_result(request)
+        raise_for_native_status(status)
+
+
+@dataclass(frozen=True)
+class NativeRuntimeServerSession:
+    entrypoints: NativeRuntimeEntrypoints
+    server: NativeConnectionHandle
+    handle: NativeSessionHandle
+    _closed: bool = field(default=False, init=False, repr=False, compare=False)
+
+    def receive_submit(
+        self,
+        *,
+        operation_id: int,
+        frame_id: int,
+        payload: bytes | bytearray | memoryview = b"",
+    ) -> NativeRuntimeServerOperation:
+        self._ensure_open()
+        payload_view, _payload_owner = _buffer_view_from_payload(payload)
+        request = _NnrpServerReceiveSubmitRequest(self.handle.to_ffi(), operation_id, frame_id, payload_view)
+        out_operation = _NnrpHandle()
+        status = self.entrypoints.server_receive_submit(request, ctypes.byref(out_operation))
+        raise_for_native_status(status)
+        return NativeRuntimeServerOperation(
+            self.entrypoints,
+            self.handle,
+            NativeOperationHandle.from_ffi(out_operation),
+            operation_id,
+            frame_id,
+        )
+
+    def send_flow_update(self, *, frame_id: int) -> None:
+        self._ensure_open()
+        request = _NnrpServerFlowUpdateRequest(self.handle.to_ffi(), frame_id)
+        status = self.entrypoints.server_send_flow_update(request)
+        raise_for_native_status(status)
+
+    def control(self, *, control_code: int, payload: bytes | bytearray | memoryview = b"") -> None:
+        self._ensure_open()
+        payload_view, _payload_owner = _buffer_view_from_payload(payload)
+        request = _NnrpControlRequest(self.handle.to_ffi(), control_code, payload_view)
+        status = self.entrypoints.control(request)
+        raise_for_native_status(status)
+
+    def close(self) -> None:
+        self._ensure_open()
+        status = self.entrypoints.server_close(self.handle.to_ffi())
+        raise_for_native_status(status)
+        object.__setattr__(self, "_closed", True)
+
+    def _ensure_open(self) -> None:
+        if self._closed:
+            raise NativeInvalidStateError(
+                NativeStatus(FFI_STATUS_INVALID_STATE),
+                "native runtime server session is closed",
+            )
+
+
 def _event_matches_operation(event: NativeRuntimeEvent, operation: NativeRuntimeOperation) -> bool:
     if event.session != operation.session.handle:
         return False
@@ -3173,7 +3800,7 @@ def resolve_native_artifact(
     if transport is not None:
         candidate_dirs = [platform_dir / _normalize_native_transport_scope(transport)]
     else:
-        candidate_dirs = [platform_dir, platform_dir / "tcp", platform_dir / "quic"]
+        candidate_dirs = [platform_dir, *(platform_dir / scope for scope in NATIVE_TRANSPORT_SCOPES)]
 
     for candidate_dir in candidate_dirs:
         artifact_path = candidate_dir / library_name
@@ -3186,11 +3813,473 @@ def resolve_native_artifact(
 
 def _normalize_native_transport_scope(value: str) -> str:
     normalized = value.strip().lower().replace("_", "-")
-    if normalized in {"tcp", "quic"}:
+    if normalized in NATIVE_TRANSPORT_SCOPES:
         return normalized
     if normalized in {"", "auto", "default"}:
         return "tcp"
     raise NativeArtifactError(f"unsupported native transport scope: {value}")
+
+
+def _native_transport_endpoint_address(parsed: SplitResult) -> str:
+    scheme = parsed.scheme.lower()
+    if scheme == "unix":
+        if parsed.netloc or not parsed.path:
+            raise NativeArtifactError("unix native transport endpoints must use unix:///path form")
+        return parsed.path
+    if scheme == "npipe":
+        address = f"{parsed.netloc}{parsed.path}"
+        if not address:
+            raise NativeArtifactError("npipe native transport endpoints must include a pipe path")
+        return address
+    if not parsed.netloc:
+        raise NativeArtifactError(f"{scheme} native transport endpoints must include an authority")
+    address = f"{parsed.netloc}{parsed.path}"
+    if parsed.query:
+        address = f"{address}?{parsed.query}"
+    return address
+
+
+def discover_native_transport_providers(
+    root: Path | str | None = None,
+    native_platform: NativePlatform | None = None,
+) -> tuple[NativeTransportProvider, ...]:
+    selected_platform = native_platform or current_native_platform()
+    artifact_root = Path(root) if root is not None else default_artifact_root()
+    platform_dir = artifact_root / selected_platform.tag
+    if not platform_dir.is_dir():
+        return ()
+
+    providers: list[NativeTransportProvider] = []
+    candidate_dirs = [platform_dir, *(platform_dir / scope for scope in NATIVE_TRANSPORT_SCOPES)]
+    for candidate_dir in candidate_dirs:
+        if not candidate_dir.is_dir():
+            continue
+        provider = _provider_from_artifact_dir(candidate_dir, selected_platform)
+        if provider is not None:
+            providers.append(provider)
+    return tuple(providers)
+
+
+def resolve_native_transport_provider(
+    name: str,
+    *,
+    root: Path | str | None = None,
+    native_platform: NativePlatform | None = None,
+) -> NativeTransportProvider:
+    normalized = _normalize_native_transport_scope(name)
+    for provider in discover_native_transport_providers(root, native_platform):
+        if provider.name == normalized:
+            return provider
+    raise NativeArtifactError(f"native transport provider is not advertised by the native artifact: {name}")
+
+
+def parse_nnrp_endpoint(uri: str) -> NnrpEndpoint:
+    raw_uri = uri.strip()
+    if not raw_uri:
+        raise NativeArtifactError("NNRP endpoint URI must be non-empty")
+    parsed = urlsplit(raw_uri)
+    scheme = parsed.scheme.lower()
+    if scheme not in {"nnrp", "nnrps"}:
+        raise NativeArtifactError(f"unsupported NNRP endpoint scheme: {parsed.scheme}")
+    if not parsed.netloc:
+        raise NativeArtifactError("NNRP endpoint URI must include an authority")
+    if parsed.fragment:
+        raise NativeArtifactError("NNRP endpoint URI must not include a fragment")
+    return NnrpEndpoint(
+        uri=raw_uri,
+        scheme=scheme,
+        authority=parsed.netloc,
+        path=parsed.path or "/",
+        query=parsed.query,
+        secure=scheme == "nnrps",
+    )
+
+
+def parse_native_transport_endpoint(uri: str) -> NativeTransportEndpoint:
+    raw_uri = uri.strip()
+    if not raw_uri:
+        raise NativeArtifactError("native transport endpoint URI must be non-empty")
+    parsed = urlsplit(raw_uri)
+    scheme = parsed.scheme.lower()
+    if scheme in {"nnrp", "nnrps"}:
+        raise NativeArtifactError(
+            "NNRP application endpoints must be parsed with parse_nnrp_endpoint; "
+            "native transport endpoint locators are provider-local"
+        )
+    try:
+        transport_name = NATIVE_ENDPOINT_TRANSPORT_BY_SCHEME[scheme]
+    except KeyError as error:
+        raise NativeArtifactError(f"unsupported native transport endpoint scheme: {parsed.scheme}") from error
+    if parsed.fragment:
+        raise NativeArtifactError("native transport endpoint URI must not include a fragment")
+    address = _native_transport_endpoint_address(parsed)
+    return NativeTransportEndpoint(
+        uri=raw_uri,
+        scheme=scheme,
+        transport_name=transport_name,
+        transport_id=NATIVE_TRANSPORT_ID_BY_NAME[transport_name],
+        address=address,
+        secure=scheme in {"quic+tls", "wss"},
+    )
+
+
+def diagnose_nnrp_endpoint_support(
+    uri: str | NnrpEndpoint,
+    policy: TransportPolicy | str | int = TransportPolicy.AUTO,
+    *,
+    root: Path | str | None = None,
+    native_platform: NativePlatform | None = None,
+    supported_transports: (
+        tuple[str | TransportId, ...] | list[str | TransportId] | set[str | TransportId] | None
+    ) = None,
+    probe_samples: tuple[NativeTransportProbeSample, ...] | list[NativeTransportProbeSample] | None = None,
+) -> NnrpEndpointSupport:
+    endpoint = uri if isinstance(uri, NnrpEndpoint) else parse_nnrp_endpoint(uri)
+    try:
+        selection = select_native_transport_provider(
+            policy,
+            root=root,
+            native_platform=native_platform,
+            supported_transports=supported_transports,
+            probe_samples=probe_samples,
+        )
+    except NativeArtifactError as error:
+        message = str(error)
+        return NnrpEndpointSupport(
+            endpoint=endpoint,
+            selection=None,
+            available=False,
+            skip_reason=message,
+            diagnostic=f"skip {endpoint.uri}: {message}",
+        )
+    return NnrpEndpointSupport(
+        endpoint=endpoint,
+        selection=selection,
+        available=True,
+        diagnostic=f"NNRP endpoint {endpoint.uri} selected {selection.selected_transport_name} carrier",
+    )
+
+
+def diagnose_native_transport_endpoint_support(
+    uri: str | NativeTransportEndpoint,
+    *,
+    root: Path | str | None = None,
+    native_platform: NativePlatform | None = None,
+) -> NativeTransportEndpointSupport:
+    endpoint = uri if isinstance(uri, NativeTransportEndpoint) else parse_native_transport_endpoint(uri)
+    providers = discover_native_transport_providers(root, native_platform)
+    for provider in providers:
+        if endpoint.transport_name in provider.transport_slots:
+            return NativeTransportEndpointSupport(
+                endpoint=endpoint,
+                provider=provider,
+                available=True,
+                diagnostic=f"native transport provider {provider.name!r} exposes {endpoint.transport_name}",
+            )
+    return NativeTransportEndpointSupport(
+        endpoint=endpoint,
+        provider=None,
+        available=False,
+        skip_reason=f"native artifact does not expose {endpoint.transport_name} transport",
+        diagnostic=f"skip {endpoint.uri}: install a preview4 {endpoint.transport_name} native transport artifact",
+    )
+
+
+def select_native_transport_provider(
+    policy: TransportPolicy | str | int = TransportPolicy.AUTO,
+    *,
+    root: Path | str | None = None,
+    native_platform: NativePlatform | None = None,
+    supported_transports: (
+        tuple[str | TransportId, ...] | list[str | TransportId] | set[str | TransportId] | None
+    ) = None,
+    probe_samples: tuple[NativeTransportProbeSample, ...] | list[NativeTransportProbeSample] | None = None,
+) -> NativeTransportSelection:
+    resolved_policy = _normalize_native_transport_policy(policy)
+    providers = discover_native_transport_providers(root, native_platform)
+    supported = _normalize_supported_native_transports(supported_transports)
+    candidates, rejected = _select_native_transport_candidates(providers, supported, resolved_policy)
+    if probe_samples is not None:
+        return _select_native_transport_provider_with_probe(
+            resolved_policy,
+            providers,
+            candidates,
+            rejected,
+            tuple(probe_samples),
+        )
+
+    candidates.sort(
+        key=lambda candidate: (
+            _native_transport_preference_rank(resolved_policy, candidate[1]),
+            candidate[0].name,
+        )
+    )
+    if not candidates:
+        raise _native_transport_selection_error(resolved_policy, tuple(rejected))
+    selected_provider, selected_transport = candidates[0]
+    diagnostic = (
+        "single installed transport selected directly"
+        if len(candidates) == 1 and not rejected and len(providers) == 1
+        else "native transport selected by policy"
+    )
+    return NativeTransportSelection(
+        selected_provider=selected_provider,
+        selected_transport_name=selected_transport,
+        selected_transport_id=NATIVE_TRANSPORT_ID_BY_NAME[selected_transport],
+        policy=resolved_policy,
+        available_providers=providers,
+        rejected=tuple(rejected),
+        diagnostic=diagnostic,
+    )
+
+
+def native_transport_slot_names(mask: int) -> tuple[str, ...]:
+    return tuple(name for name, slot in NATIVE_TRANSPORT_SLOT_BY_NAME.items() if mask & slot)
+
+
+def native_runtime_feature_flag_names(
+    feature_flags: int | NativeRuntimeFeatureFlag,
+    *,
+    mask: int | NativeRuntimeFeatureFlag | None = None,
+) -> tuple[str, ...]:
+    selected_flags = int(feature_flags)
+    if mask is not None:
+        selected_flags &= int(mask)
+    return tuple(name for flag, name in _RUNTIME_FEATURE_FLAG_NAMES.items() if selected_flags & int(flag))
+
+
+def native_runtime_feature_flags_available(
+    feature_flags: int | NativeRuntimeFeatureFlag,
+    required: int | NativeRuntimeFeatureFlag,
+) -> bool:
+    required_flags = int(required)
+    return int(feature_flags) & required_flags == required_flags
+
+
+def _select_native_transport_provider_with_probe(
+    policy: TransportPolicy,
+    providers: tuple[NativeTransportProvider, ...],
+    candidates: list[tuple[NativeTransportProvider, str]],
+    rejected: list[NativeTransportRejection],
+    probe_samples: tuple[NativeTransportProbeSample, ...],
+) -> NativeTransportSelection:
+    scored: list[NativeTransportProbeCandidate] = []
+    for provider, transport_name in candidates:
+        provider_samples = tuple(_matching_native_probe_samples(provider, transport_name, probe_samples))
+        if not provider_samples:
+            rejected.append(
+                _native_transport_rejection(
+                    provider,
+                    transport_name,
+                    "probe_missing",
+                    "native transport probe sample is missing",
+                )
+            )
+            continue
+        probe_score = _score_native_transport_probe(provider, transport_name, provider_samples, policy)
+        if probe_score.failure_rate >= 1.0:
+            rejected.append(
+                _native_transport_rejection(
+                    provider,
+                    transport_name,
+                    "probe_failed",
+                    "all native transport probe samples failed",
+                )
+            )
+            continue
+        scored.append(
+            NativeTransportProbeCandidate(
+                provider=provider,
+                transport_name=transport_name,
+                transport_id=NATIVE_TRANSPORT_ID_BY_NAME[transport_name],
+                probe_score=probe_score,
+            )
+        )
+
+    scored.sort(
+        key=lambda candidate: (
+            candidate.probe_score.score,
+            _native_transport_preference_rank(policy, candidate.transport_name),
+            candidate.provider.name,
+        )
+    )
+    if not scored:
+        raise _native_transport_selection_error(policy, tuple(rejected))
+    selected = scored[0]
+    return NativeTransportSelection(
+        selected_provider=selected.provider,
+        selected_transport_name=selected.transport_name,
+        selected_transport_id=selected.transport_id,
+        policy=policy,
+        available_providers=providers,
+        rejected=tuple(rejected),
+        probe_candidates=tuple(scored),
+        selected_probe_score=selected.probe_score,
+        diagnostic="native transport selected by probe score",
+    )
+
+
+def _select_native_transport_candidates(
+    providers: tuple[NativeTransportProvider, ...],
+    supported_transports: frozenset[str],
+    policy: TransportPolicy,
+) -> tuple[list[tuple[NativeTransportProvider, str]], list[NativeTransportRejection]]:
+    candidates: list[tuple[NativeTransportProvider, str]] = []
+    rejected: list[NativeTransportRejection] = []
+    for provider in providers:
+        for transport_name in provider.transport_slots:
+            if not _native_transport_policy_allows(policy, transport_name):
+                rejected.append(
+                    _native_transport_rejection(
+                        provider,
+                        transport_name,
+                        "policy_disallowed",
+                        "native transport was disallowed by transport policy",
+                    )
+                )
+            elif transport_name not in supported_transports:
+                rejected.append(
+                    _native_transport_rejection(
+                        provider,
+                        transport_name,
+                        "remote_unsupported",
+                        "native transport was not declared by the remote endpoint",
+                    )
+                )
+            else:
+                candidates.append((provider, transport_name))
+    return candidates, rejected
+
+
+def _score_native_transport_probe(
+    provider: NativeTransportProvider,
+    transport_name: str,
+    probe_samples: tuple[NativeTransportProbeSample, ...],
+    policy: TransportPolicy,
+) -> NativeTransportProbeScore:
+    failure_count = sum(1 for sample in probe_samples if sample.failed or sample.timed_out or sample.rtt_us is None)
+    sample_count = len(probe_samples)
+    failure_rate = failure_count / sample_count
+    rtts = sorted(sample.rtt_us for sample in probe_samples if sample.rtt_us is not None)
+    median_rtt_us = rtts[len(rtts) // 2] if rtts else 10_000_000
+    elapsed_us = sum(sample.elapsed_us for sample in probe_samples)
+    transferred = sum(sample.bytes_sent + sample.bytes_received for sample in probe_samples)
+    throughput_bytes_per_sec = transferred * 1_000_000 // elapsed_us if elapsed_us else 0
+    throughput_bonus = min(throughput_bytes_per_sec // 1_000, 500)
+    policy_penalty = _native_transport_preference_rank(policy, transport_name) * 1_000.0
+    score = median_rtt_us + failure_rate * 10_000_000.0 + policy_penalty - throughput_bonus
+    return NativeTransportProbeScore(
+        sample_count=sample_count,
+        failure_count=failure_count,
+        failure_rate=failure_rate,
+        median_rtt_us=median_rtt_us,
+        throughput_bytes_per_sec=throughput_bytes_per_sec,
+        score=score,
+    )
+
+
+def _matching_native_probe_samples(
+    provider: NativeTransportProvider,
+    transport_name: str,
+    samples: tuple[NativeTransportProbeSample, ...],
+) -> tuple[NativeTransportProbeSample, ...]:
+    return tuple(
+        sample
+        for sample in samples
+        if sample.provider_name == provider.name
+        and _normalize_native_transport_scope(sample.transport_name) == transport_name
+    )
+
+
+def _native_transport_selection_error(
+    policy: TransportPolicy,
+    rejected: tuple[NativeTransportRejection, ...],
+) -> NativeArtifactError:
+    forced_transport = _forced_native_transport_name(policy)
+    if forced_transport is not None:
+        return NativeArtifactError(f"forced native transport is not available: {forced_transport}")
+    if rejected:
+        reasons = ", ".join(f"{entry.provider_name}/{entry.transport_name}:{entry.reason}" for entry in rejected)
+        return NativeArtifactError(f"no viable native transport provider after applying policy: {reasons}")
+    return NativeArtifactError("no native transport providers are advertised by the native artifact")
+
+
+def _native_transport_rejection(
+    provider: NativeTransportProvider,
+    transport_name: str,
+    reason: str,
+    diagnostic: str,
+) -> NativeTransportRejection:
+    return NativeTransportRejection(
+        provider_name=provider.name,
+        transport_name=transport_name,
+        transport_id=NATIVE_TRANSPORT_ID_BY_NAME[transport_name],
+        reason=reason,
+        diagnostic=diagnostic,
+    )
+
+
+def _normalize_native_transport_policy(policy: TransportPolicy | str | int) -> TransportPolicy:
+    if isinstance(policy, TransportPolicy):
+        return policy
+    if isinstance(policy, int):
+        return TransportPolicy(policy)
+    normalized = policy.strip().lower().replace("-", "_")
+    if normalized == "auto":
+        return TransportPolicy.AUTO
+    try:
+        return TransportPolicy[normalized.upper()]
+    except KeyError as error:
+        raise NativeArtifactError(f"unsupported native transport policy: {policy}") from error
+
+
+def _normalize_supported_native_transports(
+    supported_transports: tuple[str | TransportId, ...] | list[str | TransportId] | set[str | TransportId] | None,
+) -> frozenset[str]:
+    if supported_transports is None:
+        return frozenset(NATIVE_TRANSPORT_SCOPES)
+    normalized: set[str] = set()
+    for value in supported_transports:
+        if isinstance(value, TransportId):
+            try:
+                normalized.add(NATIVE_TRANSPORT_NAME_BY_ID[value])
+            except KeyError as error:
+                raise NativeArtifactError(f"unsupported native transport id: {value}") from error
+        else:
+            normalized.add(_normalize_native_transport_scope(value))
+    return frozenset(normalized)
+
+
+def _forced_native_transport_name(policy: TransportPolicy) -> str | None:
+    if policy is TransportPolicy.FORCE_QUIC:
+        return "quic"
+    if policy is TransportPolicy.FORCE_TCP:
+        return "tcp"
+    if policy is TransportPolicy.FORCE_IPC:
+        return "ipc"
+    if policy is TransportPolicy.FORCE_WEBSOCKET:
+        return "websocket"
+    return None
+
+
+def _native_transport_policy_allows(policy: TransportPolicy, transport_name: str) -> bool:
+    forced_transport = _forced_native_transport_name(policy)
+    return forced_transport is None or forced_transport == transport_name
+
+
+def _native_transport_preference_rank(policy: TransportPolicy, transport_name: str) -> int:
+    if policy is TransportPolicy.AUTO:
+        return {"ipc": 0, "quic": 1, "tcp": 2, "websocket": 3}[transport_name]
+    if policy is TransportPolicy.PREFER_QUIC:
+        return {"quic": 0, "tcp": 1, "ipc": 2, "websocket": 2}[transport_name]
+    if policy is TransportPolicy.PREFER_TCP:
+        return {"tcp": 0, "quic": 1, "ipc": 2, "websocket": 2}[transport_name]
+    if policy is TransportPolicy.PREFER_IPC:
+        return 0 if transport_name == "ipc" else 1
+    if policy is TransportPolicy.PREFER_WEBSOCKET:
+        return 0 if transport_name == "websocket" else 1
+    forced_transport = _forced_native_transport_name(policy)
+    return 0 if forced_transport == transport_name else 255
 
 
 def load_native_library(artifact_path: Path | str) -> ctypes.CDLL:
@@ -3246,7 +4335,10 @@ def load_native_runtime(
     )
     loaded_library = library if library is not None else load_native_library(resolved_path)
     capabilities = _call_runtime_capabilities(loaded_library)
-    _validate_runtime_capabilities(capabilities)
+    _validate_runtime_capabilities(
+        capabilities,
+        required_transport_slots=_required_transport_slots_for_artifact(resolved_path, transport),
+    )
     resolved_cffi_api = cffi_submit_result_api
     if resolved_cffi_api is None and library is None:
         resolved_cffi_api = _load_native_cffi_submit_result_api(resolved_path)
@@ -3355,7 +4447,10 @@ def probe_native_artifact(
     )
     loaded_library = library if library is not None else load_native_library(resolved_path)
     capabilities = _call_runtime_capabilities(loaded_library)
-    _validate_runtime_capabilities(capabilities)
+    _validate_runtime_capabilities(
+        capabilities,
+        required_transport_slots=_required_transport_slots_for_artifact(resolved_path, transport),
+    )
     return NativeProbeResult(
         artifact_path=resolved_path,
         abi_major=int(capabilities.abi_major),
@@ -3373,7 +4468,11 @@ def probe_native_artifact(
     )
 
 
-def _validate_runtime_capabilities(capabilities: _NnrpRuntimeCapabilities) -> None:
+def _validate_runtime_capabilities(
+    capabilities: _NnrpRuntimeCapabilities,
+    *,
+    required_transport_slots: int = REQUIRED_TRANSPORT_SLOTS,
+) -> None:
     if capabilities.abi_major != EXPECTED_ABI_MAJOR or capabilities.abi_minor < MINIMUM_ABI_MINOR:
         raise NativeArtifactError(
             "native artifact ABI mismatch: "
@@ -3392,11 +4491,125 @@ def _validate_runtime_capabilities(capabilities: _NnrpRuntimeCapabilities) -> No
         raise NativeArtifactError(
             f"native artifact is missing required runtime feature flags: 0x{missing_features:016x}"
         )
-    missing_transport_slots = REQUIRED_TRANSPORT_SLOTS & ~int(capabilities.transport_slots)
+    missing_transport_slots = required_transport_slots & ~int(capabilities.transport_slots)
     if missing_transport_slots:
         raise NativeArtifactError(
             f"native artifact is missing required transport slots: 0x{missing_transport_slots:08x}"
         )
+
+
+def _provider_from_artifact_dir(
+    artifact_dir: Path,
+    native_platform: NativePlatform,
+) -> NativeTransportProvider | None:
+    library_path = artifact_dir / native_library_name(native_platform.os_name)
+    if not library_path.is_file():
+        return None
+    manifest_path = artifact_dir / "manifest.json"
+    manifest = _load_native_artifact_manifest(manifest_path) if manifest_path.is_file() else {}
+    scope = _manifest_transport_scope(manifest, artifact_dir)
+    slots = _manifest_transport_slots(manifest, scope)
+    if scope != "all" and scope not in slots:
+        raise NativeArtifactError(f"native artifact manifest scope {scope!r} is not listed in transport_slots")
+    name = scope if scope != "all" else "tcp"
+    return NativeTransportProvider(
+        name=name,
+        artifact_path=library_path,
+        manifest_path=manifest_path if manifest_path.is_file() else None,
+        transport_slots=slots,
+        enabled_features=_manifest_string_tuple(manifest, "enabled_features"),
+        package=_manifest_optional_string(manifest, "package"),
+        transport_scope=scope,
+        platform_tag=native_platform.tag,
+        cost=_manifest_optional_mapping(manifest, "provider_cost"),
+        preference=_manifest_optional_mapping(manifest, "provider_preference"),
+        limitations=_manifest_string_tuple(manifest, "platform_limitations"),
+    )
+
+
+def _required_transport_slots_for_artifact(artifact_path: Path, transport: str | None) -> int:
+    if transport is not None:
+        return NATIVE_TRANSPORT_SLOT_BY_NAME[_normalize_native_transport_scope(transport)]
+    manifest = _load_native_artifact_manifest(artifact_path.with_name("manifest.json"))
+    scope = _manifest_transport_scope(manifest, artifact_path.parent)
+    if scope == "all":
+        return REQUIRED_TRANSPORT_SLOTS
+    return NATIVE_TRANSPORT_SLOT_BY_NAME[scope]
+
+
+def _load_native_artifact_manifest(manifest_path: Path) -> dict[str, Any]:
+    try:
+        document = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return {}
+    except json.JSONDecodeError as error:
+        raise NativeArtifactError(f"native artifact manifest is invalid JSON: {manifest_path}") from error
+    if not isinstance(document, dict):
+        raise NativeArtifactError(f"native artifact manifest must be a JSON object: {manifest_path}")
+    return document
+
+
+def _manifest_transport_scope(manifest: Mapping[str, Any], artifact_dir: Path) -> str:
+    raw_scope = manifest.get("transport_scope")
+    if raw_scope is None:
+        inferred = artifact_dir.name.lower()
+        return inferred if inferred in NATIVE_TRANSPORT_SCOPES else "all"
+    if not isinstance(raw_scope, str):
+        raise NativeArtifactError("native artifact manifest transport_scope must be a string")
+    scope = raw_scope.strip().lower().replace("_", "-")
+    if scope == "all" or scope in NATIVE_TRANSPORT_SCOPES:
+        return scope
+    raise NativeArtifactError(f"unsupported native transport scope: {raw_scope}")
+
+
+def _manifest_transport_slots(manifest: Mapping[str, Any], scope: str) -> tuple[str, ...]:
+    raw_slots = manifest.get("transport_slots")
+    if raw_slots is None:
+        return NATIVE_TRANSPORT_SCOPES if scope == "all" else (scope,)
+    if not isinstance(raw_slots, list) or not raw_slots:
+        raise NativeArtifactError("native artifact manifest transport_slots must be a non-empty list")
+    slots: list[str] = []
+    for raw_slot in raw_slots:
+        if not isinstance(raw_slot, str):
+            raise NativeArtifactError("native artifact manifest transport_slots entries must be strings")
+        slot = raw_slot.strip().lower().replace("_", "-")
+        if slot not in NATIVE_TRANSPORT_SCOPES:
+            raise NativeArtifactError(f"unsupported native transport slot: {raw_slot}")
+        if slot not in slots:
+            slots.append(slot)
+    return tuple(slots)
+
+
+def _manifest_string_tuple(manifest: Mapping[str, Any], field_name: str) -> tuple[str, ...]:
+    raw_values = manifest.get(field_name)
+    if raw_values is None:
+        return ()
+    if not isinstance(raw_values, list):
+        raise NativeArtifactError(f"native artifact manifest {field_name} must be a list")
+    values: list[str] = []
+    for raw_value in raw_values:
+        if not isinstance(raw_value, str) or not raw_value:
+            raise NativeArtifactError(f"native artifact manifest {field_name} entries must be non-empty strings")
+        values.append(raw_value)
+    return tuple(values)
+
+
+def _manifest_optional_string(manifest: Mapping[str, Any], field_name: str) -> str | None:
+    value = manifest.get(field_name)
+    if value is None:
+        return None
+    if not isinstance(value, str) or not value:
+        raise NativeArtifactError(f"native artifact manifest {field_name} must be a non-empty string")
+    return value
+
+
+def _manifest_optional_mapping(manifest: Mapping[str, Any], field_name: str) -> Mapping[str, Any] | None:
+    value = manifest.get(field_name)
+    if value is None:
+        return None
+    if not isinstance(value, Mapping):
+        raise NativeArtifactError(f"native artifact manifest {field_name} must be an object")
+    return value
 
 
 def _call_runtime_capabilities(library: Any) -> _NnrpRuntimeCapabilities:
@@ -3541,6 +4754,13 @@ def _copy_buffer_view(view: _NnrpBufferView) -> bytes:
     return ctypes.string_at(view.ptr, length)
 
 
+def _borrow_buffer_view(view: NativeBufferView) -> memoryview:
+    if view.length == 0:
+        return memoryview(b"")
+    array_type = ctypes.c_ubyte * view.length
+    return memoryview(array_type.from_address(view.ptr)).toreadonly()
+
+
 def _schema_descriptor_from_ffi(descriptor: _NnrpSchemaDescriptorHeader) -> Any:
     from nnrp.schema import SchemaDescriptorHeader
 
@@ -3598,6 +4818,40 @@ def _typed_payload_descriptor_to_ffi(descriptor: Any) -> _NnrpTypedPayloadDescri
         0,
         int(descriptor.offset),
         int(descriptor.length),
+    )
+
+
+def _runtime_object_descriptor_from_ffi(descriptor: _NnrpRuntimeObjectDescriptor) -> Any:
+    from nnrp.runtime import MemoryLocationHint, ObjectDescriptorMetadata, OwnershipHint, RuntimeObjectKind, RuntimeRole
+
+    return ObjectDescriptorMetadata(
+        object_id=int(descriptor.object_id),
+        object_kind=RuntimeObjectKind(int(descriptor.object_kind)),
+        producer_role=RuntimeRole(int(descriptor.producer_role)),
+        consumer_role=RuntimeRole(int(descriptor.consumer_role)),
+        session_id=int(descriptor.session_id),
+        byte_size=int(descriptor.byte_size),
+        compute_cost_units=int(descriptor.compute_cost_units),
+        memory_location_hint=MemoryLocationHint(int(descriptor.memory_location_hint)),
+        ownership_hint=OwnershipHint(int(descriptor.ownership_hint)),
+        lifetime_hint_ms=int(descriptor.lifetime_hint_ms),
+        metadata_bytes=int(descriptor.metadata_bytes),
+    )
+
+
+def _runtime_object_descriptor_to_ffi(descriptor: Any) -> _NnrpRuntimeObjectDescriptor:
+    return _NnrpRuntimeObjectDescriptor(
+        int(descriptor.object_id),
+        int(descriptor.object_kind),
+        int(descriptor.producer_role),
+        int(descriptor.consumer_role),
+        int(descriptor.session_id),
+        int(descriptor.byte_size),
+        int(descriptor.compute_cost_units),
+        int(descriptor.memory_location_hint),
+        int(descriptor.ownership_hint),
+        int(descriptor.lifetime_hint_ms),
+        int(descriptor.metadata_bytes),
     )
 
 

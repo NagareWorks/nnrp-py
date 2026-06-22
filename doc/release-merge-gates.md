@@ -53,7 +53,7 @@ Any PR that changes hot-path submit/result, event polling, payload ownership, sc
 1. Total coverage at or above the repository gate.
 2. Incremental line coverage at or above the repository gate.
 3. A targeted benchmark or smoke metric when runtime cost can change.
-4. A note when smoke metrics are observational and not yet threshold-gated.
+4. A note when smoke metrics are observational rather than threshold-gated.
 
 Reviewer reject conditions:
 

@@ -44,7 +44,7 @@ It does not contain neural rendering runtime business logic.
 - `src/nnrp/cache.py`: Preview3 cache identity, lease, version, and invalidation result wrappers.
 - `src/nnrp/native.py`: FFI loader, ABI/protocol probes, native handle wrappers, and runtime facade.
 - `src/nnrp/native_artifacts/`: packaged `nnrp-rs` native libraries, arranged by platform tag.
-- `src/nnrp/schema.py`: Preview3 schema/profile descriptor views and first-round standard registry constants.
+- `src/nnrp/schema.py`: schema/profile descriptor views and standard registry constants.
 - `src/nnrp/client/`: client-facing native connection/session helpers plus transport smoke helpers.
 - `src/nnrp/server/`: server-facing helpers and types.
 - `src/nnrp/adapters/`: transport or host integration adapters.
@@ -93,13 +93,124 @@ The native helpers provide:
 3. `NativeClientConnection.submit_and_poll_result()` for a host-friendly submit/result roundtrip over native session operations.
 4. `NativeRuntimeSession.submit_operation()` and `NativeClientConnection.operation_scope()` for operation handles, parent/group metadata, and cancellation on exceptional exits.
 5. `NativeClientConnection.poll_result()`, native async polling helpers, and callback dispatch helpers for result/event delivery.
-6. `NativeClientConnection.cancel_frame()` / `NativeClientConnection.cancel_operation()` / `NativeClientConnection.send_control()` for host control paths.
+6. `NativeClientConnection.cancel_frame()` / `NativeClientConnection.cancel_operation()` / `NativeClientConnection.send_control()` for low-level host control paths.
+7. Preview4 runtime-control helpers for cancellation, scheduling, route hints, execution hints, capability negotiation, and profile degradation.
 
 By default the native loader searches `nnrp/native_artifacts/<os>-<arch>/` inside the installed package. Set `NNRP_NATIVE_ARTIFACT_ROOT` when testing an external artifact tree. Pass `require_native=True` in host code that must fail fast instead of falling back to SDK-local fixtures.
 
 The native binding layer has two paths. The default `NNRP_NATIVE_BINDING_MODE=auto` tries a packaged cffi API fast path for compact submit/result operations and falls back to the zero-compile `ctypes` ABI path when that module is unavailable or cannot preserve the requested payload semantics. Set `NNRP_NATIVE_BINDING_MODE=ctypes` for compiler-free diagnostics, or `NNRP_NATIVE_BINDING_MODE=cffi_api` when a benchmark or deployment should fail fast unless the cffi API module is present.
 
 Polled native events and results expose Python-owned `bytes` payload snapshots. The current Python API does not expose borrowed result buffers, so a result object remains stable even if the native runtime reuses its poll buffer after the call returns.
+
+### Preview4 Runtime Controls
+
+Client control helpers build the frozen preview4 metadata payloads and send one coarse native `control` call through the selected connection or session target:
+
+```python
+from nnrp.client import NativeClientSessionOpenOptions, connect_native_client_connection
+
+with connect_native_client_connection(require_native=True) as connection:
+	session = connection.open_session(NativeClientSessionOpenOptions(requested_session_id=42))
+
+	connection.update_runtime_priority(
+		session,
+		operation_id=1001,
+		control_sequence=1,
+		priority_class=2,
+		priority_delta=4,
+	)
+	connection.cancel_runtime_operation(
+		session,
+		operation_id=1001,
+		control_sequence=2,
+		reason_code=7,
+		diagnostic=b"superseded by fresher frame",
+	)
+	connection.send_runtime_route_hint(
+		connection.connection,
+		operation_id=1002,
+		route_id=9,
+		executor_class=3,
+		body=b"local-subagent",
+	)
+```
+
+Server helpers expose the same runtime-control frame family from `ServerSession` without forcing callers to manually build packets:
+
+```python
+from nnrp.runtime import ResultDropReasonCode
+
+await session.send_progress(
+	operation_id=1001,
+	progress_sequence=1,
+	stage_code=2,
+	percent_x100=2500,
+	body=b"tile pass 1/4",
+	trace_id=77,
+)
+await session.send_partial_result(
+	operation_id=1001,
+	result_sequence=2,
+	object_id=33,
+	body=b"partial payload snapshot",
+)
+await session.send_result_drop_reason(
+	operation_id=1001,
+	result_sequence=3,
+	drop_reason_code=ResultDropReasonCode.DEADLINE_EXPIRED,
+	diagnostic=b"expired before delivery",
+)
+await session.send_backpressure(
+	scope_id=session.session_id,
+	credit_window=8,
+	pressure_level=2,
+	pressure_reason=5,
+)
+```
+
+These helpers are runtime-control API conveniences, not a pure-Python runtime replacement. Host hot paths should use native artifacts with `require_native=True`; packet builders under `nnrp.core` remain for fixtures, diagnostics, and conformance tooling.
+
+### Preview4 Transport Providers
+
+Preview4 native artifacts are transport scoped. Python discovers installed providers from the packaged Rust artifact
+manifests and rejects names that are not advertised by the artifact tree:
+
+```python
+from nnrp import (
+	diagnose_nnrp_endpoint_support,
+	discover_native_transport_providers,
+	select_native_transport_provider,
+)
+
+providers = discover_native_transport_providers()
+selection = select_native_transport_provider("auto")
+support = diagnose_nnrp_endpoint_support("nnrps://runtime.example/session/default")
+
+print([provider.name for provider in providers])
+print(selection.selected_transport_name, selection.diagnostic)
+print(support.endpoint.authority, support.available)
+```
+
+Installations with a single provider select it directly. Multi-provider installations can use `auto`, `probe`,
+or an explicit transport name. Provider metadata reports transport slots, cost/preference hints, platform limitations,
+and enabled native features; it is not a configuration flag over hidden shared transport logic.
+
+Application-facing endpoints use `nnrp://` or `nnrps://`. Provider-local locators such as `unix://`, `npipe://`,
+`ws://`, and `wss://` are lower-level diagnostics, conformance fixture inputs, or explicit provider overrides.
+Their helper validates URI shape and exposes diagnostic skip messages without pretending a missing native provider
+passed a smoke test.
+
+```python
+from nnrp import diagnose_native_transport_endpoint_support
+
+support = diagnose_native_transport_endpoint_support("wss://runtime.example/nnrp")
+if not support.available:
+	print(support.skip_reason)
+```
+
+TCP and QUIC keep their own native provider slots. IPC and WebSocket endpoint models are available for preview4
+diagnostics and conformance manifests; live connect/listen smoke tests require the corresponding preview4 Rust
+provider artifact to expose those entrypoints.
 
 Cache leases and schema validation follow the same host/runtime split. Python code passes stable identifiers, descriptors, and payload views into the native runtime; lease policy, schema matching, and diagnostics remain owned by Rust:
 
@@ -132,6 +243,40 @@ with connect_native_client_connection(require_native=True) as connection:
 `profile_id = 0` means unspecified. It must not be treated as an implicit tensor profile. Tensor and token payloads are peer standard profiles, while structured-event, tool-delta, and workflow-state remain payload families routed through schema/profile bindings before any profile-private body decoding happens.
 
 `NativeRuntimeResult.state` reports the host-visible operation lifecycle as `completed`, `partial`, `degraded`, `stale_reuse`, `cancelled`, or `failed`. `NativeRuntimeResult.diagnostic` preserves native status, error family, protocol detail, and related connection/session/operation/frame ids; use `NativeStructuredDiagnostic.to_report()` when emitting adapter or CI diagnostics instead of flattening native failures into strings.
+
+### Runtime Object And Cache Metadata
+
+Preview4 runtime object and cache helpers live in `nnrp.runtime`. They encode and decode the frozen runtime-control,
+object, and cache metadata shapes without routing hot paths through JSON:
+
+```python
+from nnrp.core import MessageType
+from nnrp.runtime import (
+	CacheReferenceMetadata,
+	CacheReuseScope,
+	decode_runtime_object_metadata,
+	encode_runtime_object_metadata,
+)
+
+metadata = CacheReferenceMetadata(
+	cache_key_hi=2,
+	cache_key_lo=3,
+	profile_id=19,
+	reuse_scope=CacheReuseScope.SESSION,
+	lease_id=9,
+	producer_trace_id=77,
+	expiration_hint_ms=5000,
+	metadata_bytes=0,
+	flags=0,
+)
+payload = encode_runtime_object_metadata(MessageType.CACHE_REFERENCE, metadata)
+decoded = decode_runtime_object_metadata(MessageType.CACHE_REFERENCE, payload)
+assert decoded.metadata == metadata
+```
+
+Cache references are an explicit workload behavior. They help when producers and consumers can reuse a stable object
+identity or lease, but they are not a universal latency guarantee; high-churn payloads should record cache misses as
+typed events and continue through the normal result path.
 
 ## Public Wire API
 

@@ -21,7 +21,7 @@ verify_native_wheels = _MODULE.verify_native_wheels
 verify_native_wheel_main = _MODULE.main
 
 
-def _write_wheel(path: Path, names: list[str]) -> Path:
+def _write_wheel(path: Path, names: list[str], *, abi_version: str = "1.11.0") -> Path:
     with zipfile.ZipFile(path, "w") as archive:
         for name in names:
             if name.endswith("manifest.json"):
@@ -30,12 +30,25 @@ def _write_wheel(path: Path, names: list[str]) -> Path:
                     scope = "tcp"
                 elif "/quic/" in name:
                     scope = "quic"
+                elif "/ipc/" in name:
+                    scope = "ipc"
+                elif "/websocket/" in name:
+                    scope = "websocket"
                 archive.writestr(
                     name,
                     json.dumps(
                         {
+                            "package": "nnrp-ffi" if scope == "all" else f"nnrp-ffi-transport-{scope}",
+                            "transport_name": scope,
                             "transport_scope": scope,
-                            "transport_slots": [scope] if scope != "all" else ["tcp", "quic"],
+                            "transport_slots": [scope] if scope != "all" else ["tcp", "quic", "ipc", "websocket"],
+                            "protocol_version": "NNRP/1",
+                            "abi_version": abi_version,
+                            "enabled_features": (
+                                [f"transport-{scope}"]
+                                if scope != "all"
+                                else ["transport-tcp", "transport-quic", "transport-ipc", "transport-websocket"]
+                            ),
                         }
                     ).encode(),
                 )
@@ -63,6 +76,9 @@ def test_inspect_wheel_finds_packaged_native_artifacts(tmp_path: Path) -> None:
     assert summary.platform_tag == "win_amd64"
     assert summary.cffi_api_entries == ("nnrp/_nnrp_cffi_api_submit_result.py",)
     assert summary.transport_scopes == ("all",)
+    assert summary.manifest_packages == ("nnrp-ffi",)
+    assert summary.protocol_versions == ("NNRP/1",)
+    assert summary.abi_versions == ("1.11.0",)
 
 
 def test_verify_native_wheels_rejects_empty_native_payload(tmp_path: Path) -> None:
@@ -125,13 +141,65 @@ def test_verify_native_wheels_requires_split_transport_artifacts(tmp_path: Path)
             "nnrp/native_artifacts/linux-x86_64/tcp/libnnrp_ffi.so",
             "nnrp/native_artifacts/linux-x86_64/quic/manifest.json",
             "nnrp/native_artifacts/linux-x86_64/quic/libnnrp_ffi.so",
+            "nnrp/native_artifacts/linux-x86_64/ipc/manifest.json",
+            "nnrp/native_artifacts/linux-x86_64/ipc/libnnrp_ffi.so",
+            "nnrp/native_artifacts/linux-x86_64/websocket/manifest.json",
+            "nnrp/native_artifacts/linux-x86_64/websocket/libnnrp_ffi.so",
         ],
     )
 
-    with pytest.raises(ValueError, match="split TCP and QUIC"):
+    with pytest.raises(ValueError, match="split TCP, QUIC, IPC, and WebSocket"):
         verify_native_wheels([inspect_wheel(legacy)], require_native=True, require_split_transports=True)
 
     verify_native_wheels([inspect_wheel(split)], require_native=True, require_split_transports=True)
+
+
+def test_verify_native_wheels_requires_preview4_native_artifact_shape(tmp_path: Path) -> None:
+    legacy = _write_wheel(
+        tmp_path / "nnrp_py-1.0.0rc3-py3-none-manylinux_2_28_x86_64.whl",
+        [
+            "nnrp/native_artifacts/linux-x86_64/manifest.json",
+            "nnrp/native_artifacts/linux-x86_64/libnnrp_ffi.so",
+        ],
+    )
+    preview4 = _write_wheel(
+        tmp_path / "nnrp_py-1.0.0rc4-py3-none-manylinux_2_28_x86_64.whl",
+        [
+            "nnrp/native_artifacts/linux-x86_64/tcp/manifest.json",
+            "nnrp/native_artifacts/linux-x86_64/tcp/libnnrp_ffi.so",
+            "nnrp/native_artifacts/linux-x86_64/quic/manifest.json",
+            "nnrp/native_artifacts/linux-x86_64/quic/libnnrp_ffi.so",
+            "nnrp/native_artifacts/linux-x86_64/ipc/manifest.json",
+            "nnrp/native_artifacts/linux-x86_64/ipc/libnnrp_ffi.so",
+            "nnrp/native_artifacts/linux-x86_64/websocket/manifest.json",
+            "nnrp/native_artifacts/linux-x86_64/websocket/libnnrp_ffi.so",
+        ],
+    )
+
+    with pytest.raises(ValueError, match="non-preview4 native artifact metadata"):
+        verify_native_wheels([inspect_wheel(legacy)], require_native=True, require_preview4_native_artifacts=True)
+
+    verify_native_wheels([inspect_wheel(preview4)], require_native=True, require_preview4_native_artifacts=True)
+
+
+def test_verify_native_wheels_requires_native_abi_version(tmp_path: Path) -> None:
+    wheel = _write_wheel(
+        tmp_path / "nnrp_py-1.0.0rc4-py3-none-manylinux_2_28_x86_64.whl",
+        [
+            "nnrp/native_artifacts/linux-x86_64/tcp/manifest.json",
+            "nnrp/native_artifacts/linux-x86_64/tcp/libnnrp_ffi.so",
+            "nnrp/native_artifacts/linux-x86_64/quic/manifest.json",
+            "nnrp/native_artifacts/linux-x86_64/quic/libnnrp_ffi.so",
+            "nnrp/native_artifacts/linux-x86_64/ipc/manifest.json",
+            "nnrp/native_artifacts/linux-x86_64/ipc/libnnrp_ffi.so",
+            "nnrp/native_artifacts/linux-x86_64/websocket/manifest.json",
+            "nnrp/native_artifacts/linux-x86_64/websocket/libnnrp_ffi.so",
+        ],
+        abi_version="1.10.0",
+    )
+
+    with pytest.raises(ValueError, match="ABI version mismatch"):
+        verify_native_wheels([inspect_wheel(wheel)], require_native=True, require_abi_version="1.11.0")
 
 
 def test_verify_native_wheels_rejects_platform_tag_mismatch(tmp_path: Path) -> None:

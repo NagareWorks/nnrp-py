@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "nnrp-py"
-version = "1.0.0rc3.post5"
+version = "1.0.0rc4"
 description = "Python SDK for NNRP protocol primitives and adapters"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -37,6 +37,8 @@ Issues = "https://github.com/NagareWorks/nnrp-py/issues"
 [project.scripts]
 nnrp-run-benchmark = "nnrp.tools.benchmark:main"
 nnrp-quic-smoke = "nnrp.tools.smoke:main"
+nnrp-wire-conformance = "nnrp.tools.wire_conformance:main"
+nnrp-wire-target-manifest = "nnrp.tools.wire_conformance:main"
 
 [project.optional-dependencies]
 dev = [

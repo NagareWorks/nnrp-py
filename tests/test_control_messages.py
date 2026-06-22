@@ -786,11 +786,29 @@ def test_transport_policy_extension_rejects_wrong_entry_type() -> None:
         raise AssertionError("expected mismatched transport extension type to fail")
 
 
+def test_transport_policy_extension_accepts_preview4_transport_ids() -> None:
+    assert ClientHelloTransportPolicyExtension(
+        transport_policy=TransportPolicy.PREFER_IPC,
+        preferred_transport_id=TransportId.IPC,
+    ).pack() == struct.pack("<BBHI", int(TransportPolicy.PREFER_IPC), 0, 0, int(TransportId.IPC))
+    assert ServerHelloAckTransportPolicyExtension(
+        transport_policy=TransportPolicy.PREFER_WEBSOCKET,
+        accepted_transport_policy=TransportPolicy.FORCE_WEBSOCKET,
+        active_transport_id=TransportId.WEBSOCKET,
+    ).pack() == struct.pack(
+        "<BBHI",
+        int(TransportPolicy.PREFER_WEBSOCKET),
+        int(TransportPolicy.FORCE_WEBSOCKET),
+        0,
+        int(TransportId.WEBSOCKET),
+    )
+
+
 def test_transport_policy_extension_rejects_unknown_transport_id() -> None:
-    with pytest.raises(ValueError, match="3 is not a valid TransportId"):
+    with pytest.raises(ValueError, match="5 is not a valid TransportId"):
         ClientHelloTransportPolicyExtension(
             transport_policy=TransportPolicy.PREFER_QUIC,
-            preferred_transport_id=3,
+            preferred_transport_id=5,
         ).pack()
 
 

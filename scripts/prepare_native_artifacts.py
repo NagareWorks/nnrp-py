@@ -136,7 +136,7 @@ def _transport_scope(manifest: dict[str, Any]) -> str:
     scope = manifest.get("transport_scope")
     if scope is None:
         return "all"
-    if scope in {"all", "tcp", "quic"}:
+    if scope in {"all", "tcp", "quic", "ipc", "websocket"}:
         return scope
     raise ValueError(f"native artifact manifest lists unsupported transport scope: {scope}")
 

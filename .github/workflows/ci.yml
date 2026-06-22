@@ -244,12 +244,112 @@ jobs:
             --plan $env:NNRP_CONFORMANCE_ADAPTER_PLAN
             --output $env:NNRP_CONFORMANCE_ADAPTER_RESULTS
 
+  wire-conformance:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Checkout nnrp-conformance runner
+        uses: actions/checkout@v5
+        with:
+          repository: ${{ github.repository_owner }}/nnrp-conformance
+          path: nnrp-conformance-runner
+          fetch-depth: 1
+
+      - name: Setup Python
+        id: setup-python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.11'
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@1.85.0
+
+      - name: Cache Rust artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: nnrp-conformance-runner -> target
+
+      - name: Install dependencies
+        run: |
+          ${{ steps.setup-python.outputs.python-path }} -m pip install --upgrade pip
+          ${{ steps.setup-python.outputs.python-path }} -m pip install -e .[dev] build
+
+      - name: Run wire conformance dry-run
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          mkdir -p artifacts/wire-conformance
+
+          transports=(
+            --transport tcp=127.0.0.1:19091
+            --transport quic=quic+tls://127.0.0.1:19092
+            --transport ipc=unix:///tmp/nnrp.sock
+            --transport websocket=wss://127.0.0.1:19093/nnrp
+          )
+          capabilities=(
+            --capability control.cancel_abort
+            --capability control.result_drop_reason
+            --capability control.trace_context
+            --capability control.priority_update
+            --capability control.deadline_expire
+            --capability control.progress_partial
+            --capability control.credit_backpressure
+            --capability object.lifecycle
+            --capability control.capability_costs
+            --capability control.route_execution_hint
+            --capability cache.reference
+            --capability control.degrade_profile
+            --capability control.budget_update
+          )
+
+          for mode in suite_as_client suite_as_server suite_as_proxy; do
+            target="artifacts/wire-conformance/target-${mode}.json"
+            plan="artifacts/wire-conformance/plan-${mode}.json"
+            results="artifacts/wire-conformance/results-${mode}.json"
+            evidence_dir="artifacts/wire-conformance/evidence-${mode}"
+
+            ${{ steps.setup-python.outputs.python-path }} -m nnrp.tools.wire_conformance \
+              manifest \
+              --target-name "nnrp-py-ci-${mode}" \
+              --mode "$mode" \
+              "${transports[@]}" \
+              "${capabilities[@]}" \
+              --output "$target"
+
+            cargo run --manifest-path nnrp-conformance-runner/Cargo.toml -p nnrp-conformance-runner -- \
+              wire-plan \
+              --suite nnrp-conformance-runner/wire-conformance/nnrp-1-preview4/manifest.json \
+              --target "$target" \
+              --output "$plan" \
+              --results-path "$results" \
+              --evidence-dir "$evidence_dir"
+
+            ${{ steps.setup-python.outputs.python-path }} -m nnrp.tools.wire_conformance \
+              run-plan \
+              --plan "$plan" \
+              --mode "$mode" \
+              --output "$results" \
+              --evidence-dir "$evidence_dir"
+
+            cargo run --manifest-path nnrp-conformance-runner/Cargo.toml -p nnrp-conformance-runner -- \
+              validate-wire-results \
+              --plan "$plan" \
+              --results "$results"
+          done
+
   required-checks:
     needs:
       - content-policy
       - commit-policy
       - test
       - conformance
+      - wire-conformance
     if: always()
     runs-on: ubuntu-latest
 
@@ -274,5 +374,10 @@ jobs:
 
           if [ "${{ needs.conformance.result }}" != "success" ]; then
             echo "Conformance validation failed."
+            exit 1
+          fi
+
+          if [ "${{ needs.wire-conformance.result }}" != "success" ]; then
+            echo "Wire conformance validation failed."
             exit 1
           fi

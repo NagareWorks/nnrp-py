@@ -1,6 +1,6 @@
 {
   "$schema": "../../schemas/benchmark-execution-plan.schema.json",
-  "protocol_version": "nnrp-1-preview3",
+  "protocol_version": "nnrp-1-preview4",
   "suite_version": "python-native-runtime",
   "implementation_name": "nnrp-py",
   "artifacts": {
@@ -8,6 +8,74 @@
     "evidence_dir": "artifacts/native-runtime-benchmark-evidence"
   },
   "scenarios": [
+    {
+      "id": "l4.runtime.control_metadata.latency",
+      "category": "latency",
+      "feature": "benchmark.runtime_control.metadata",
+      "required_capabilities": [
+        "control.cancel_abort",
+        "control.deadline_expire",
+        "control.progress_partial",
+        "control.credit_backpressure",
+        "control.result_drop_reason"
+      ],
+      "description": "Measure preview4 runtime control metadata encode/decode latency across cancellation, deadline, progress, partial-result, pressure, and drop-reason frames.",
+      "workload": {
+        "operation": "runtime_control_metadata_encode_decode",
+        "payload": "control_frame_metadata",
+        "iterations": 100000,
+        "warmup_iterations": 10000
+      }
+    },
+    {
+      "id": "l4.runtime.object_metadata.latency",
+      "category": "latency",
+      "feature": "benchmark.runtime_object.metadata",
+      "required_capabilities": [
+        "object.lifecycle",
+        "object.delta",
+        "cache.reference"
+      ],
+      "description": "Measure preview4 runtime object and cache metadata encode/decode latency across declare, reference, release, delta, cache-reference, and cache-miss frames.",
+      "workload": {
+        "operation": "runtime_object_metadata_encode_decode",
+        "payload": "object_cache_metadata",
+        "iterations": 100000,
+        "warmup_iterations": 10000
+      }
+    },
+    {
+      "id": "l4.native.object_metadata.copy.latency",
+      "category": "latency",
+      "feature": "benchmark.native.object_metadata.copy",
+      "required_capabilities": [
+        "object.lifecycle"
+      ],
+      "description": "Measure native object metadata acquisition plus Python-owned snapshot copy latency.",
+      "workload": {
+        "operation": "native_object_metadata_copy_snapshot",
+        "payload": "object_metadata_copy",
+        "payload_bytes": 1024,
+        "iterations": 100000,
+        "warmup_iterations": 10000
+      }
+    },
+    {
+      "id": "l4.native.object_metadata.borrow.latency",
+      "category": "latency",
+      "feature": "benchmark.native.object_metadata.borrow",
+      "required_capabilities": [
+        "object.lifecycle"
+      ],
+      "description": "Measure native object metadata acquisition plus guarded borrowed-view inspection latency.",
+      "workload": {
+        "operation": "native_object_metadata_borrowed_view",
+        "payload": "object_metadata_borrow",
+        "payload_bytes": 1024,
+        "iterations": 100000,
+        "warmup_iterations": 10000
+      }
+    },
     {
       "id": "l4.native.submit_result.throughput",
       "category": "throughput",
@@ -41,6 +109,78 @@
         "payload": "inline_payload",
         "payload_bytes": 1024,
         "batch_size": 1024,
+        "warmup_iterations": 1000,
+        "duration_seconds": 10
+      }
+    },
+    {
+      "id": "l4.native.submit_cancel.throughput",
+      "category": "throughput",
+      "feature": "benchmark.native.submit_cancel.throughput",
+      "required_capabilities": [
+        "session.open_close",
+        "operation.submit",
+        "control.cancel_abort"
+      ],
+      "description": "Measure native runtime submit/cancel throughput with connection and session setup outside the measured loop.",
+      "workload": {
+        "operation": "native_submit_cancel_loop",
+        "payload": "inline_payload",
+        "payload_bytes": 1024,
+        "warmup_iterations": 1000,
+        "duration_seconds": 10
+      }
+    },
+    {
+      "id": "l4.native.progress_partial.polling.throughput",
+      "category": "throughput",
+      "feature": "benchmark.native.progress_partial.polling",
+      "required_capabilities": [
+        "session.open_close",
+        "operation.submit",
+        "control.progress_partial",
+        "event.polling.batch"
+      ],
+      "description": "Measure native result-hint control send plus partial-result polling throughput with setup outside the measured loop.",
+      "workload": {
+        "operation": "native_progress_partial_polling_loop",
+        "payload": "inline_payload",
+        "payload_bytes": 1024,
+        "max_events": 2,
+        "warmup_iterations": 1000,
+        "duration_seconds": 10
+      }
+    },
+    {
+      "id": "l4.transport.ipc.loopback.throughput",
+      "category": "throughput",
+      "feature": "benchmark.transport.ipc",
+      "required_capabilities": [
+        "transport.ipc"
+      ],
+      "description": "Measure IPC transport probe loopback packet encode/decode throughput with the shared transport benchmark workload.",
+      "workload": {
+        "operation": "transport_loopback",
+        "payload": "request_result_stream",
+        "transport": "ipc",
+        "probe_payload_bytes": 32768,
+        "warmup_iterations": 1000,
+        "duration_seconds": 10
+      }
+    },
+    {
+      "id": "l4.transport.websocket.loopback.throughput",
+      "category": "throughput",
+      "feature": "benchmark.transport.websocket",
+      "required_capabilities": [
+        "transport.websocket"
+      ],
+      "description": "Measure WebSocket transport probe loopback packet encode/decode throughput with the shared transport benchmark workload.",
+      "workload": {
+        "operation": "transport_loopback",
+        "payload": "request_result_stream",
+        "transport": "websocket",
+        "probe_payload_bytes": 32768,
         "warmup_iterations": 1000,
         "duration_seconds": 10
       }

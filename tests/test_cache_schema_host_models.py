@@ -2,6 +2,7 @@ import pytest
 
 from nnrp import (
     CacheDependencyInvalidation,
+    CacheInvalidation,
     CacheInvalidationReason,
     CacheLeaseDescriptor,
     CacheLeaseOutcome,
@@ -9,6 +10,8 @@ from nnrp import (
     CacheObjectIdentity,
     CacheObjectKind,
     CacheObjectVersion,
+    CachePolicyOptions,
+    CacheReuseScope,
     CacheRuntimeBackend,
     NativeProtocolError,
     NativeStatus,
@@ -108,6 +111,42 @@ def test_cache_dependency_invalidation_freezes_affected_snapshot_without_policy_
     assert invalidation.affected_count == 2
     assert invalidation.affected[0].object_kind == CacheObjectKind.PROMPT_SEGMENT
     assert invalidation.reason is CacheInvalidationReason.DEPENDENCY_INVALIDATED
+
+
+def test_cache_policy_options_keep_cache_use_explicit_per_workload() -> None:
+    identity = CacheObjectIdentity(namespace=1, object_kind=CacheObjectKind.PROMPT_SEGMENT, key_hi=1, key_lo=2)
+    policy = CachePolicyOptions(
+        enabled=True,
+        reuse_scope=CacheReuseScope.SESSION,
+        expiration_hint_ms=500,
+        invalidation_reason=CacheInvalidationReason.VERSION_MISMATCH,
+    )
+    invalidation = CacheInvalidation(
+        identity=identity,
+        reason=policy.invalidation_reason,
+        object_version=7,
+        diagnostic="schema changed",
+    )
+
+    assert policy.enabled is True
+    assert policy.reuse_scope is CacheReuseScope.SESSION
+    assert invalidation.reason is CacheInvalidationReason.VERSION_MISMATCH
+    assert invalidation.object_version == 7
+    assert CachePolicyOptions() == CachePolicyOptions(enabled=False)
+
+
+def test_cache_policy_options_reject_implicit_disabled_cache_settings() -> None:
+    with pytest.raises(ValueError, match="must not set reuse_scope"):
+        CachePolicyOptions(reuse_scope=CacheReuseScope.SESSION)
+    with pytest.raises(ValueError, match="requires reuse_scope"):
+        CachePolicyOptions(enabled=True)
+    with pytest.raises(ValueError, match="expiration_hint_ms"):
+        CachePolicyOptions(expiration_hint_ms=1)
+    with pytest.raises(ValueError, match="object_version"):
+        CacheInvalidation(
+            identity=CacheObjectIdentity(namespace=1, object_kind=CacheObjectKind.PROMPT_SEGMENT, key_hi=1, key_lo=2),
+            object_version=-1,
+        )
 
 
 def test_cache_runtime_helpers_delegate_without_local_policy() -> None:

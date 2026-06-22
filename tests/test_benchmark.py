@@ -1,3 +1,4 @@
+import ctypes
 import json
 from pathlib import Path
 from types import SimpleNamespace
@@ -76,6 +77,36 @@ def _plan_document() -> dict[str, object]:
                     "operation": "transport_loopback",
                     "payload": "request_result_stream",
                     "transport": "quic",
+                    "probe_payload_bytes": 8,
+                    "duration_seconds": 0.01,
+                    "warmup_iterations": 1,
+                },
+            },
+            {
+                "id": "l4.transport.ipc.loopback.throughput",
+                "category": "throughput",
+                "feature": "benchmark.transport.ipc",
+                "required_capabilities": ["transport.ipc"],
+                "description": "IPC transport loopback throughput.",
+                "workload": {
+                    "operation": "transport_loopback",
+                    "payload": "request_result_stream",
+                    "transport": "ipc",
+                    "probe_payload_bytes": 8,
+                    "duration_seconds": 0.01,
+                    "warmup_iterations": 1,
+                },
+            },
+            {
+                "id": "l4.transport.websocket.loopback.throughput",
+                "category": "throughput",
+                "feature": "benchmark.transport.websocket",
+                "required_capabilities": ["transport.websocket"],
+                "description": "WebSocket transport loopback throughput.",
+                "workload": {
+                    "operation": "transport_loopback",
+                    "payload": "request_result_stream",
+                    "transport": "websocket",
                     "probe_payload_bytes": 8,
                     "duration_seconds": 0.01,
                     "warmup_iterations": 1,
@@ -162,6 +193,70 @@ def _plan_document() -> dict[str, object]:
                 },
             },
             {
+                "id": "l4.runtime.control_metadata.latency",
+                "category": "latency",
+                "feature": "benchmark.runtime_control.metadata",
+                "required_capabilities": [
+                    "control.cancel_abort",
+                    "control.deadline_expire",
+                    "control.progress_partial",
+                    "control.credit_backpressure",
+                    "control.result_drop_reason",
+                ],
+                "description": "Preview4 runtime control metadata encode/decode latency.",
+                "workload": {
+                    "operation": "runtime_control_metadata_encode_decode",
+                    "payload": "control_frame_metadata",
+                    "iterations": 3,
+                    "warmup_iterations": 1,
+                },
+            },
+            {
+                "id": "l4.runtime.object_metadata.latency",
+                "category": "latency",
+                "feature": "benchmark.runtime_object.metadata",
+                "required_capabilities": [
+                    "object.lifecycle",
+                    "object.delta",
+                    "cache.reference",
+                ],
+                "description": "Preview4 runtime object and cache metadata encode/decode latency.",
+                "workload": {
+                    "operation": "runtime_object_metadata_encode_decode",
+                    "payload": "object_cache_metadata",
+                    "iterations": 3,
+                    "warmup_iterations": 1,
+                },
+            },
+            {
+                "id": "l4.native.object_metadata.copy.latency",
+                "category": "latency",
+                "feature": "benchmark.native.object_metadata.copy",
+                "required_capabilities": ["object.lifecycle"],
+                "description": "Native object metadata copied snapshot latency.",
+                "workload": {
+                    "operation": "native_object_metadata_copy_snapshot",
+                    "payload": "object_metadata_copy",
+                    "iterations": 3,
+                    "warmup_iterations": 1,
+                    "payload_bytes": 8,
+                },
+            },
+            {
+                "id": "l4.native.object_metadata.borrow.latency",
+                "category": "latency",
+                "feature": "benchmark.native.object_metadata.borrow",
+                "required_capabilities": ["object.lifecycle"],
+                "description": "Native object metadata borrowed view latency.",
+                "workload": {
+                    "operation": "native_object_metadata_borrowed_view",
+                    "payload": "object_metadata_borrow",
+                    "iterations": 3,
+                    "warmup_iterations": 1,
+                    "payload_bytes": 8,
+                },
+            },
+            {
                 "id": "l4.native.submit_result.throughput",
                 "category": "throughput",
                 "feature": "benchmark.native.submit_result.throughput",
@@ -173,6 +268,40 @@ def _plan_document() -> dict[str, object]:
                     "duration_seconds": 0.01,
                     "warmup_iterations": 1,
                     "payload_bytes": 8,
+                },
+            },
+            {
+                "id": "l4.native.submit_cancel.throughput",
+                "category": "throughput",
+                "feature": "benchmark.native.submit_cancel.throughput",
+                "required_capabilities": ["session.open_close", "operation.submit", "control.cancel_abort"],
+                "description": "Native submit/cancel runtime throughput.",
+                "workload": {
+                    "operation": "native_submit_cancel_loop",
+                    "payload": "inline_payload",
+                    "duration_seconds": 0.01,
+                    "warmup_iterations": 1,
+                    "payload_bytes": 8,
+                },
+            },
+            {
+                "id": "l4.native.progress_partial.polling.throughput",
+                "category": "throughput",
+                "feature": "benchmark.native.progress_partial.polling",
+                "required_capabilities": [
+                    "session.open_close",
+                    "operation.submit",
+                    "control.progress_partial",
+                    "event.polling.batch",
+                ],
+                "description": "Native result-hint control and partial-result polling throughput.",
+                "workload": {
+                    "operation": "native_progress_partial_polling_loop",
+                    "payload": "inline_payload",
+                    "duration_seconds": 0.01,
+                    "warmup_iterations": 1,
+                    "payload_bytes": 8,
+                    "max_events": 2,
                 },
             },
             {
@@ -267,6 +396,8 @@ def test_build_benchmark_results_report_measures_configured_scenarios(monkeypatc
     assert transport_result["metrics"]["throughput_ops_per_sec"] > 0
     assert "cpu_percent" not in transport_result["metrics"]
     assert "peak_memory_bytes" not in transport_result["metrics"]
+    assert results["l4.transport.ipc.loopback.throughput"]["outcome"] == "measured"
+    assert results["l4.transport.websocket.loopback.throughput"]["outcome"] == "measured"
 
     assert results["l4.metadata.submit_result.latency"]["outcome"] == "measured"
     assert results["l4.typed_payload.tensor_pack_unpack.latency"]["outcome"] == "measured"
@@ -274,7 +405,13 @@ def test_build_benchmark_results_report_measures_configured_scenarios(monkeypatc
     assert results["l4.native.schema_descriptor.latency"]["outcome"] == "skip"
     assert results["l4.native.event_polling.latency"]["outcome"] == "skip"
     assert results["l4.native.event_polling.throughput"]["outcome"] == "skip"
+    assert results["l4.runtime.control_metadata.latency"]["outcome"] == "measured"
+    assert results["l4.runtime.object_metadata.latency"]["outcome"] == "measured"
+    assert results["l4.native.object_metadata.copy.latency"]["outcome"] == "skip"
+    assert results["l4.native.object_metadata.borrow.latency"]["outcome"] == "skip"
     assert results["l4.native.submit_result.throughput"]["outcome"] == "skip"
+    assert results["l4.native.submit_cancel.throughput"]["outcome"] == "skip"
+    assert results["l4.native.progress_partial.polling.throughput"]["outcome"] == "skip"
     assert results["l4.native.submit_result.allocations"]["outcome"] == "skip"
     assert results["l4.native.artifact_probe.latency"]["outcome"] == "skip"
     assert results["l4.session.lifecycle.latency"]["outcome"] == "measured"
@@ -308,6 +445,8 @@ def test_build_benchmark_results_report_can_profile_throughput_metrics(
     for scenario_id in (
         "l4.submit_result.inline_tensor.throughput",
         "l4.transport.quic.loopback.throughput",
+        "l4.transport.ipc.loopback.throughput",
+        "l4.transport.websocket.loopback.throughput",
         "l4.transport.tcp.loopback.throughput",
     ):
         result = results[scenario_id]
@@ -361,6 +500,12 @@ def test_build_benchmark_results_report_measures_native_scenarios_when_artifacts
     native_event_throughput_result = results["l4.native.event_polling.throughput"]
     assert native_event_throughput_result["outcome"] == "measured"
     assert native_event_throughput_result["metrics"]["throughput_ops_per_sec"] > 0
+    native_object_copy = results["l4.native.object_metadata.copy.latency"]
+    assert native_object_copy["outcome"] == "measured"
+    assert native_object_copy["metrics"]["p50_us"] >= 0
+    native_object_borrow = results["l4.native.object_metadata.borrow.latency"]
+    assert native_object_borrow["outcome"] == "measured"
+    assert native_object_borrow["metrics"]["p50_us"] >= 0
     native_submit_result = results["l4.native.submit_result.throughput"]
     assert native_submit_result["outcome"] == "measured"
     assert native_submit_result["metrics"]["throughput_ops_per_sec"] > 0
@@ -372,6 +517,29 @@ def test_build_benchmark_results_report_measures_native_scenarios_when_artifacts
     assert native_submit_result["metrics"]["native_ffi_client_complete_operation_calls_per_op"] == 0
     assert native_submit_result["metrics"]["native_ffi_client_await_events_calls_per_op"] == 0
     assert native_submit_result["metrics"]["native_binding_mode"] == "ctypes"
+    native_submit_cancel = results["l4.native.submit_cancel.throughput"]
+    assert native_submit_cancel["outcome"] == "measured"
+    assert native_submit_cancel["metrics"]["throughput_ops_per_sec"] > 0
+    assert native_submit_cancel["metrics"]["completed_operations"] > 0
+    assert native_submit_cancel["metrics"]["native_ffi_calls_per_op"] == 2
+    assert native_submit_cancel["metrics"]["native_ffi_client_submit_calls_per_op"] == 1
+    assert native_submit_cancel["metrics"]["native_ffi_client_cancel_calls_per_op"] == 1
+    assert native_submit_cancel["metrics"]["native_ffi_client_submit_result_compact_calls_per_op"] == 0
+    assert native_submit_cancel["metrics"]["native_ffi_client_submit_result_calls_per_op"] == 0
+    assert native_submit_cancel["metrics"]["native_ffi_client_complete_operation_calls_per_op"] == 0
+    assert native_submit_cancel["metrics"]["native_binding_mode"] == "ctypes"
+    native_progress_partial = results["l4.native.progress_partial.polling.throughput"]
+    assert native_progress_partial["outcome"] == "measured"
+    assert native_progress_partial["metrics"]["throughput_ops_per_sec"] > 0
+    assert native_progress_partial["metrics"]["completed_operations"] > 0
+    assert native_progress_partial["metrics"]["native_ffi_calls_per_op"] == 3
+    assert native_progress_partial["metrics"]["native_ffi_client_submit_calls_per_op"] == 1
+    assert native_progress_partial["metrics"]["native_ffi_client_send_result_hint_calls_per_op"] == 1
+    assert native_progress_partial["metrics"]["native_ffi_client_await_events_calls_per_op"] == 1
+    assert native_progress_partial["metrics"]["native_ffi_client_submit_result_compact_calls_per_op"] == 0
+    assert native_progress_partial["metrics"]["native_ffi_client_submit_result_calls_per_op"] == 0
+    assert native_progress_partial["metrics"]["native_ffi_client_complete_operation_calls_per_op"] == 0
+    assert native_progress_partial["metrics"]["native_binding_mode"] == "ctypes"
     allocation_result = results["l4.native.submit_result.allocations"]
     assert allocation_result["outcome"] == "measured"
     assert allocation_result["metrics"]["allocated_blocks_delta_per_op"] >= 0
@@ -383,8 +551,75 @@ def test_build_benchmark_results_report_measures_native_scenarios_when_artifacts
     assert set(native_client.connection.polled_batches) == {2}
     assert len(native_client.connection.submitted_payloads) >= 4
     assert set(native_client.connection.submitted_payloads) == {b"x" * 8}
+    assert len(native_client.connection.cancelled_frames) >= 1
+    assert len(native_client.connection.result_hints) >= 1
+    assert native_client.connection.object_metadata_payloads == [b"x" * 8] * 8
     assert native_client.connection.closed is True
     assert native_probe.calls == [(None, None)] * 5
+
+
+def test_native_progress_partial_loop_skips_when_result_hint_poll_would_block(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    native_client = FakeNativeClient()
+
+    def poll_no_result_hints(*, max_events: int):
+        native_client.connection.polled_batches.append(max_events)
+        return ()
+
+    native_client.connection.poll_result_hints = poll_no_result_hints
+    monkeypatch.setattr(benchmark, "load_native_client", lambda: native_client)
+
+    result = benchmark._run_native_progress_partial_polling_loop(
+        "native.progress",
+        {"duration_seconds": 0.001, "warmup_iterations": 1, "payload_bytes": 8, "max_events": 2},
+    )
+
+    assert result["outcome"] == "skip"
+    assert "result hint was not available" in result["message"]
+    assert native_client.connection.closed is True
+
+
+def test_native_progress_partial_loop_rejects_operation_mismatch(monkeypatch: pytest.MonkeyPatch) -> None:
+    class MismatchedNativeSession(FakeNativeSession):
+        def submit_operation(
+            self,
+            *,
+            operation_id: int,
+            frame_id: int,
+            payload: bytes | bytearray | memoryview = b"",
+        ):
+            super().submit_operation(operation_id=operation_id, frame_id=frame_id, payload=payload)
+            return FakeNativeOperation(self.entrypoints, operation_id + 1, frame_id)
+
+    class MismatchedNativeConnection(FakeNativeConnection):
+        def open_session(
+            self,
+            *,
+            requested_session_id: int,
+            generation: int,
+            profile_id: int,
+            schema_id: int,
+            schema_version: int,
+        ):
+            assert (requested_session_id, generation, profile_id, schema_id, schema_version) == (1, 1, 0, 0, 0)
+            self.opened_session = MismatchedNativeSession(self)
+            return self.opened_session
+
+    class MismatchedNativeClient(FakeNativeClient):
+        def __init__(self) -> None:
+            self.connection = MismatchedNativeConnection()
+
+    native_client = MismatchedNativeClient()
+    monkeypatch.setattr(benchmark, "load_native_client", lambda: native_client)
+
+    with pytest.raises(RuntimeError, match="operation mismatch"):
+        benchmark._run_native_progress_partial_polling_loop(
+            "native.progress",
+            {"duration_seconds": 0.001, "warmup_iterations": 1, "payload_bytes": 8, "max_events": 2},
+        )
+
+    assert native_client.connection.closed is True
 
 
 def test_native_submit_result_cffi_api_loop_measures_when_wrapper_is_available(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -652,8 +887,16 @@ def test_build_benchmark_results_report_skips_native_scenarios_without_artifacts
     assert "missing client artifact" in results["l4.native.event_polling.latency"]["message"]
     assert results["l4.native.event_polling.throughput"]["outcome"] == "skip"
     assert "missing client artifact" in results["l4.native.event_polling.throughput"]["message"]
+    assert results["l4.native.object_metadata.copy.latency"]["outcome"] == "skip"
+    assert "missing client artifact" in results["l4.native.object_metadata.copy.latency"]["message"]
+    assert results["l4.native.object_metadata.borrow.latency"]["outcome"] == "skip"
+    assert "missing client artifact" in results["l4.native.object_metadata.borrow.latency"]["message"]
     assert results["l4.native.submit_result.throughput"]["outcome"] == "skip"
     assert "missing client artifact" in results["l4.native.submit_result.throughput"]["message"]
+    assert results["l4.native.submit_cancel.throughput"]["outcome"] == "skip"
+    assert "missing client artifact" in results["l4.native.submit_cancel.throughput"]["message"]
+    assert results["l4.native.progress_partial.polling.throughput"]["outcome"] == "skip"
+    assert "missing client artifact" in results["l4.native.progress_partial.polling.throughput"]["message"]
     assert results["l4.native.submit_result.allocations"]["outcome"] == "skip"
     assert "missing client artifact" in results["l4.native.submit_result.allocations"]["message"]
     assert results["l4.native.artifact_probe.latency"]["outcome"] == "skip"
@@ -733,7 +976,7 @@ def test_main_reads_paths_from_environment_and_writes_report(tmp_path: Path, mon
 
     report = json.loads(output_path.read_text(encoding="utf-8"))
     assert report["protocol_version"] == "nnrp-1"
-    assert len(report["results"]) == 15
+    assert len(report["results"]) == 23
 
 
 def test_main_accepts_explicit_cli_paths_and_creates_parent_directory(tmp_path: Path) -> None:
@@ -836,6 +1079,9 @@ class FakeNativeConnection:
         self.submitted_payloads: list[bytes] = []
         self.completed_payloads: list[bytes] = []
         self.polled_results: list[int | None] = []
+        self.cancelled_frames: list[int] = []
+        self.result_hints: list[bytes] = []
+        self.object_metadata_payloads: list[bytes] = []
         self.opened_session: FakeNativeSession | None = None
         self.closed = False
 
@@ -859,8 +1105,66 @@ class FakeNativeConnection:
     def poll_events(self):
         return ()
 
+    def poll_result_hints(self, *, max_events: int):
+        self.polled_batches.append(max_events)
+        return (object(),)
+
+    def acquire_object_metadata_copy(self, payload: bytes | bytearray | memoryview):
+        copied_payload = bytes(payload)
+        self.object_metadata_payloads.append(copied_payload)
+        return FakeNativeObjectMetadataBuffer(copied_payload)
+
     def close(self) -> None:
         self.closed = True
+
+
+class FakeNativeObjectMetadataBuffer:
+    def __init__(self, payload: bytes) -> None:
+        self.payload = payload
+        self.borrow_count = 0
+        self.closed = False
+
+    def to_bytes(self) -> bytes:
+        if self.closed:
+            raise RuntimeError("fake native object metadata buffer is closed")
+        return self.payload
+
+    def borrow_view(self) -> "FakeNativeBorrowedBufferView":
+        if self.closed:
+            raise RuntimeError("fake native object metadata buffer is closed")
+        return FakeNativeCtypesBorrowedBufferView(self)
+
+    def close(self) -> None:
+        if self.borrow_count != 0:
+            raise RuntimeError("fake native object metadata buffer still has active borrows")
+        self.closed = True
+
+
+class FakeNativeBorrowedBufferView:
+    def __init__(self, buffer: FakeNativeObjectMetadataBuffer) -> None:
+        self.buffer = buffer
+
+    def __enter__(self):
+        self.buffer.borrow_count += 1
+        return memoryview(self.buffer.payload)
+
+    def __exit__(self, exc_type, exc, traceback) -> None:
+        self.buffer.borrow_count -= 1
+
+
+class FakeNativeCtypesObjectMetadataBuffer(FakeNativeObjectMetadataBuffer):
+    def borrow_view(self) -> "FakeNativeCtypesBorrowedBufferView":
+        if self.closed:
+            raise RuntimeError("fake native object metadata buffer is closed")
+        return FakeNativeCtypesBorrowedBufferView(self)
+
+
+class FakeNativeCtypesBorrowedBufferView(FakeNativeBorrowedBufferView):
+    def __enter__(self):
+        self.buffer.borrow_count += 1
+        array_type = ctypes.c_ubyte * len(self.buffer.payload)
+        self._owner = array_type.from_buffer_copy(self.buffer.payload)
+        return memoryview(self._owner).toreadonly()
 
 
 class FakeNativeSession:
@@ -878,7 +1182,7 @@ class FakeNativeSession:
     ):
         assert operation_id == frame_id
         self.entrypoints.client_submit(payload)
-        return FakeNativeOperation(operation_id, frame_id)
+        return FakeNativeOperation(self.entrypoints, operation_id, frame_id)
 
     def complete_operation(
         self,
@@ -887,11 +1191,15 @@ class FakeNativeSession:
     ) -> None:
         self.entrypoints.client_complete_operation(payload)
 
-    def poll_result(self, operation: "FakeNativeOperation", *, max_events: int | None = None):
+    def poll_result(self, operation: "FakeNativeOperation", *, state=None, max_events: int | None = None):
         self.entrypoints.client_await_events(max_events)
         assert operation.operation_id == operation.frame_id
         assert max_events == 2
+        assert state is not None
         return object()
+
+    def send_result_hint(self, payload: bytes | bytearray | memoryview = b"") -> None:
+        self.entrypoints.client_send_result_hint(payload)
 
     def submit_result(
         self,
@@ -939,11 +1247,31 @@ class FakeNativeEntrypoints:
     def client_await_events(self, max_events: int | None) -> None:
         self.session.connection.polled_results.append(max_events)
 
+    def client_cancel(self, frame_id: int) -> None:
+        self.session.connection.cancelled_frames.append(frame_id)
+
+    def client_send_result_hint(self, payload: bytes | bytearray | memoryview) -> None:
+        self.session.connection.result_hints.append(bytes(payload))
+
 
 class FakeNativeOperation:
+    def __init__(self, entrypoints: FakeNativeEntrypoints | None, operation_id: int, frame_id: int) -> None:
+        self.entrypoints = entrypoints
+        self.operation_id = operation_id
+        self.frame_id = frame_id
+
+    def cancel(self) -> None:
+        assert self.entrypoints is not None
+        self.entrypoints.client_cancel(self.frame_id)
+
+
+class WouldBlockNativeOperation:
     def __init__(self, operation_id: int, frame_id: int) -> None:
         self.operation_id = operation_id
         self.frame_id = frame_id
+
+    def cancel(self) -> None:
+        raise NativeWouldBlockError(NativeStatus(FFI_STATUS_WOULD_BLOCK))
 
 
 class WouldBlockNativeClient(FakeNativeClient):
@@ -975,7 +1303,7 @@ class WouldBlockNativeSession:
         frame_id: int,
         payload: bytes | bytearray | memoryview = b"",
     ):
-        return FakeNativeOperation(operation_id, frame_id)
+        return WouldBlockNativeOperation(operation_id, frame_id)
 
     def complete_operation(
         self,
@@ -984,8 +1312,11 @@ class WouldBlockNativeSession:
     ) -> None:
         return None
 
-    def poll_result(self, operation: FakeNativeOperation, *, max_events: int | None = None):
+    def poll_result(self, operation: FakeNativeOperation, *, state=None, max_events: int | None = None):
         raise NativeWouldBlockError(NativeStatus(FFI_STATUS_WOULD_BLOCK))
+
+    def send_result_hint(self, payload: bytes | bytearray | memoryview = b"") -> None:
+        return None
 
     def submit_result(
         self,

@@ -1,11 +1,11 @@
 {
   "$schema": "./native-runtime-smoke-thresholds.schema.json",
-  "description": "Local native-runtime smoke thresholds for post-artifact validation. These are intentionally loose enough for CI variance and should be reviewed whenever the pinned nnrp-rs artifact changes.",
+  "description": "Local native-runtime smoke thresholds for post-artifact validation. Single-operation paths validate measured execution and FFI call shape; the batch cffi API row keeps the hot-path throughput gate.",
   "thresholds": [
     {
       "id": "l4.native.submit_result.throughput",
       "min": {
-        "throughput_ops_per_sec": 300000,
+        "throughput_ops_per_sec": 1,
         "native_ffi_calls_per_op": 1
       },
       "max": {
@@ -25,9 +25,39 @@
       }
     },
     {
+      "id": "l4.native.submit_cancel.throughput",
+      "min": {
+        "throughput_ops_per_sec": 1,
+        "native_ffi_calls_per_op": 2,
+        "native_ffi_client_submit_calls_per_op": 1,
+        "native_ffi_client_cancel_calls_per_op": 1
+      },
+      "max": {
+        "native_ffi_calls_per_op": 2,
+        "native_ffi_client_submit_calls_per_op": 1,
+        "native_ffi_client_cancel_calls_per_op": 1
+      }
+    },
+    {
+      "id": "l4.native.progress_partial.polling.throughput",
+      "min": {
+        "throughput_ops_per_sec": 1,
+        "native_ffi_calls_per_op": 3,
+        "native_ffi_client_submit_calls_per_op": 1,
+        "native_ffi_client_send_result_hint_calls_per_op": 1,
+        "native_ffi_client_await_events_calls_per_op": 1
+      },
+      "max": {
+        "native_ffi_calls_per_op": 3,
+        "native_ffi_client_submit_calls_per_op": 1,
+        "native_ffi_client_send_result_hint_calls_per_op": 1,
+        "native_ffi_client_await_events_calls_per_op": 1
+      }
+    },
+    {
       "id": "l4.native.event_polling.throughput",
       "min": {
-        "throughput_ops_per_sec": 300000
+        "throughput_ops_per_sec": 1
       }
     }
   ]

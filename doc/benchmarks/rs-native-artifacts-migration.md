@@ -18,17 +18,18 @@ delegated to versioned native artifacts.
 
 ## Pinned Native Contract
 
-The current Python package consumes `nnrp-rs` native artifact version `1.0.0-preview.3.8`.
+The current Python package consumes `nnrp-rs` native artifact version `1.0.0-preview.4.0`.
 
 This artifact contract includes:
 
 1. `nnrp_runtime_capabilities`.
-2. ABI version `1.6.0`.
+2. ABI version `1.11.0`.
 3. Protocol version `1/0`.
 4. Runtime feature flags for protocol core, client/server APIs, event polling, callback dispatch, cache/schema,
-   recovery, typed payloads, and transport slots.
-5. Transport slot bits for TCP and optional QUIC.
-6. `nnrp_client_submit_result_compact_batch` for packaged cffi API submit/result hot paths.
+   recovery, typed payloads, runtime control frames, runtime objects, cache references, and transport slots.
+5. Transport-scoped native artifacts for TCP, QUIC, IPC, and WebSocket.
+6. Coarse cffi API hot paths for packaged submit/result, submit/cancel, progress/partial-result polling, runtime object
+   metadata, and batch event polling benchmarks.
 
 If a later `nnrp-rs` release changes exported symbol names, ABI struct layout, required feature flags, or
 transport-slot meanings, update this pin and rerun the benchmark plan before accepting the new artifact.
@@ -51,7 +52,8 @@ Rules:
 2. Use the same iteration counts and payload shapes for comparable rows.
 3. Report p50, p95, and p99 latency where the operation is request-like.
 4. Report throughput, CPU, and peak memory where the operation is stream-like.
-5. Keep QUIC benchmark rows separate from TCP and in-memory rows because QUIC is a slot, not a default dependency.
+5. Keep TCP, QUIC, IPC, and WebSocket benchmark rows separate because each transport is a provider artifact, not a
+   configuration flag over a hidden shared transport implementation.
 
 The SDK-local benchmark plan lives in `doc/benchmarks/native-runtime-benchmark-plan.json`.
 
@@ -62,6 +64,7 @@ The SDK-local benchmark plan lives in `doc/benchmarks/native-runtime-benchmark-p
 | Fixture baseline | 2026-05-29 | 1e88eac | N/A | 3.13.1 | windows/amd64 | Intel64 Family 6 Model 183 Stepping 1, GenuineIntel | SDK-local pure Python fixture submit/result loop, 1024-byte payload. |
 | Native ctypes fallback | 2026-06-06 | a7acfba | 1.0.0-preview.3.8 | 3.13.1 | windows/amd64 | Intel64 Family 6 Model 183 Stepping 1, GenuineIntel | Split TCP/QUIC release artifacts installed with `scripts/prepare_native_artifacts.py`; `NNRP_NATIVE_BINDING_MODE=ctypes`. |
 | Native cffi API batch | 2026-06-06 | a7acfba | 1.0.0-preview.3.8 | 3.13.1 | windows/amd64 | Intel64 Family 6 Model 183 Stepping 1, GenuineIntel | Same split artifact install; cffi API wrapper calls `nnrp_client_submit_result_compact_batch` in 1024-operation batches. |
+| Preview4 local smoke | 2026-06-22 | c1bc3e2 | 1.0.0-preview.4.0 | 3.13.5 | windows/amd64 | Intel(R) Core(TM)2 Duo CPU T7700 @ 2.40GHz | Split TCP/QUIC/IPC/WebSocket artifacts plus ABI 1.11.0; local workstation smoke with packaged cffi API extension. |
 
 ## Latency Benchmarks
 
@@ -78,6 +81,10 @@ The SDK-local benchmark plan lives in `doc/benchmarks/native-runtime-benchmark-p
 | Submit/result loop | 1024-byte inline payload | 100000 | Pure Python fixture helper | 3.7 us | 3.9 us | 5.0 us | Fixture helper micro-latency. |
 | Submit/result loop | 1024-byte inline payload | 100000 | Native compact ABI through `ctypes` | 2.2 us | 2.3 us | 2.5 us | `NativeRuntimeSession.submit_result`; event materialization remains lazy. |
 | Submit/result loop | 1024-byte inline payload | 100000 | Native cffi API compact wrapper | 0.5 us | 0.6 us | 0.6 us | Compiled cffi API wrapper over the native compact ABI. |
+| Runtime control metadata | retry-after/result-hint descriptors | 100000 | Preview4 pure Python codec | 47.7 us | 247.3 us | 959.6 us | Local smoke for `l4.runtime.control_metadata.latency`; host jitter is visible. |
+| Runtime object metadata | object/cache-reference descriptors | 100000 | Preview4 pure Python codec | 53.8 us | 149.3 us | 659.8 us | Local smoke for `l4.runtime.object_metadata.latency`. |
+| Runtime object metadata copy | object metadata payload | 100000 | Preview4 native cffi API | 14.5 us | 31.6 us | 152.1 us | Local smoke for `l4.native.object_metadata.copy.latency`. |
+| Runtime object metadata borrowed view | object metadata payload | 100000 | Preview4 native cffi API | 18.8 us | 43.1 us | 223.0 us | Local smoke for `l4.native.object_metadata.borrow.latency`. |
 
 ## Throughput Benchmarks
 
@@ -87,6 +94,29 @@ The SDK-local benchmark plan lives in `doc/benchmarks/native-runtime-benchmark-p
 | Submit/result loop | 1024-byte inline payload | 10 s | Native compact ABI through `ctypes` | 400045.5 ops/s | +51.4% | Zero-compiler fallback path; one compact Rust FFI call per operation. |
 | Submit/result loop | 1024-byte inline payload | 10 s | Native batch compact ABI through cffi API | 8196608.0 ops/s | +3003.8% | Preferred packaged fast path; one batch wrapper call per 1024 operations. Split artifacts are slightly faster than the previous all-in-one artifact run, so no split regression was observed. |
 | Batch event polling | empty batch | 10 s | Native batch event polling through `ctypes` | 390234.1 ops/s | N/A | Native pump smoke baseline. |
+| Submit/result loop | 1024-byte inline payload | 10 s | Preview4 native compact ABI through cffi API | 39738.3 ops/s | N/A | Local smoke; one compact FFI call per operation. |
+| Submit/result loop | 1024-byte inline payload | 10 s | Preview4 native batch compact ABI through cffi API | 2705408.0 ops/s | N/A | Local smoke; one batch wrapper call per 1024 operations. |
+| Submit/cancel loop | 1024-byte inline payload | 10 s | Preview4 native cffi API | 33072.6 ops/s | N/A | One submit and one cancel FFI call per operation. |
+| Progress/partial-result polling | 1024-byte inline payload | 10 s | Preview4 native cffi API | 13509.2 ops/s | N/A | One submit, one result-hint, and one batch result-hint polling call per operation. |
+| IPC transport loopback | 1024-byte inline payload | 10 s | Preview4 IPC provider artifact | 67442.3 ops/s | N/A | Provider-scoped artifact smoke. |
+| WebSocket transport loopback | 1024-byte inline payload | 10 s | Preview4 WebSocket provider artifact | 57326.2 ops/s | N/A | Provider-scoped artifact smoke. |
+| Batch event polling | empty batch | 10 s | Preview4 native cffi API | 122370.3 ops/s | N/A | Event pump remains a coarse native path. |
+
+## Preview4 Hot-Path Comparison
+
+Preview4 rows below come from a local Windows smoke run with prepared `1.0.0-preview.4.0` native artifacts and packaged
+cffi API extensions. They prove the preview4 provider artifacts and coarse cffi call shapes are exercised by the SDK.
+The preview3 rows were gathered on an earlier host snapshot, so the table is a compatibility and smoke comparison rather
+than a final same-machine regression verdict.
+
+| Benchmark | Preview3 baseline | Preview4 target | Preview4 measured | Required check |
+| --- | ---: | ---: | ---: | --- |
+| Submit/result loop through cffi API | 8196608.0 ops/s | >= preview3 baseline on same host | 2705408.0 ops/s | Smoke passed with 0.0009765625 FFI calls per operation; same-host release comparison still required for a regression verdict. |
+| Submit/cancel loop through native API | N/A | >= 1 op/s smoke minimum | 33072.6 ops/s | One submit FFI call plus one cancel FFI call per operation. |
+| Progress/partial-result polling through native API | N/A | >= 1 op/s smoke minimum | 13509.2 ops/s | One submit, one result-hint, and one batch result-hint polling call per operation. |
+| Batch event polling through native API | 390234.1 ops/s | measured and recorded | 122370.3 ops/s | Event pump remains a coarse native path; local smoke threshold passed. |
+| IPC transport loopback | N/A | measured and recorded | 67442.3 ops/s | Provider artifact is present and independently benchmarked. |
+| WebSocket transport loopback | N/A | measured and recorded | 57326.2 ops/s | Provider artifact is present and independently benchmarked. |
 
 ## Profiled CPU And Memory Smoke
 
@@ -95,6 +125,9 @@ The SDK-local benchmark plan lives in `doc/benchmarks/native-runtime-benchmark-p
 | Submit/result loop | 1024-byte inline payload | 10 s | Native compact ABI through `ctypes` | 40434.6 ops/s | 98.1% | 1188 B | Tracing overhead is intentionally not compared with raw throughput. |
 | Submit/result loop | 1024-byte inline payload | 10 s | Native batch compact ABI through cffi API | 7985766.4 ops/s | 94.7% | 380 B | Batch wrapper keeps Python-side traced memory nearly flat. |
 | Batch event polling | empty batch | 10 s | Native batch event polling through `ctypes` | 71057.7 ops/s | 93.9% | 6361 B | Native pump memory baseline. |
+| Submit/result loop | 1024-byte inline payload | 10 s | Preview4 native compact ABI through cffi API | 9767.6 ops/s | 80.8% | 1088 B | Local traced smoke for the one-call compact path. |
+| Submit/result loop | 1024-byte inline payload | 10 s | Preview4 native batch compact ABI through cffi API | 2453401.6 ops/s | 79.4% | 380 B | Batch wrapper remains the preferred Python hot path. |
+| Batch event polling | empty batch | 10 s | Preview4 native cffi API | 21226.0 ops/s | 83.1% | 6365 B | Local traced smoke for event-pump overhead. |
 
 ## Smoke Threshold Gate
 

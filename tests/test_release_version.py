@@ -45,6 +45,14 @@ def test_build_package_version_uses_current_date_when_version_date_missing(monke
 def test_build_tag_name_uses_short_preview_tag_for_release_candidates() -> None:
     assert resolve_version.build_tag_name("1.0.0rc2") == "v1.0.0-preview.2"
     assert resolve_version.build_tag_name("1.0.0rc3.post1") == "v1.0.0-preview.3.post1"
+    assert resolve_version.build_tag_name("1.0.0rc4") == "v1.0.0-preview.4"
+
+
+def test_current_release_version_tracks_preview4() -> None:
+    release_version = resolve_version.read_release_version()
+
+    assert release_version == "1.0.0rc4"
+    assert resolve_version.build_tag_name(release_version) == "v1.0.0-preview.4"
 
 
 def test_build_tag_name_keeps_full_version_for_non_preview_release() -> None:

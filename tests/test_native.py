@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import ctypes
+import json
 import time
 from pathlib import Path
 from types import SimpleNamespace
@@ -10,12 +11,15 @@ import pytest
 
 import nnrp.native as native_module
 from nnrp.cache import CacheLeaseOutcome, CacheObjectIdentity
+from nnrp.core import MessageType
 from nnrp.core.messages.control import (
     ResultHintBudgetPolicy,
     ResultHintCongestionState,
     ResultHintMetadata,
     ResultHintReason,
     SessionMigrateAckMetadata,
+    TransportId,
+    TransportPolicy,
 )
 from nnrp.native import (
     CACHE_ERROR_DEPENDENCY_INVALID,
@@ -43,18 +47,24 @@ from nnrp.native import (
     HANDLE_KIND_CACHE_LEASE,
     HANDLE_KIND_CONNECTION,
     HANDLE_KIND_EVENT_PUMP,
+    HANDLE_KIND_OBJECT_DESCRIPTOR,
     HANDLE_KIND_OPERATION,
     HANDLE_KIND_SCHEMA_REGISTRY,
     HANDLE_KIND_SESSION,
     NATIVE_BINDING_MODE_ENV,
     REQUIRED_RUNTIME_FEATURES,
     RESULT_STATE_COMPLETED,
+    RUNTIME_CONTROL_FEATURE_FLAGS,
+    RUNTIME_OBJECT_FEATURE_FLAGS,
     SCHEMA_ERROR_HASH_CONFLICT,
     SESSION_ERROR_PRIORITY_REJECTED,
     SESSION_RECOVERY_OUTCOME_RESUME_ENABLED,
     SESSION_RECOVERY_OUTCOME_RESUMED,
+    TRANSPORT_SLOT_IPC,
     TRANSPORT_SLOT_TCP,
+    TRANSPORT_SLOT_WEBSOCKET,
     NativeArtifactError,
+    NativeBorrowedBufferView,
     NativeBufferHandle,
     NativeBufferView,
     NativeCacheLeaseBackend,
@@ -70,6 +80,9 @@ from nnrp.native import (
     NativeInvalidHandleError,
     NativeInvalidStateError,
     NativeMutableBufferView,
+    NativeObjectDescriptor,
+    NativeObjectDescriptorHandle,
+    NativeObjectMetadataBuffer,
     NativeOperationHandle,
     NativeOperationLifecycle,
     NativeOperationSchedulingHint,
@@ -84,9 +97,13 @@ from nnrp.native import (
     NativeRuntimeDiagnostic,
     NativeRuntimeEntrypoints,
     NativeRuntimeEvent,
+    NativeRuntimeFeatureFlag,
     NativeRuntimeOperation,
     NativeRuntimePollResult,
     NativeRuntimeResult,
+    NativeRuntimeServer,
+    NativeRuntimeServerOperation,
+    NativeRuntimeServerSession,
     NativeRuntimeSession,
     NativeSchemaCodec,
     NativeSchemaRegistry,
@@ -96,7 +113,13 @@ from nnrp.native import (
     NativeSessionRecoveryOutcome,
     NativeStatus,
     NativeStructuredDiagnostic,
+    NativeTransportEndpoint,
+    NativeTransportEndpointSupport,
+    NativeTransportProbeSample,
+    NativeTransportProvider,
     NativeWouldBlockError,
+    NnrpEndpoint,
+    NnrpEndpointSupport,
     _load_native_cffi_submit_result_api,
     _NativeCffiSubmitResultApi,
     _NnrpBufferView,
@@ -119,6 +142,7 @@ from nnrp.native import (
     _NnrpPollResult,
     _NnrpProtocolVersion,
     _NnrpRuntimeCapabilities,
+    _NnrpRuntimeObjectDescriptor,
     _NnrpSchemaDescriptorHeader,
     _NnrpServerAcceptRequest,
     _NnrpServerBindRequest,
@@ -133,16 +157,41 @@ from nnrp.native import (
     _normalize_arch,
     current_native_platform,
     default_artifact_root,
+    diagnose_native_transport_endpoint_support,
+    diagnose_nnrp_endpoint_support,
+    discover_native_transport_providers,
     load_native_client,
     load_native_library,
     load_native_recovery_codec,
     load_native_runtime,
     load_native_schema_codec,
     native_library_name,
+    native_runtime_feature_flag_names,
+    native_runtime_feature_flags_available,
+    native_transport_slot_names,
+    parse_native_transport_endpoint,
+    parse_nnrp_endpoint,
     probe_native_artifact,
     raise_for_native_status,
     resolve_native_artifact,
+    resolve_native_transport_provider,
     select_native_runtime_backend,
+    select_native_transport_provider,
+)
+from nnrp.runtime import (
+    MemoryLocationHint,
+    ObjectDeltaMetadata,
+    ObjectDescriptorMetadata,
+    OwnershipHint,
+    PartialResultMetadata,
+    ProgressMetadata,
+    ResultDropReasonCode,
+    ResultDropReasonMetadata,
+    RuntimeObjectKind,
+    RuntimeRole,
+    decode_runtime_control_metadata,
+    decode_runtime_object_metadata,
+    encode_runtime_control_metadata,
 )
 from nnrp.schema import (
     Preview3TypedPayloadDescriptor,
@@ -247,6 +296,12 @@ class FakeRuntimeLibrary(FakeEntrypointLibrary):
         self.nnrp_client_send_result_hint.handler = self._send_result_hint
         self.nnrp_client_await_event.handler = self._await_event
         self.nnrp_client_await_events.handler = self._await_events
+        self.nnrp_server_bind.handler = self._server_bind
+        self.nnrp_server_accept.handler = self._server_accept
+        self.nnrp_server_receive_submit.handler = self._server_receive_submit
+        self.nnrp_server_send_result.handler = self._server_send_result
+        self.nnrp_server_send_flow_update.handler = self._send_flow_update
+        self.nnrp_server_close.handler = self._close
         self.nnrp_control.handler = self._control
         self.nnrp_schema_descriptor_parse.handler = self._schema_descriptor_parse
         self.nnrp_schema_descriptor_write.handler = self._schema_descriptor_write
@@ -267,6 +322,13 @@ class FakeRuntimeLibrary(FakeEntrypointLibrary):
         self.nnrp_buffer_acquire_copy.handler = self._buffer_acquire_copy
         self.nnrp_buffer_view.handler = self._buffer_view
         self.nnrp_buffer_release.handler = self._buffer_release
+        self.nnrp_object_metadata_buffer_acquire_copy.handler = self._object_metadata_buffer_acquire_copy
+        self.nnrp_object_metadata_buffer_view.handler = self._object_metadata_buffer_view
+        self.nnrp_object_metadata_buffer_release.handler = self._object_metadata_buffer_release
+        self.nnrp_object_descriptor_create.handler = self._object_descriptor_create
+        self.nnrp_object_descriptor_view.handler = self._object_descriptor_view
+        self.nnrp_object_descriptor_metadata_snapshot.handler = self._object_descriptor_metadata_snapshot
+        self.nnrp_object_descriptor_release.handler = self._object_descriptor_release
         self.nnrp_cache_query.handler = self._cache_query
         self.nnrp_cache_touch.handler = self._cache_touch
         self.nnrp_cache_prefetch.handler = self._cache_prefetch
@@ -274,6 +336,7 @@ class FakeRuntimeLibrary(FakeEntrypointLibrary):
         self.submitted_payloads: list[bytes] = []
         self._schema_registry: dict[tuple[int, int], SchemaDescriptorHeader] = {}
         self._buffers: dict[int, ctypes.Array[ctypes.c_char]] = {}
+        self._object_descriptors: dict[int, tuple[_NnrpRuntimeObjectDescriptor, ctypes.Array[ctypes.c_char]]] = {}
         self._cache_leases: dict[tuple[int, int, int, int], _NnrpHandle] = {}
 
     def _client_connect(self, request: _NnrpClientConnectRequest, out_handle: object) -> _NnrpFfiStatus:
@@ -282,6 +345,16 @@ class FakeRuntimeLibrary(FakeEntrypointLibrary):
 
     def _connection_bootstrap(self, request: _NnrpConnectionBootstrap, out_handle: object) -> _NnrpFfiStatus:
         _write_handle(out_handle, _NnrpHandle(HANDLE_KIND_CONNECTION, request.connection_id, request.generation, 0))
+        return self.status
+
+    def _server_bind(self, request: _NnrpServerBindRequest, out_handle: object) -> _NnrpFfiStatus:
+        _write_handle(out_handle, _NnrpHandle(HANDLE_KIND_CONNECTION, request.server_id, request.generation, 0))
+        return self.status
+
+    def _server_accept(self, request: _NnrpServerAcceptRequest, out_handle: object) -> _NnrpFfiStatus:
+        if request.server.kind != HANDLE_KIND_CONNECTION:
+            return _NnrpFfiStatus(FFI_STATUS_INVALID_HANDLE, 0, 0, 0)
+        _write_handle(out_handle, _NnrpHandle(HANDLE_KIND_SESSION, request.session_id, request.generation, 0))
         return self.status
 
     def _open_session(self, request: _NnrpSessionOpenRequest, out_handle: object) -> _NnrpFfiStatus:
@@ -303,6 +376,17 @@ class FakeRuntimeLibrary(FakeEntrypointLibrary):
         return self.status
 
     def _submit(self, request: _NnrpSubmitRequest, out_handle: object) -> _NnrpFfiStatus:
+        self.submitted_payloads.append(_read_buffer_view(request.payload))
+        _write_handle(out_handle, _NnrpHandle(HANDLE_KIND_OPERATION, request.operation_id, 1, 0))
+        return self.status
+
+    def _server_receive_submit(
+        self,
+        request: _NnrpServerReceiveSubmitRequest,
+        out_handle: object,
+    ) -> _NnrpFfiStatus:
+        if request.session.kind != HANDLE_KIND_SESSION:
+            return _NnrpFfiStatus(FFI_STATUS_INVALID_HANDLE, 0, 0, 0)
         self.submitted_payloads.append(_read_buffer_view(request.payload))
         _write_handle(out_handle, _NnrpHandle(HANDLE_KIND_OPERATION, request.operation_id, 1, 0))
         return self.status
@@ -359,6 +443,13 @@ class FakeRuntimeLibrary(FakeEntrypointLibrary):
             len(result_payload),
         )
         result_target.event.diagnostic.status = NativeStatus.ok().to_ffi()
+        return self.status
+
+    def _server_send_result(self, request: _NnrpServerSendResultRequest) -> _NnrpFfiStatus:
+        if request.operation.kind != HANDLE_KIND_OPERATION:
+            return _NnrpFfiStatus(FFI_STATUS_INVALID_HANDLE, 0, 0, 0)
+        self._event_payload_owner = ctypes.create_string_buffer(_read_buffer_view(request.payload), request.payload.len)
+        self.event_kind = EVENT_KIND_RESULT_PUSHED
         return self.status
 
     def _submit_result_compact(
@@ -571,6 +662,66 @@ class FakeRuntimeLibrary(FakeEntrypointLibrary):
         self._buffers.pop(buffer.id, None)
         return self.status
 
+    def _object_metadata_buffer_acquire_copy(
+        self,
+        source: _NnrpBufferView,
+        out_buffer: object,
+        out_view: object,
+    ) -> _NnrpFfiStatus:
+        return self._buffer_acquire_copy(source, out_buffer, out_view)
+
+    def _object_metadata_buffer_view(self, buffer: _NnrpHandle, out_view: object) -> _NnrpFfiStatus:
+        return self._buffer_view(buffer, out_view)
+
+    def _object_metadata_buffer_release(self, buffer: _NnrpHandle) -> _NnrpFfiStatus:
+        return self._buffer_release(buffer)
+
+    def _object_descriptor_create(
+        self,
+        descriptor: _NnrpRuntimeObjectDescriptor,
+        metadata: _NnrpBufferView,
+        out_handle: object,
+    ) -> _NnrpFfiStatus:
+        payload = _read_buffer_view(metadata)
+        descriptor_id = len(self._object_descriptors) + 1000
+        owner = ctypes.create_string_buffer(payload, len(payload))
+        self._object_descriptors[descriptor_id] = (_copy_runtime_object_descriptor(descriptor), owner)
+        _write_handle(out_handle, _NnrpHandle(HANDLE_KIND_OBJECT_DESCRIPTOR, descriptor_id, 1, 0))
+        return self.status
+
+    def _object_descriptor_view(
+        self,
+        handle: _NnrpHandle,
+        out_descriptor: object,
+        out_metadata: object,
+    ) -> _NnrpFfiStatus:
+        item = self._object_descriptors.get(handle.id)
+        if handle.kind != HANDLE_KIND_OBJECT_DESCRIPTOR or item is None:
+            return _NnrpFfiStatus(FFI_STATUS_INVALID_HANDLE, 0, 0, 0)
+        descriptor, owner = item
+        _write_runtime_object_descriptor(out_descriptor, descriptor)
+        _write_buffer_view(out_metadata, owner)
+        return self.status
+
+    def _object_descriptor_metadata_snapshot(
+        self,
+        handle: _NnrpHandle,
+        out_buffer: object,
+        out_view: object,
+    ) -> _NnrpFfiStatus:
+        item = self._object_descriptors.get(handle.id)
+        if handle.kind != HANDLE_KIND_OBJECT_DESCRIPTOR or item is None:
+            return _NnrpFfiStatus(FFI_STATUS_INVALID_HANDLE, 0, 0, 0)
+        _, owner = item
+        source = _NnrpBufferView(ctypes.cast(owner, ctypes.c_void_p), len(owner.raw))
+        return self._buffer_acquire_copy(source, out_buffer, out_view)
+
+    def _object_descriptor_release(self, handle: _NnrpHandle) -> _NnrpFfiStatus:
+        if handle.kind != HANDLE_KIND_OBJECT_DESCRIPTOR:
+            return _NnrpFfiStatus(FFI_STATUS_INVALID_HANDLE, 0, 0, 0)
+        self._object_descriptors.pop(handle.id, None)
+        return self.status
+
     def _cache_query(self, request: _NnrpCacheLeaseRequest, out_result: object) -> _NnrpFfiStatus:
         return self._write_cache_result(request, out_result, outcome=0)
 
@@ -743,6 +894,45 @@ class FakeRuntimeLibrary(FakeEntrypointLibrary):
         return self.status
 
 
+class BatchControlRuntimeLibrary(FakeRuntimeLibrary):
+    def __init__(self, events: list[tuple[int, bytes]]) -> None:
+        super().__init__()
+        self._batch_events = events
+        self._batch_payload_owners = [ctypes.create_string_buffer(payload, len(payload)) for _, payload in events]
+
+    def _await_events(
+        self,
+        handle: _NnrpHandle,
+        out_events: object,
+        event_capacity: int,
+        out_event_count: object,
+    ) -> _NnrpFfiStatus:
+        count_target = getattr(out_event_count, "_obj", None)
+        if count_target is None:
+            count_target = ctypes.cast(out_event_count, ctypes.POINTER(ctypes.c_size_t)).contents
+        count_target.value = 0
+        if event_capacity <= 0:
+            return _NnrpFfiStatus(FFI_STATUS_INVALID_ARGUMENT, 0, 0, 0)
+
+        emitted = min(event_capacity, len(self._batch_events))
+        if emitted == 0:
+            return _NnrpFfiStatus(FFI_STATUS_WOULD_BLOCK, 0, 0, 0)
+
+        events = ctypes.cast(out_events, ctypes.POINTER(_NnrpEvent))
+        for index in range(emitted):
+            kind, payload = self._batch_events[index]
+            owner = self._batch_payload_owners[index]
+            events[index].kind = kind
+            events[index].connection = handle
+            events[index].session = _NnrpHandle(HANDLE_KIND_SESSION, 41 + index, 3, 0)
+            events[index].operation = _NnrpHandle(HANDLE_KIND_OPERATION, 99 + index, 1, 0)
+            events[index].frame_id = 7 + index
+            events[index].payload = _NnrpBufferView(ctypes.cast(owner, ctypes.c_void_p), len(payload))
+            events[index].diagnostic.status = NativeStatus.ok().to_ffi()
+        count_target.value = emitted
+        return self.status
+
+
 class ExpiringCacheRuntimeLibrary(FakeRuntimeLibrary):
     def _cache_query(self, request: _NnrpCacheLeaseRequest, out_result: object) -> _NnrpFfiStatus:
         result = _cache_result_target(out_result)
@@ -775,6 +965,39 @@ def _write_buffer_view(out_view: object, owner: ctypes.Array[ctypes.c_char]) -> 
         target = ctypes.cast(out_view, ctypes.POINTER(_NnrpBufferView)).contents
     target.ptr = ctypes.cast(owner, ctypes.c_void_p)
     target.len = len(owner.raw)
+
+
+def _copy_runtime_object_descriptor(descriptor: _NnrpRuntimeObjectDescriptor) -> _NnrpRuntimeObjectDescriptor:
+    return _NnrpRuntimeObjectDescriptor(
+        descriptor.object_id,
+        descriptor.object_kind,
+        descriptor.producer_role,
+        descriptor.consumer_role,
+        descriptor.session_id,
+        descriptor.byte_size,
+        descriptor.compute_cost_units,
+        descriptor.memory_location_hint,
+        descriptor.ownership_hint,
+        descriptor.lifetime_hint_ms,
+        descriptor.metadata_bytes,
+    )
+
+
+def _write_runtime_object_descriptor(out_descriptor: object, descriptor: _NnrpRuntimeObjectDescriptor) -> None:
+    target = getattr(out_descriptor, "_obj", None)
+    if target is None:
+        target = ctypes.cast(out_descriptor, ctypes.POINTER(_NnrpRuntimeObjectDescriptor)).contents
+    target.object_id = descriptor.object_id
+    target.object_kind = descriptor.object_kind
+    target.producer_role = descriptor.producer_role
+    target.consumer_role = descriptor.consumer_role
+    target.session_id = descriptor.session_id
+    target.byte_size = descriptor.byte_size
+    target.compute_cost_units = descriptor.compute_cost_units
+    target.memory_location_hint = descriptor.memory_location_hint
+    target.ownership_hint = descriptor.ownership_hint
+    target.lifetime_hint_ms = descriptor.lifetime_hint_ms
+    target.metadata_bytes = descriptor.metadata_bytes
 
 
 def _cache_result_target(out_result: object) -> _NnrpCacheLeaseResult:
@@ -915,6 +1138,13 @@ RUNTIME_ENTRYPOINT_SYMBOLS = [
     "nnrp_buffer_acquire_copy",
     "nnrp_buffer_view",
     "nnrp_buffer_release",
+    "nnrp_object_metadata_buffer_acquire_copy",
+    "nnrp_object_metadata_buffer_view",
+    "nnrp_object_metadata_buffer_release",
+    "nnrp_object_descriptor_create",
+    "nnrp_object_descriptor_view",
+    "nnrp_object_descriptor_metadata_snapshot",
+    "nnrp_object_descriptor_release",
     "nnrp_cache_query",
     "nnrp_cache_touch",
     "nnrp_cache_prefetch",
@@ -983,9 +1213,586 @@ def test_resolve_native_artifact_supports_split_transport_artifacts(tmp_path: Pa
     assert resolve_native_artifact(tmp_path, native_platform, transport="quic") == quic_artifact
 
 
+def test_resolve_native_artifact_supports_preview4_ipc_and_websocket_artifacts(tmp_path: Path) -> None:
+    ipc_dir = tmp_path / "linux-x86_64" / "ipc"
+    websocket_dir = tmp_path / "linux-x86_64" / "websocket"
+    ipc_dir.mkdir(parents=True)
+    websocket_dir.mkdir(parents=True)
+    ipc_artifact = ipc_dir / "libnnrp_ffi.so"
+    websocket_artifact = websocket_dir / "libnnrp_ffi.so"
+    ipc_artifact.write_bytes(b"ipc")
+    websocket_artifact.write_bytes(b"websocket")
+    native_platform = NativePlatform("linux", "x86_64")
+
+    assert resolve_native_artifact(tmp_path, native_platform, transport="ipc") == ipc_artifact
+    assert resolve_native_artifact(tmp_path, native_platform, transport="websocket") == websocket_artifact
+
+
 def test_resolve_native_artifact_rejects_unknown_transport_scope(tmp_path: Path) -> None:
     with pytest.raises(NativeArtifactError, match="unsupported native transport scope"):
-        resolve_native_artifact(tmp_path, NativePlatform("linux", "x86_64"), transport="websocket")
+        resolve_native_artifact(tmp_path, NativePlatform("linux", "x86_64"), transport="stdio")
+
+
+def _write_provider_artifact(root: Path, scope: str, *, slots: list[str] | None = None) -> Path:
+    artifact_dir = root / "linux-x86_64" / scope
+    artifact_dir.mkdir(parents=True)
+    artifact = artifact_dir / "libnnrp_ffi.so"
+    artifact.write_bytes(scope.encode("utf-8"))
+    (artifact_dir / "manifest.json").write_text(
+        json.dumps(
+            {
+                "package": f"nnrp-ffi-transport-{scope}",
+                "transport_scope": scope,
+                "transport_slots": slots or [scope],
+                "enabled_features": [f"transport-{scope}"],
+                "provider_cost": {"latency_bias": 1},
+                "provider_preference": {"locality": "node"},
+                "platform_limitations": ["loopback-only"],
+            }
+        ),
+        encoding="utf-8",
+    )
+    return artifact
+
+
+def _write_provider_artifact_with_manifest(root: Path, scope: str, manifest: object) -> Path:
+    artifact_dir = root / "linux-x86_64" / scope
+    artifact_dir.mkdir(parents=True)
+    artifact = artifact_dir / "libnnrp_ffi.so"
+    artifact.write_bytes(scope.encode("utf-8"))
+    (artifact_dir / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+    return artifact
+
+
+def test_discover_native_transport_providers_reports_preview4_artifact_metadata(tmp_path: Path) -> None:
+    tcp_artifact = _write_provider_artifact(tmp_path, "tcp")
+    ipc_artifact = _write_provider_artifact(tmp_path, "ipc")
+    websocket_artifact = _write_provider_artifact(tmp_path, "websocket")
+
+    providers = discover_native_transport_providers(tmp_path, NativePlatform("linux", "x86_64"))
+
+    assert providers == (
+        NativeTransportProvider(
+            name="tcp",
+            artifact_path=tcp_artifact,
+            manifest_path=tcp_artifact.with_name("manifest.json"),
+            transport_slots=("tcp",),
+            enabled_features=("transport-tcp",),
+            package="nnrp-ffi-transport-tcp",
+            transport_scope="tcp",
+            platform_tag="linux-x86_64",
+            cost={"latency_bias": 1},
+            preference={"locality": "node"},
+            limitations=("loopback-only",),
+        ),
+        NativeTransportProvider(
+            name="ipc",
+            artifact_path=ipc_artifact,
+            manifest_path=ipc_artifact.with_name("manifest.json"),
+            transport_slots=("ipc",),
+            enabled_features=("transport-ipc",),
+            package="nnrp-ffi-transport-ipc",
+            transport_scope="ipc",
+            platform_tag="linux-x86_64",
+            cost={"latency_bias": 1},
+            preference={"locality": "node"},
+            limitations=("loopback-only",),
+        ),
+        NativeTransportProvider(
+            name="websocket",
+            artifact_path=websocket_artifact,
+            manifest_path=websocket_artifact.with_name("manifest.json"),
+            transport_slots=("websocket",),
+            enabled_features=("transport-websocket",),
+            package="nnrp-ffi-transport-websocket",
+            transport_scope="websocket",
+            platform_tag="linux-x86_64",
+            cost={"latency_bias": 1},
+            preference={"locality": "node"},
+            limitations=("loopback-only",),
+        ),
+    )
+
+
+def test_discover_native_transport_provider_all_scope_infers_slots_from_manifest(tmp_path: Path) -> None:
+    platform_dir = tmp_path / "linux-x86_64"
+    platform_dir.mkdir()
+    artifact = platform_dir / "libnnrp_ffi.so"
+    artifact.write_bytes(b"all")
+    (platform_dir / "manifest.json").write_text(json.dumps({"transport_scope": "all"}), encoding="utf-8")
+
+    providers = discover_native_transport_providers(tmp_path, NativePlatform("linux", "x86_64"))
+
+    assert providers == (
+        NativeTransportProvider(
+            name="tcp",
+            artifact_path=artifact,
+            manifest_path=artifact.with_name("manifest.json"),
+            transport_slots=("tcp", "quic", "ipc", "websocket"),
+            enabled_features=(),
+            package=None,
+            transport_scope="all",
+            platform_tag="linux-x86_64",
+        ),
+    )
+
+
+def test_resolve_native_transport_provider_rejects_unadvertised_provider(tmp_path: Path) -> None:
+    _write_provider_artifact(tmp_path, "tcp")
+
+    provider = resolve_native_transport_provider(
+        "tcp",
+        root=tmp_path,
+        native_platform=NativePlatform("linux", "x86_64"),
+    )
+
+    assert provider.name == "tcp"
+    with pytest.raises(NativeArtifactError, match="not advertised"):
+        resolve_native_transport_provider("ipc", root=tmp_path, native_platform=NativePlatform("linux", "x86_64"))
+
+
+def test_discover_native_transport_provider_rejects_manifest_scope_slot_mismatch(tmp_path: Path) -> None:
+    _write_provider_artifact(tmp_path, "ipc", slots=["tcp"])
+
+    with pytest.raises(NativeArtifactError, match="not listed in transport_slots"):
+        discover_native_transport_providers(tmp_path, NativePlatform("linux", "x86_64"))
+
+
+@pytest.mark.parametrize(
+    ("manifest_text", "match"),
+    [
+        ("{", "invalid JSON"),
+        ("[]", "must be a JSON object"),
+    ],
+)
+def test_discover_native_transport_provider_rejects_invalid_manifest_document(
+    tmp_path: Path,
+    manifest_text: str,
+    match: str,
+) -> None:
+    artifact_dir = tmp_path / "linux-x86_64" / "ipc"
+    artifact_dir.mkdir(parents=True)
+    (artifact_dir / "libnnrp_ffi.so").write_bytes(b"ipc")
+    (artifact_dir / "manifest.json").write_text(manifest_text, encoding="utf-8")
+
+    with pytest.raises(NativeArtifactError, match=match):
+        discover_native_transport_providers(tmp_path, NativePlatform("linux", "x86_64"))
+
+
+@pytest.mark.parametrize(
+    ("manifest", "match"),
+    [
+        ({"transport_scope": 7}, "transport_scope must be a string"),
+        ({"transport_scope": "stdio"}, "unsupported native transport scope"),
+        ({"transport_scope": "ipc", "transport_slots": []}, "transport_slots must be a non-empty list"),
+        ({"transport_scope": "ipc", "transport_slots": [7]}, "transport_slots entries must be strings"),
+        ({"transport_scope": "ipc", "transport_slots": ["stdio"]}, "unsupported native transport slot"),
+        (
+            {"transport_scope": "ipc", "transport_slots": ["ipc"], "enabled_features": "transport-ipc"},
+            "enabled_features must be a list",
+        ),
+        (
+            {"transport_scope": "ipc", "transport_slots": ["ipc"], "enabled_features": [""]},
+            "enabled_features entries must be non-empty strings",
+        ),
+        (
+            {"transport_scope": "ipc", "transport_slots": ["ipc"], "package": ""},
+            "package must be a non-empty string",
+        ),
+        (
+            {"transport_scope": "ipc", "transport_slots": ["ipc"], "provider_cost": []},
+            "provider_cost must be an object",
+        ),
+        (
+            {"transport_scope": "ipc", "transport_slots": ["ipc"], "provider_preference": []},
+            "provider_preference must be an object",
+        ),
+        (
+            {"transport_scope": "ipc", "transport_slots": ["ipc"], "platform_limitations": "linux"},
+            "platform_limitations must be a list",
+        ),
+    ],
+)
+def test_discover_native_transport_provider_rejects_invalid_manifest_fields(
+    tmp_path: Path,
+    manifest: object,
+    match: str,
+) -> None:
+    _write_provider_artifact_with_manifest(tmp_path, "ipc", manifest)
+
+    with pytest.raises(NativeArtifactError, match=match):
+        discover_native_transport_providers(tmp_path, NativePlatform("linux", "x86_64"))
+
+
+def test_native_transport_slot_names_maps_preview4_slots() -> None:
+    assert native_transport_slot_names(TRANSPORT_SLOT_TCP | TRANSPORT_SLOT_IPC | TRANSPORT_SLOT_WEBSOCKET) == (
+        "tcp",
+        "ipc",
+        "websocket",
+    )
+
+
+@pytest.mark.parametrize(
+    ("uri", "scheme", "transport_name", "transport_id", "address", "secure"),
+    [
+        ("unix:///tmp/nnrp.sock", "unix", "ipc", TransportId.IPC, "/tmp/nnrp.sock", False),
+        ("npipe://./pipe/nnrp", "npipe", "ipc", TransportId.IPC, "./pipe/nnrp", False),
+        ("ws://127.0.0.1:19091/nnrp", "ws", "websocket", TransportId.WEBSOCKET, "127.0.0.1:19091/nnrp", False),
+        (
+            "wss://example.test/nnrp?profile=runtime",
+            "wss",
+            "websocket",
+            TransportId.WEBSOCKET,
+            "example.test/nnrp?profile=runtime",
+            True,
+        ),
+    ],
+)
+def test_parse_native_transport_endpoint_maps_preview4_endpoint_schemes(
+    uri: str,
+    scheme: str,
+    transport_name: str,
+    transport_id: TransportId,
+    address: str,
+    secure: bool,
+) -> None:
+    endpoint = parse_native_transport_endpoint(uri)
+
+    assert endpoint == NativeTransportEndpoint(
+        uri=uri,
+        scheme=scheme,
+        transport_name=transport_name,
+        transport_id=transport_id,
+        address=address,
+        secure=secure,
+    )
+    assert NativeTransportEndpoint.from_uri(uri) == endpoint
+
+
+@pytest.mark.parametrize(
+    ("uri", "match"),
+    [
+        ("", "must be non-empty"),
+        ("stdio:///tmp/nnrp", "unsupported native transport endpoint scheme"),
+        ("unix://host/tmp/nnrp.sock", "unix native transport endpoints"),
+        ("ws:///nnrp", "must include an authority"),
+        ("wss://example.test/nnrp#fragment", "must not include a fragment"),
+    ],
+)
+def test_parse_native_transport_endpoint_rejects_invalid_endpoint_shapes(uri: str, match: str) -> None:
+    with pytest.raises(NativeArtifactError, match=match):
+        parse_native_transport_endpoint(uri)
+
+
+def test_parse_nnrp_endpoint_accepts_application_facing_uri() -> None:
+    endpoint = parse_nnrp_endpoint("nnrps://runtime.example/session/default?tenant=alpha")
+
+    assert endpoint == NnrpEndpoint(
+        uri="nnrps://runtime.example/session/default?tenant=alpha",
+        scheme="nnrps",
+        authority="runtime.example",
+        path="/session/default",
+        query="tenant=alpha",
+        secure=True,
+    )
+
+
+@pytest.mark.parametrize(
+    ("uri", "match"),
+    [
+        ("", "must be non-empty"),
+        ("wss://runtime.example/nnrp", "unsupported NNRP endpoint scheme"),
+        ("nnrp:///session", "must include an authority"),
+        ("nnrp://runtime.example/session#fragment", "must not include a fragment"),
+    ],
+)
+def test_parse_nnrp_endpoint_rejects_non_application_uri_shapes(uri: str, match: str) -> None:
+    with pytest.raises(NativeArtifactError, match=match):
+        parse_nnrp_endpoint(uri)
+
+
+def test_parse_native_transport_endpoint_rejects_application_endpoint_scheme() -> None:
+    with pytest.raises(NativeArtifactError, match="parse_nnrp_endpoint"):
+        parse_native_transport_endpoint("nnrps://runtime.example/session")
+
+
+def test_diagnose_nnrp_endpoint_support_selects_installed_provider(tmp_path: Path) -> None:
+    tcp_artifact = _write_provider_artifact(tmp_path, "tcp")
+
+    support = diagnose_nnrp_endpoint_support(
+        "nnrps://runtime.example/session/default",
+        root=tmp_path,
+        native_platform=NativePlatform("linux", "x86_64"),
+    )
+
+    assert support.endpoint == NnrpEndpoint(
+        uri="nnrps://runtime.example/session/default",
+        scheme="nnrps",
+        authority="runtime.example",
+        path="/session/default",
+        query="",
+        secure=True,
+    )
+    assert support.available is True
+    assert support.selection is not None
+    assert support.selection.selected_provider.artifact_path == tcp_artifact
+    assert support.selection.selected_transport_id is TransportId.TCP
+    assert support.diagnostic == "NNRP endpoint nnrps://runtime.example/session/default selected tcp carrier"
+
+
+def test_diagnose_nnrp_endpoint_support_reports_missing_provider(tmp_path: Path) -> None:
+    support = diagnose_nnrp_endpoint_support(
+        "nnrp://runtime.example/session/default",
+        root=tmp_path,
+        native_platform=NativePlatform("linux", "x86_64"),
+    )
+
+    assert support == NnrpEndpointSupport(
+        endpoint=NnrpEndpoint(
+            uri="nnrp://runtime.example/session/default",
+            scheme="nnrp",
+            authority="runtime.example",
+            path="/session/default",
+            query="",
+            secure=False,
+        ),
+        selection=None,
+        available=False,
+        skip_reason="no native transport providers are advertised by the native artifact",
+        diagnostic=(
+            "skip nnrp://runtime.example/session/default: "
+            "no native transport providers are advertised by the native artifact"
+        ),
+    )
+
+
+def test_diagnose_native_transport_endpoint_support_reports_available_provider(tmp_path: Path) -> None:
+    websocket_artifact = _write_provider_artifact(tmp_path, "websocket")
+
+    support = diagnose_native_transport_endpoint_support(
+        "wss://example.test/nnrp",
+        root=tmp_path,
+        native_platform=NativePlatform("linux", "x86_64"),
+    )
+
+    assert support == NativeTransportEndpointSupport(
+        endpoint=NativeTransportEndpoint(
+            uri="wss://example.test/nnrp",
+            scheme="wss",
+            transport_name="websocket",
+            transport_id=TransportId.WEBSOCKET,
+            address="example.test/nnrp",
+            secure=True,
+        ),
+        provider=NativeTransportProvider(
+            name="websocket",
+            artifact_path=websocket_artifact,
+            manifest_path=websocket_artifact.with_name("manifest.json"),
+            transport_slots=("websocket",),
+            enabled_features=("transport-websocket",),
+            package="nnrp-ffi-transport-websocket",
+            transport_scope="websocket",
+            platform_tag="linux-x86_64",
+            cost={"latency_bias": 1},
+            preference={"locality": "node"},
+            limitations=("loopback-only",),
+        ),
+        available=True,
+        diagnostic="native transport provider 'websocket' exposes websocket",
+    )
+
+
+@pytest.mark.parametrize(
+    ("uri", "transport_name"),
+    [
+        ("unix:///tmp/nnrp.sock", "ipc"),
+        ("ws://example.test/nnrp", "websocket"),
+    ],
+)
+def test_diagnose_native_transport_endpoint_support_skips_missing_provider(
+    tmp_path: Path,
+    uri: str,
+    transport_name: str,
+) -> None:
+    _write_provider_artifact(tmp_path, "tcp")
+
+    support = diagnose_native_transport_endpoint_support(
+        uri,
+        root=tmp_path,
+        native_platform=NativePlatform("linux", "x86_64"),
+    )
+
+    assert support.available is False
+    assert support.provider is None
+    assert support.endpoint.transport_name == transport_name
+    assert support.skip_reason == f"native artifact does not expose {transport_name} transport"
+    assert f"install a preview4 {transport_name} native transport artifact" in str(support.diagnostic)
+
+
+def test_select_native_transport_provider_selects_single_installed_transport(tmp_path: Path) -> None:
+    tcp_artifact = _write_provider_artifact(tmp_path, "tcp")
+
+    selection = select_native_transport_provider(root=tmp_path, native_platform=NativePlatform("linux", "x86_64"))
+
+    assert selection.selected_provider.artifact_path == tcp_artifact
+    assert selection.selected_transport_name == "tcp"
+    assert selection.selected_transport_id is TransportId.TCP
+    assert selection.policy is TransportPolicy.AUTO
+    assert selection.rejected == ()
+    assert selection.diagnostic == "single installed transport selected directly"
+
+
+def test_select_native_transport_provider_applies_preview4_policy_order(tmp_path: Path) -> None:
+    _write_provider_artifact(tmp_path, "tcp")
+    _write_provider_artifact(tmp_path, "quic")
+    _write_provider_artifact(tmp_path, "ipc")
+    _write_provider_artifact(tmp_path, "websocket")
+
+    auto = select_native_transport_provider(root=tmp_path, native_platform=NativePlatform("linux", "x86_64"))
+    preferred_websocket = select_native_transport_provider(
+        TransportPolicy.PREFER_WEBSOCKET,
+        root=tmp_path,
+        native_platform=NativePlatform("linux", "x86_64"),
+    )
+    preferred_tcp = select_native_transport_provider(
+        "prefer-tcp",
+        root=tmp_path,
+        native_platform=NativePlatform("linux", "x86_64"),
+    )
+
+    assert auto.selected_transport_id is TransportId.IPC
+    assert preferred_websocket.selected_transport_id is TransportId.WEBSOCKET
+    assert preferred_tcp.selected_transport_id is TransportId.TCP
+
+
+def test_select_native_transport_provider_rejects_missing_forced_transport(tmp_path: Path) -> None:
+    _write_provider_artifact(tmp_path, "tcp")
+
+    with pytest.raises(NativeArtifactError, match="forced native transport is not available: ipc"):
+        select_native_transport_provider(
+            TransportPolicy.FORCE_IPC,
+            root=tmp_path,
+            native_platform=NativePlatform("linux", "x86_64"),
+        )
+
+
+def test_select_native_transport_provider_rejects_empty_provider_registry(tmp_path: Path) -> None:
+    with pytest.raises(NativeArtifactError, match="no native transport providers are advertised"):
+        select_native_transport_provider(root=tmp_path, native_platform=NativePlatform("linux", "x86_64"))
+
+
+def test_select_native_transport_provider_accepts_integer_and_auto_string_policy(tmp_path: Path) -> None:
+    _write_provider_artifact(tmp_path, "websocket")
+
+    auto = select_native_transport_provider("auto", root=tmp_path, native_platform=NativePlatform("linux", "x86_64"))
+    forced = select_native_transport_provider(
+        int(TransportPolicy.FORCE_WEBSOCKET),
+        root=tmp_path,
+        native_platform=NativePlatform("linux", "x86_64"),
+    )
+
+    assert auto.selected_transport_id is TransportId.WEBSOCKET
+    assert forced.selected_transport_id is TransportId.WEBSOCKET
+
+
+def test_select_native_transport_provider_rejects_invalid_policy(tmp_path: Path) -> None:
+    _write_provider_artifact(tmp_path, "tcp")
+
+    with pytest.raises(NativeArtifactError, match="unsupported native transport policy"):
+        select_native_transport_provider(
+            "prefer-stdio",
+            root=tmp_path,
+            native_platform=NativePlatform("linux", "x86_64"),
+        )
+
+
+def test_select_native_transport_provider_rejects_unspecified_supported_transport(tmp_path: Path) -> None:
+    _write_provider_artifact(tmp_path, "tcp")
+
+    with pytest.raises(NativeArtifactError, match="unsupported native transport id"):
+        select_native_transport_provider(
+            root=tmp_path,
+            native_platform=NativePlatform("linux", "x86_64"),
+            supported_transports=(TransportId.UNSPECIFIED,),
+        )
+
+
+def test_select_native_transport_provider_reports_remote_unsupported_transport(tmp_path: Path) -> None:
+    _write_provider_artifact(tmp_path, "tcp")
+    _write_provider_artifact(tmp_path, "ipc")
+    _write_provider_artifact(tmp_path, "quic")
+
+    selection = select_native_transport_provider(
+        root=tmp_path,
+        native_platform=NativePlatform("linux", "x86_64"),
+        supported_transports=(TransportId.TCP, TransportId.QUIC),
+    )
+
+    assert selection.selected_transport_id is TransportId.QUIC
+    assert selection.rejected == (
+        native_module.NativeTransportRejection(
+            provider_name="ipc",
+            transport_name="ipc",
+            transport_id=TransportId.IPC,
+            reason="remote_unsupported",
+            diagnostic="native transport was not declared by the remote endpoint",
+        ),
+    )
+
+
+def test_select_native_transport_provider_scores_probe_samples(tmp_path: Path) -> None:
+    _write_provider_artifact(tmp_path, "tcp")
+    _write_provider_artifact(tmp_path, "quic")
+    _write_provider_artifact(tmp_path, "ipc")
+
+    selection = select_native_transport_provider(
+        root=tmp_path,
+        native_platform=NativePlatform("linux", "x86_64"),
+        probe_samples=[
+            NativeTransportProbeSample(
+                provider_name="tcp",
+                transport_name="tcp",
+                elapsed_us=1_500,
+                rtt_us=1_500,
+                bytes_sent=128,
+                bytes_received=128,
+            ),
+            NativeTransportProbeSample(
+                provider_name="quic",
+                transport_name="quic",
+                elapsed_us=800,
+                rtt_us=800,
+                bytes_sent=512,
+                bytes_received=512,
+            ),
+            NativeTransportProbeSample(
+                provider_name="ipc",
+                transport_name="ipc",
+                elapsed_us=2_000,
+                timed_out=True,
+                failed=True,
+            ),
+        ],
+    )
+
+    assert selection.selected_transport_id is TransportId.QUIC
+    assert selection.selected_probe_score is not None
+    assert selection.selected_probe_score.median_rtt_us == 800
+    assert [candidate.transport_name for candidate in selection.probe_candidates] == ["quic", "tcp"]
+    assert selection.rejected[-1].reason == "probe_failed"
+    assert selection.diagnostic == "native transport selected by probe score"
+
+
+def test_select_native_transport_provider_requires_probe_samples_for_probe_mode(tmp_path: Path) -> None:
+    _write_provider_artifact(tmp_path, "tcp")
+    _write_provider_artifact(tmp_path, "quic")
+
+    with pytest.raises(NativeArtifactError, match="probe_missing"):
+        select_native_transport_provider(
+            root=tmp_path,
+            native_platform=NativePlatform("linux", "x86_64"),
+            probe_samples=[],
+        )
 
 
 def test_resolve_native_artifact_uses_current_platform_when_not_provided(
@@ -1030,6 +1837,64 @@ def test_probe_native_artifact_accepts_matching_protocol(tmp_path: Path) -> None
     assert result.sdk_revision == 6
     assert result.transport_slots == TRANSPORT_SLOT_TCP
     assert result.feature_flags == REQUIRED_RUNTIME_FEATURES
+    assert result.has_runtime_control_features is True
+    assert result.has_runtime_object_features is True
+    assert "client_api" in result.runtime_control_feature_names
+    assert "cache_schema" in result.runtime_object_feature_names
+    assert "transport_slots" in result.feature_flag_names
+
+
+def test_native_runtime_feature_flag_helpers_filter_known_feature_groups() -> None:
+    future_unknown_flag = 0x8000000000000000
+    feature_flags = (
+        NativeRuntimeFeatureFlag.CLIENT_API
+        | NativeRuntimeFeatureFlag.CACHE_SCHEMA
+        | NativeRuntimeFeatureFlag.TRANSPORT_SLOTS
+        | future_unknown_flag
+    )
+
+    assert native_runtime_feature_flag_names(feature_flags) == (
+        "client_api",
+        "cache_schema",
+        "transport_slots",
+    )
+    assert native_runtime_feature_flag_names(feature_flags, mask=RUNTIME_CONTROL_FEATURE_FLAGS) == ("client_api",)
+    assert native_runtime_feature_flag_names(feature_flags, mask=RUNTIME_OBJECT_FEATURE_FLAGS) == ("cache_schema",)
+    assert native_runtime_feature_flags_available(feature_flags, NativeRuntimeFeatureFlag.CLIENT_API) is True
+    assert native_runtime_feature_flags_available(feature_flags, RUNTIME_CONTROL_FEATURE_FLAGS) is False
+
+
+@pytest.mark.parametrize(
+    ("transport", "slot"),
+    [
+        ("ipc", TRANSPORT_SLOT_IPC),
+        ("websocket", TRANSPORT_SLOT_WEBSOCKET),
+    ],
+)
+def test_probe_native_artifact_accepts_transport_scoped_preview4_artifacts(
+    tmp_path: Path,
+    transport: str,
+    slot: int,
+) -> None:
+    artifact = _write_provider_artifact(tmp_path, transport)
+
+    result = probe_native_artifact(artifact, library=FakeLibrary(transport_slots=slot))
+
+    assert result.artifact_path == artifact
+    assert result.transport_slots == slot
+
+
+def test_probe_native_artifact_uses_explicit_transport_slot_for_direct_artifact(tmp_path: Path) -> None:
+    artifact = tmp_path / "libnnrp_ffi.so"
+    artifact.write_bytes(b"fake")
+
+    result = probe_native_artifact(
+        artifact,
+        transport="websocket",
+        library=FakeLibrary(transport_slots=TRANSPORT_SLOT_WEBSOCKET),
+    )
+
+    assert result.transport_slots == TRANSPORT_SLOT_WEBSOCKET
 
 
 def test_probe_native_artifact_resolves_path_from_root(tmp_path: Path) -> None:
@@ -1232,6 +2097,158 @@ def test_native_owned_buffer_acquires_views_and_releases_handle(tmp_path: Path) 
         buffer.to_bytes()
 
 
+def test_native_owned_buffer_borrows_read_only_view_with_lifetime_guard(tmp_path: Path) -> None:
+    artifact = tmp_path / "nnrp_ffi.dll"
+    artifact.write_bytes(b"fake")
+    client = load_native_client(artifact, library=FakeRuntimeLibrary())
+    connection = client.connect(connection_id=11, generation=2, transport_id=TRANSPORT_SLOT_TCP)
+    buffer = connection.acquire_buffer_copy(b"native-borrow")
+    borrowed = buffer.borrow_view()
+
+    assert isinstance(borrowed, NativeBorrowedBufferView)
+    with borrowed as view:
+        assert view.readonly is True
+        assert view.tobytes() == b"native-borrow"
+        with pytest.raises(NativeInvalidStateError, match="already active"):
+            with borrowed:
+                pass
+        with pytest.raises(NativeInvalidStateError, match="active borrowed views"):
+            buffer.close()
+
+    buffer.close()
+    with pytest.raises(NativeInvalidStateError):
+        buffer.borrow_view()
+
+
+def test_native_borrowed_buffer_releases_guard_when_view_creation_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    artifact = tmp_path / "nnrp_ffi.dll"
+    artifact.write_bytes(b"fake")
+    client = load_native_client(artifact, library=FakeRuntimeLibrary())
+    connection = client.connect(connection_id=11, generation=2, transport_id=TRANSPORT_SLOT_TCP)
+    buffer = connection.acquire_buffer_copy(b"native-borrow")
+
+    def reject_borrowed_view(view: NativeBufferView) -> memoryview:
+        raise RuntimeError("borrow rejected")
+
+    monkeypatch.setattr(native_module, "_borrow_buffer_view", reject_borrowed_view)
+
+    with pytest.raises(RuntimeError, match="borrow rejected"):
+        with buffer.borrow_view():
+            pass
+    assert buffer._borrow_count == 0
+    buffer.close()
+
+
+def test_native_runtime_connection_manages_object_descriptor_handles(tmp_path: Path) -> None:
+    artifact = tmp_path / "nnrp_ffi.dll"
+    artifact.write_bytes(b"fake")
+    client = load_native_client(artifact, library=FakeRuntimeLibrary())
+    connection = client.connect(connection_id=11, generation=2, transport_id=TRANSPORT_SLOT_TCP)
+    descriptor = ObjectDescriptorMetadata(
+        object_id=101,
+        object_kind=RuntimeObjectKind.TENSOR,
+        producer_role=RuntimeRole.RUNTIME,
+        consumer_role=RuntimeRole.CLIENT,
+        session_id=42,
+        byte_size=4096,
+        compute_cost_units=7,
+        memory_location_hint=MemoryLocationHint.DEVICE_MEMORY,
+        ownership_hint=OwnershipHint.BORROWED,
+        lifetime_hint_ms=250,
+        metadata_bytes=8,
+    )
+
+    native_descriptor = connection.create_object_descriptor(descriptor, metadata=b"metadata")
+    refreshed_descriptor, metadata_view = native_descriptor.refresh_view()
+    metadata_snapshot = native_descriptor.metadata_snapshot()
+
+    assert isinstance(native_descriptor, NativeObjectDescriptor)
+    assert isinstance(native_descriptor.handle, NativeObjectDescriptorHandle)
+    assert refreshed_descriptor == descriptor
+    assert metadata_view.length == len(b"metadata")
+    assert isinstance(metadata_snapshot, NativeObjectMetadataBuffer)
+    assert metadata_snapshot.to_bytes() == b"metadata"
+    assert metadata_snapshot.refresh_view().length == len(b"metadata")
+
+    metadata_snapshot.close()
+    with pytest.raises(NativeInvalidStateError):
+        metadata_snapshot.to_bytes()
+
+    native_descriptor.close()
+    with pytest.raises(NativeInvalidStateError):
+        native_descriptor.refresh_view()
+
+
+def test_native_object_metadata_buffer_acquires_views_and_releases_handle(tmp_path: Path) -> None:
+    artifact = tmp_path / "nnrp_ffi.dll"
+    artifact.write_bytes(b"fake")
+    client = load_native_client(artifact, library=FakeRuntimeLibrary())
+    connection = client.connect(connection_id=11, generation=2, transport_id=TRANSPORT_SLOT_TCP)
+    buffer = connection.acquire_object_metadata_copy(b"object-meta")
+
+    assert isinstance(buffer, NativeObjectMetadataBuffer)
+    assert isinstance(buffer.handle, NativeBufferHandle)
+    assert buffer.view.length == len(b"object-meta")
+    assert buffer.to_bytes() == b"object-meta"
+
+    with buffer.borrow_view() as view:
+        assert view.readonly is True
+        assert view.tobytes() == b"object-meta"
+        with pytest.raises(NativeInvalidStateError, match="active borrowed views"):
+            buffer.close()
+
+    buffer.close()
+    with pytest.raises(NativeInvalidStateError):
+        buffer.refresh_view()
+
+
+def test_native_object_metadata_buffer_borrows_empty_view(tmp_path: Path) -> None:
+    artifact = tmp_path / "nnrp_ffi.dll"
+    artifact.write_bytes(b"fake")
+    client = load_native_client(artifact, library=FakeRuntimeLibrary())
+    connection = client.connect(connection_id=11, generation=2, transport_id=TRANSPORT_SLOT_TCP)
+    buffer = connection.acquire_object_metadata_copy(b"")
+
+    with buffer.borrow_view() as view:
+        assert view.readonly is True
+        assert view.tobytes() == b""
+
+    buffer.close()
+
+
+def test_native_object_delta_helpers_acquire_native_metadata_buffers(tmp_path: Path) -> None:
+    artifact = tmp_path / "nnrp_ffi.dll"
+    artifact.write_bytes(b"fake")
+    client = load_native_client(artifact, library=FakeRuntimeLibrary())
+    connection = client.connect(connection_id=11, generation=2, transport_id=TRANSPORT_SLOT_TCP)
+    metadata = ObjectDeltaMetadata(
+        object_id=101,
+        delta_sequence=2,
+        region_offset=8,
+        region_bytes=4,
+        delta_bytes=4,
+        flags=0x03,
+        metadata_bytes=2,
+    )
+
+    patch_buffer = connection.acquire_object_patch_metadata_copy(metadata, metadata_tail=b"md", delta=b"xxxx")
+    delta_buffer = connection.acquire_object_delta_metadata_copy(metadata, metadata_tail=b"md", delta=b"yyyy")
+    decoded_patch = decode_runtime_object_metadata(MessageType.OBJECT_PATCH, patch_buffer.to_bytes())
+    decoded_delta = decode_runtime_object_metadata(MessageType.OBJECT_DELTA, delta_buffer.to_bytes())
+
+    assert isinstance(patch_buffer, NativeObjectMetadataBuffer)
+    assert decoded_patch.metadata == metadata
+    assert decoded_patch.tail == b"mdxxxx"
+    assert decoded_delta.metadata == metadata
+    assert decoded_delta.tail == b"mdyyyy"
+
+    patch_buffer.close()
+    delta_buffer.close()
+
+
 def test_native_recovery_codec_delegates_resume_and_migration_validation(tmp_path: Path) -> None:
     artifact = tmp_path / "nnrp_ffi.dll"
     artifact.write_bytes(b"fake")
@@ -1375,6 +2392,68 @@ def test_native_runtime_client_runs_connection_session_submit_close_roundtrip(tm
     assert library.nnrp_client_cancel.calls[1][0].frame_id == 7
     assert library.nnrp_control.calls[1][0].control_code == 11
     assert library.nnrp_control.calls[1][0].payload.len == len(b"session-control")
+
+
+def test_native_runtime_client_binds_native_ipc_and_websocket_servers(tmp_path: Path) -> None:
+    artifact = tmp_path / "nnrp_ffi.dll"
+    artifact.write_bytes(b"fake")
+    library = FakeRuntimeLibrary()
+
+    client = load_native_client(artifact, library=library)
+    ipc_server = client.bind_server(server_id=21, generation=2, transport_id=TRANSPORT_SLOT_IPC)
+    websocket_server = client.bind_server(
+        server_id=22,
+        generation=3,
+        transport_id=TRANSPORT_SLOT_WEBSOCKET,
+    )
+    session = ipc_server.accept_session(
+        session_id=41,
+        generation=4,
+        profile_id=5,
+        schema_id=6,
+        schema_version=7,
+    )
+    operation = session.receive_submit(operation_id=99, frame_id=8, payload=b"server-submit")
+    operation.send_result(b"server-result")
+    session.send_flow_update(frame_id=8)
+    session.control(control_code=11, payload=b"server-control")
+    session.close()
+    websocket_server.close()
+
+    assert isinstance(ipc_server, NativeRuntimeServer)
+    assert isinstance(websocket_server, NativeRuntimeServer)
+    assert isinstance(session, NativeRuntimeServerSession)
+    assert isinstance(operation, NativeRuntimeServerOperation)
+    assert ipc_server.handle.handle.id == 21
+    assert websocket_server.handle.handle.id == 22
+    assert session.server.handle.id == 21
+    assert session.handle.handle.id == 41
+    assert operation.session.handle.id == 41
+    assert operation.handle.handle.id == 99
+    assert operation.operation_id == 99
+    assert operation.frame_id == 8
+    assert library.nnrp_server_bind.calls[0][0].transport_id == TRANSPORT_SLOT_IPC
+    assert library.nnrp_server_bind.calls[1][0].transport_id == TRANSPORT_SLOT_WEBSOCKET
+    assert library.nnrp_server_accept.calls[0][0].server.id == 21
+    assert library.nnrp_server_receive_submit.calls[0][0].frame_id == 8
+    assert library.submitted_payloads[-1] == b"server-submit"
+    assert _read_buffer_view(library.nnrp_server_send_result.calls[0][0].payload) == b"server-result"
+    assert library.nnrp_server_send_flow_update.calls[0][0].frame_id == 8
+    assert library.nnrp_control.calls[0][0].control_code == 11
+    assert _read_buffer_view(library.nnrp_control.calls[0][0].payload) == b"server-control"
+    assert library.nnrp_server_close.calls[0][0].kind == HANDLE_KIND_SESSION
+    assert library.nnrp_client_close_connection.calls[0][0].id == 22
+
+    with pytest.raises(NativeInvalidStateError):
+        session.receive_submit(operation_id=100, frame_id=9)
+    with pytest.raises(NativeInvalidStateError):
+        websocket_server.accept_session(
+            session_id=42,
+            generation=4,
+            profile_id=5,
+            schema_id=6,
+            schema_version=7,
+        )
 
 
 def test_native_submit_request_shape_matches_frozen_ffi_without_private_scheduling_fields() -> None:
@@ -1848,6 +2927,85 @@ def test_native_runtime_connection_polls_event_delivery_model(tmp_path: Path) ->
     with pytest.raises(ValueError, match="max_events"):
         connection.poll_events_batch(max_events=-1)
     assert connection.poll_events_batch(max_events=0) == ()
+
+
+def test_native_runtime_connection_batch_polls_preview4_control_events(tmp_path: Path) -> None:
+    artifact = tmp_path / "nnrp_ffi.dll"
+    artifact.write_bytes(b"fake")
+    progress_payload = encode_runtime_control_metadata(
+        MessageType.PROGRESS,
+        ProgressMetadata(
+            operation_id=101,
+            progress_sequence=1,
+            stage_code=2,
+            percent_x100=5000,
+            object_id=33,
+            body_bytes=8,
+        ),
+        tail=b"progress",
+    )
+    partial_payload = encode_runtime_control_metadata(
+        MessageType.PARTIAL_RESULT,
+        PartialResultMetadata(
+            operation_id=101,
+            result_sequence=2,
+            object_id=33,
+            delta_sequence=4,
+            body_bytes=7,
+            flags=0x01,
+        ),
+        tail=b"partial",
+    )
+    drop_payload = encode_runtime_control_metadata(
+        MessageType.RESULT_DROP_REASON,
+        ResultDropReasonMetadata(
+            operation_id=101,
+            result_sequence=3,
+            drop_reason_code=ResultDropReasonCode.BACKPRESSURE,
+            source_role=RuntimeRole.SERVER,
+            flags=0,
+            diagnostic_bytes=4,
+        ),
+        tail=b"drop",
+    )
+    library = BatchControlRuntimeLibrary(
+        [
+            (EVENT_KIND_CONTROL, progress_payload),
+            (EVENT_KIND_CONTROL, partial_payload),
+            (EVENT_KIND_CONTROL, drop_payload),
+        ]
+    )
+    connection = load_native_client(artifact, library=library).connect(
+        connection_id=12,
+        generation=2,
+        transport_id=TRANSPORT_SLOT_TCP,
+    )
+
+    events = connection.poll_events_batch(max_events=3, event_kind=EVENT_KIND_CONTROL)
+    decoded = [
+        decode_runtime_control_metadata(message_type, event.payload)
+        for message_type, event in zip(
+            (MessageType.PROGRESS, MessageType.PARTIAL_RESULT, MessageType.RESULT_DROP_REASON),
+            events,
+            strict=True,
+        )
+    ]
+
+    assert [event.kind for event in events] == [EVENT_KIND_CONTROL, EVENT_KIND_CONTROL, EVENT_KIND_CONTROL]
+    assert library.nnrp_client_await_events.calls[0][2] == 3
+    assert decoded[0].metadata == ProgressMetadata(101, 1, 2, 5000, 33, 8)
+    assert decoded[0].tail == b"progress"
+    assert decoded[1].metadata == PartialResultMetadata(101, 2, 33, 4, 7, 0x01)
+    assert decoded[1].tail == b"partial"
+    assert decoded[2].metadata == ResultDropReasonMetadata(
+        101,
+        3,
+        ResultDropReasonCode.BACKPRESSURE,
+        RuntimeRole.SERVER,
+        0,
+        4,
+    )
+    assert decoded[2].tail == b"drop"
 
 
 def test_native_runtime_connection_batch_poll_maps_would_block_to_empty(tmp_path: Path) -> None:
@@ -3014,6 +4172,7 @@ def test_native_handle_requires_valid_kind_id_and_generation() -> None:
         (NativeBufferHandle, HANDLE_KIND_BUFFER),
         (NativeSchemaRegistryHandle, HANDLE_KIND_SCHEMA_REGISTRY),
         (NativeCacheLeaseHandle, HANDLE_KIND_CACHE_LEASE),
+        (NativeObjectDescriptorHandle, HANDLE_KIND_OBJECT_DESCRIPTOR),
     ],
 )
 def test_typed_native_handles_accept_only_matching_kind(wrapper_type: type, kind: int) -> None:
@@ -3299,6 +4458,29 @@ def test_native_runtime_entrypoints_bind_frozen_symbol_table() -> None:
     ]
     assert library.nnrp_buffer_view.argtypes == [_NnrpHandle, ctypes.POINTER(_NnrpBufferView)]
     assert library.nnrp_buffer_release.argtypes == [_NnrpHandle]
+    assert library.nnrp_object_metadata_buffer_acquire_copy.argtypes == [
+        _NnrpBufferView,
+        ctypes.POINTER(_NnrpHandle),
+        ctypes.POINTER(_NnrpBufferView),
+    ]
+    assert library.nnrp_object_metadata_buffer_view.argtypes == [_NnrpHandle, ctypes.POINTER(_NnrpBufferView)]
+    assert library.nnrp_object_metadata_buffer_release.argtypes == [_NnrpHandle]
+    assert library.nnrp_object_descriptor_create.argtypes == [
+        _NnrpRuntimeObjectDescriptor,
+        _NnrpBufferView,
+        ctypes.POINTER(_NnrpHandle),
+    ]
+    assert library.nnrp_object_descriptor_view.argtypes == [
+        _NnrpHandle,
+        ctypes.POINTER(_NnrpRuntimeObjectDescriptor),
+        ctypes.POINTER(_NnrpBufferView),
+    ]
+    assert library.nnrp_object_descriptor_metadata_snapshot.argtypes == [
+        _NnrpHandle,
+        ctypes.POINTER(_NnrpHandle),
+        ctypes.POINTER(_NnrpBufferView),
+    ]
+    assert library.nnrp_object_descriptor_release.argtypes == [_NnrpHandle]
     assert library.nnrp_cache_query.argtypes == [_NnrpCacheLeaseRequest, ctypes.POINTER(_NnrpCacheLeaseResult)]
     assert library.nnrp_cache_touch.argtypes == [_NnrpCacheLeaseRequest, ctypes.POINTER(_NnrpCacheLeaseResult)]
     assert library.nnrp_cache_prefetch.argtypes == [

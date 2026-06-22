@@ -12,6 +12,7 @@ from enum import StrEnum
 from typing import Protocol
 
 from nnrp.core import CacheObjectKind
+from nnrp.runtime.types import CacheReuseScope
 
 
 class CacheLeaseOutcome(StrEnum):
@@ -137,6 +138,38 @@ class CacheDependencyInvalidation:
         return len(self.affected)
 
 
+@dataclass(frozen=True, slots=True)
+class CacheInvalidation:
+    identity: CacheObjectIdentity
+    reason: CacheInvalidationReason | str = CacheInvalidationReason.EXPLICIT
+    object_version: int = 0
+    diagnostic: str | None = None
+
+    def __post_init__(self) -> None:
+        CacheInvalidationReason(self.reason)
+        _validate_u64("object_version", self.object_version)
+
+
+@dataclass(frozen=True, slots=True)
+class CachePolicyOptions:
+    enabled: bool = False
+    reuse_scope: CacheReuseScope | int | None = None
+    expiration_hint_ms: int = 0
+    invalidation_reason: CacheInvalidationReason | str = CacheInvalidationReason.EXPLICIT
+
+    def __post_init__(self) -> None:
+        if self.reuse_scope is not None:
+            CacheReuseScope(self.reuse_scope)
+        CacheInvalidationReason(self.invalidation_reason)
+        _validate_u64("expiration_hint_ms", self.expiration_hint_ms)
+        if self.enabled and self.reuse_scope is None:
+            raise ValueError("enabled cache policy requires reuse_scope")
+        if not self.enabled and self.reuse_scope is not None:
+            raise ValueError("disabled cache policy must not set reuse_scope")
+        if not self.enabled and self.expiration_hint_ms != 0:
+            raise ValueError("disabled cache policy must not set expiration_hint_ms")
+
+
 class CacheRuntimeBackend(Protocol):
     def query_cache(self, identity: CacheObjectIdentity) -> CacheLeaseResult:
         """Return the native/runtime cache state for one object."""
@@ -194,12 +227,14 @@ def _validate_u64(name: str, value: int) -> None:
 
 __all__ = [
     "CacheDependencyInvalidation",
+    "CacheInvalidation",
     "CacheInvalidationReason",
     "CacheLeaseDescriptor",
     "CacheLeaseOutcome",
     "CacheLeaseResult",
     "CacheObjectIdentity",
     "CacheObjectVersion",
+    "CachePolicyOptions",
     "CacheRuntimeBackend",
     "cache_prefetch",
     "cache_query",

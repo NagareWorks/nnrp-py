@@ -53,6 +53,16 @@ from nnrp.core import (
     unpack_typed_payload_frames,
     validate_frame_submit_body,
 )
+from nnrp.runtime import (
+    PartialResultMetadata,
+    PressureMetadata,
+    ProgressMetadata,
+    ResultDropReasonCode,
+    ResultDropReasonMetadata,
+    RuntimeRole,
+    encode_runtime_control_metadata,
+)
+from nnrp.runtime.types import _FixedRuntimeMetadata
 from nnrp.server.profile import ServerProfile
 
 ServerListener = NnrpQuicListener | NnrpTcpListener
@@ -262,11 +272,233 @@ class ServerSession:
             )
         )
 
+    async def send_progress(
+        self,
+        *,
+        operation_id: int,
+        progress_sequence: int,
+        stage_code: int,
+        percent_x100: int = 0xFFFF,
+        object_id: int = 0,
+        body: bytes | bytearray | memoryview = b"",
+        frame_id: int = 0,
+        flags: HeaderFlags = HeaderFlags.NONE,
+        view_id: int = 0,
+        route_id: int = 0,
+        trace_id: int = 0,
+    ) -> None:
+        metadata = ProgressMetadata(
+            operation_id=operation_id,
+            progress_sequence=progress_sequence,
+            stage_code=stage_code,
+            percent_x100=percent_x100,
+            object_id=object_id,
+            body_bytes=memoryview(body).nbytes,
+        )
+        await self._send_runtime_control_packet(
+            MessageType.PROGRESS,
+            metadata,
+            body=body,
+            frame_id=frame_id,
+            flags=flags,
+            view_id=view_id,
+            route_id=route_id,
+            trace_id=trace_id,
+        )
+
+    async def send_partial_result(
+        self,
+        *,
+        operation_id: int,
+        result_sequence: int,
+        object_id: int = 0,
+        delta_sequence: int = 0,
+        body: bytes | bytearray | memoryview = b"",
+        control_flags: int = 0,
+        frame_id: int = 0,
+        flags: HeaderFlags = HeaderFlags.NONE,
+        view_id: int = 0,
+        route_id: int = 0,
+        trace_id: int = 0,
+    ) -> None:
+        metadata = PartialResultMetadata(
+            operation_id=operation_id,
+            result_sequence=result_sequence,
+            object_id=object_id,
+            delta_sequence=delta_sequence,
+            body_bytes=memoryview(body).nbytes,
+            flags=control_flags,
+        )
+        await self._send_runtime_control_packet(
+            MessageType.PARTIAL_RESULT,
+            metadata,
+            body=body,
+            frame_id=frame_id,
+            flags=flags,
+            view_id=view_id,
+            route_id=route_id,
+            trace_id=trace_id,
+        )
+
+    async def send_result_drop_reason(
+        self,
+        *,
+        operation_id: int,
+        result_sequence: int,
+        drop_reason_code: ResultDropReasonCode | int,
+        source_role: RuntimeRole | int = RuntimeRole.SERVER,
+        diagnostic: bytes | bytearray | memoryview = b"",
+        control_flags: int = 0,
+        frame_id: int = 0,
+        flags: HeaderFlags = HeaderFlags.NONE,
+        view_id: int = 0,
+        route_id: int = 0,
+        trace_id: int = 0,
+    ) -> None:
+        metadata = ResultDropReasonMetadata(
+            operation_id=operation_id,
+            result_sequence=result_sequence,
+            drop_reason_code=drop_reason_code,
+            source_role=source_role,
+            flags=control_flags,
+            diagnostic_bytes=memoryview(diagnostic).nbytes,
+        )
+        await self._send_runtime_control_packet(
+            MessageType.RESULT_DROP_REASON,
+            metadata,
+            body=diagnostic,
+            frame_id=frame_id,
+            flags=flags,
+            view_id=view_id,
+            route_id=route_id,
+            trace_id=trace_id,
+        )
+
+    async def send_backpressure(
+        self,
+        *,
+        scope_id: int,
+        credit_window: int,
+        pressure_level: int,
+        pressure_reason: int,
+        retry_after_ms: int = 0,
+        control_flags: int = 0,
+        frame_id: int = 0,
+        flags: HeaderFlags = HeaderFlags.NONE,
+        view_id: int = 0,
+        route_id: int = 0,
+        trace_id: int = 0,
+    ) -> None:
+        await self._send_pressure_control(
+            MessageType.BACKPRESSURE,
+            scope_id=scope_id,
+            credit_window=credit_window,
+            pressure_level=pressure_level,
+            pressure_reason=pressure_reason,
+            retry_after_ms=retry_after_ms,
+            control_flags=control_flags,
+            frame_id=frame_id,
+            flags=flags,
+            view_id=view_id,
+            route_id=route_id,
+            trace_id=trace_id,
+        )
+
+    async def send_credit_update(
+        self,
+        *,
+        scope_id: int,
+        credit_window: int,
+        pressure_level: int = 0,
+        pressure_reason: int = 0,
+        retry_after_ms: int = 0,
+        control_flags: int = 0,
+        frame_id: int = 0,
+        flags: HeaderFlags = HeaderFlags.NONE,
+        view_id: int = 0,
+        route_id: int = 0,
+        trace_id: int = 0,
+    ) -> None:
+        await self._send_pressure_control(
+            MessageType.CREDIT_UPDATE,
+            scope_id=scope_id,
+            credit_window=credit_window,
+            pressure_level=pressure_level,
+            pressure_reason=pressure_reason,
+            retry_after_ms=retry_after_ms,
+            control_flags=control_flags,
+            frame_id=frame_id,
+            flags=flags,
+            view_id=view_id,
+            route_id=route_id,
+            trace_id=trace_id,
+        )
+
     async def close(self) -> None:
         self.connection.close()
         wait_closed = getattr(self.connection, "wait_closed", None)
         if callable(wait_closed):
             await wait_closed()
+
+    async def _send_pressure_control(
+        self,
+        message_type: MessageType,
+        *,
+        scope_id: int,
+        credit_window: int,
+        pressure_level: int,
+        pressure_reason: int,
+        retry_after_ms: int,
+        control_flags: int,
+        frame_id: int,
+        flags: HeaderFlags,
+        view_id: int,
+        route_id: int,
+        trace_id: int,
+    ) -> None:
+        metadata = PressureMetadata(
+            scope_id=scope_id,
+            credit_window=credit_window,
+            pressure_level=pressure_level,
+            pressure_reason=pressure_reason,
+            retry_after_ms=retry_after_ms,
+            flags=control_flags,
+        )
+        await self._send_runtime_control_packet(
+            message_type,
+            metadata,
+            frame_id=frame_id,
+            flags=flags,
+            view_id=view_id,
+            route_id=route_id,
+            trace_id=trace_id,
+        )
+
+    async def _send_runtime_control_packet(
+        self,
+        message_type: MessageType,
+        metadata: _FixedRuntimeMetadata,
+        *,
+        body: bytes | bytearray | memoryview = b"",
+        frame_id: int,
+        flags: HeaderFlags,
+        view_id: int,
+        route_id: int,
+        trace_id: int,
+    ) -> None:
+        packet = NnrpPacket.build(
+            version_major=1,
+            wire_format=WireFormat.CURRENT,
+            msg_type=message_type,
+            flags=flags,
+            session_id=self.session_id,
+            frame_id=frame_id,
+            view_id=view_id,
+            route_id=route_id,
+            trace_id=trace_id,
+            metadata=encode_runtime_control_metadata(message_type, metadata, tail=body),
+        )
+        await self.connection.send_control_packet(packet)
 
 
 async def accept_server_session(

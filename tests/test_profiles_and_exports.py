@@ -1,17 +1,27 @@
 import asyncio
+import inspect
 
 import pytest
 
 import nnrp.client as client_module
 from nnrp import (
+    RUNTIME_CONTROL_FEATURE_FLAGS,
+    RUNTIME_OBJECT_FEATURE_FLAGS,
     CacheLeaseDescriptor,
     CacheObjectIdentity,
+    NativeRuntimeClient,
+    NativeRuntimeFeatureFlag,
+    NativeRuntimeServer,
+    NativeRuntimeServerOperation,
+    NativeRuntimeServerSession,
     Preview3TypedPayloadDescriptor,
     SchemaDescriptorHeader,
     SchemaRegistryCatalog,
     SessionRecoveryReport,
     StandardProfile,
     StreamSemantics,
+    native_runtime_feature_flag_names,
+    native_runtime_feature_flags_available,
     should_replay_frame_after_migration,
     token_delta_payload_descriptor,
     token_delta_schema_descriptor,
@@ -357,6 +367,36 @@ def test_connect_client_session_is_exported() -> None:
     assert callable(should_replay_frame_after_migration)
 
 
+def test_preview4_host_runtime_api_keeps_request_options_off_packet_helpers() -> None:
+    assert callable(NativeRuntimeClient.bind_server)
+    assert callable(NativeRuntimeServer.accept_session)
+    assert callable(NativeRuntimeServerSession.receive_submit)
+    assert callable(NativeRuntimeServerOperation.send_result)
+
+    assert set(NativeClientConnectionOptions.__annotations__) == {
+        "connection_id",
+        "connection_generation",
+        "transport_id",
+    }
+    assert set(NativeClientSessionOpenOptions.__annotations__) == {
+        "requested_session_id",
+        "session_generation",
+        "profile_id",
+        "schema_id",
+        "schema_version",
+    }
+    assert "deadline_unix_ms" not in SubmitRequest.__dataclass_fields__
+    assert "priority_class" not in SubmitRequest.__dataclass_fields__
+
+    priority_signature = inspect.signature(NativeClientConnection.update_runtime_priority)
+    deadline_signature = inspect.signature(NativeClientConnection.update_runtime_deadline)
+    expire_signature = inspect.signature(NativeClientConnection.expire_runtime_operation_at)
+
+    assert "priority_class" in priority_signature.parameters
+    assert "deadline_unix_ms" in deadline_signature.parameters
+    assert "expire_at_unix_ms" in expire_signature.parameters
+
+
 def test_legacy_packet_session_helpers_warn_as_tooling_only() -> None:
     async def enter_legacy_session() -> None:
         async with connect_client_session("127.0.0.1"):
@@ -386,6 +426,16 @@ def test_current_typed_models_are_exported() -> None:
     assert StreamSemantics.APPEND == 2
     assert token_delta_schema_descriptor().profile_id is StandardProfile.TOKEN
     assert token_delta_payload_descriptor(offset=0, length=1).profile_id is StandardProfile.TOKEN
+
+
+def test_preview4_native_feature_flag_helpers_are_exported() -> None:
+    feature_flags = NativeRuntimeFeatureFlag.CLIENT_API | NativeRuntimeFeatureFlag.CACHE_SCHEMA
+
+    assert native_runtime_feature_flag_names(feature_flags) == ("client_api", "cache_schema")
+    assert native_runtime_feature_flag_names(feature_flags, mask=RUNTIME_CONTROL_FEATURE_FLAGS) == ("client_api",)
+    assert native_runtime_feature_flag_names(feature_flags, mask=RUNTIME_OBJECT_FEATURE_FLAGS) == ("cache_schema",)
+    assert native_runtime_feature_flags_available(feature_flags, NativeRuntimeFeatureFlag.CLIENT_API) is True
+    assert native_runtime_feature_flags_available(feature_flags, RUNTIME_CONTROL_FEATURE_FLAGS) is False
 
 
 def test_current_result_helpers_expose_payload_kinds_without_tensor_coverage() -> None:

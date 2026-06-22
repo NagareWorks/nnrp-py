@@ -207,6 +207,8 @@ HANDLE_KIND_EVENT_PUMP = 4
 HANDLE_KIND_BUFFER = 5
 HANDLE_KIND_SCHEMA_REGISTRY = 6
 HANDLE_KIND_CACHE_LEASE = 7
+HANDLE_KIND_OBJECT_DESCRIPTOR = 8
+HANDLE_KIND_CACHE_REFERENCE_DESCRIPTOR = 9
 EVENT_KIND_NONE = 0
 EVENT_KIND_CONNECTION_OPENED = 1
 EVENT_KIND_SESSION_OPENED = 2
@@ -667,6 +669,21 @@ class NativeCacheLeaseHandle:
 
 
 @dataclass(frozen=True)
+class NativeObjectDescriptorHandle:
+    handle: NativeHandle
+
+    def __post_init__(self) -> None:
+        self.handle.require_kind(HANDLE_KIND_OBJECT_DESCRIPTOR)
+
+    @classmethod
+    def from_ffi(cls, handle: _NnrpHandle) -> NativeObjectDescriptorHandle:
+        return cls(NativeHandle.from_ffi(handle))
+
+    def to_ffi(self) -> _NnrpHandle:
+        return self.handle.to_ffi()
+
+
+@dataclass(frozen=True)
 class NativeBufferView:
     ptr: int
     length: int
@@ -889,6 +906,22 @@ class _NnrpClientSubmitResultRequest(ctypes.Structure):
         ("submit_payload", _NnrpBufferView),
         ("result_payload", _NnrpBufferView),
         ("max_events", ctypes.c_size_t),
+    ]
+
+
+class _NnrpRuntimeObjectDescriptor(ctypes.Structure):
+    _fields_ = [
+        ("object_id", ctypes.c_uint64),
+        ("object_kind", ctypes.c_uint16),
+        ("producer_role", ctypes.c_uint8),
+        ("consumer_role", ctypes.c_uint8),
+        ("session_id", ctypes.c_uint32),
+        ("byte_size", ctypes.c_uint64),
+        ("compute_cost_units", ctypes.c_uint32),
+        ("memory_location_hint", ctypes.c_uint16),
+        ("ownership_hint", ctypes.c_uint16),
+        ("lifetime_hint_ms", ctypes.c_uint32),
+        ("metadata_bytes", ctypes.c_uint32),
     ]
 
 
@@ -1254,6 +1287,42 @@ class NativeRuntimeEntrypoints:
             [_NnrpHandle, ctypes.POINTER(_NnrpBufferView)],
         )
         self.buffer_release = _bind_native_function(library, "nnrp_buffer_release", _NnrpFfiStatus, [_NnrpHandle])
+        self.object_metadata_buffer_acquire_copy = _bind_native_function(
+            library,
+            "nnrp_object_metadata_buffer_acquire_copy",
+            _NnrpFfiStatus,
+            [_NnrpBufferView, ctypes.POINTER(_NnrpHandle), ctypes.POINTER(_NnrpBufferView)],
+        )
+        self.object_metadata_buffer_view = _bind_native_function(
+            library,
+            "nnrp_object_metadata_buffer_view",
+            _NnrpFfiStatus,
+            [_NnrpHandle, ctypes.POINTER(_NnrpBufferView)],
+        )
+        self.object_metadata_buffer_release = _bind_native_function(
+            library, "nnrp_object_metadata_buffer_release", _NnrpFfiStatus, [_NnrpHandle]
+        )
+        self.object_descriptor_create = _bind_native_function(
+            library,
+            "nnrp_object_descriptor_create",
+            _NnrpFfiStatus,
+            [_NnrpRuntimeObjectDescriptor, _NnrpBufferView, ctypes.POINTER(_NnrpHandle)],
+        )
+        self.object_descriptor_view = _bind_native_function(
+            library,
+            "nnrp_object_descriptor_view",
+            _NnrpFfiStatus,
+            [_NnrpHandle, ctypes.POINTER(_NnrpRuntimeObjectDescriptor), ctypes.POINTER(_NnrpBufferView)],
+        )
+        self.object_descriptor_metadata_snapshot = _bind_native_function(
+            library,
+            "nnrp_object_descriptor_metadata_snapshot",
+            _NnrpFfiStatus,
+            [_NnrpHandle, ctypes.POINTER(_NnrpHandle), ctypes.POINTER(_NnrpBufferView)],
+        )
+        self.object_descriptor_release = _bind_native_function(
+            library, "nnrp_object_descriptor_release", _NnrpFfiStatus, [_NnrpHandle]
+        )
         self.cache_query = _bind_native_function(
             library,
             "nnrp_cache_query",
@@ -1523,6 +1592,136 @@ class NativeOwnedBuffer:
     def _ensure_open(self) -> None:
         if self._released:
             raise NativeInvalidStateError(NativeStatus(FFI_STATUS_INVALID_STATE), "native buffer is released")
+
+
+@dataclass
+class NativeObjectMetadataBuffer:
+    entrypoints: NativeRuntimeEntrypoints
+    handle: NativeBufferHandle
+    view: NativeBufferView
+    _released: bool = field(default=False, init=False, repr=False, compare=False)
+
+    @classmethod
+    def acquire_copy(
+        cls, entrypoints: NativeRuntimeEntrypoints, payload: bytes | bytearray | memoryview
+    ) -> NativeObjectMetadataBuffer:
+        source, _owner = _buffer_view_from_payload(payload)
+        out_buffer = _NnrpHandle()
+        out_view = _NnrpBufferView()
+        status = entrypoints.object_metadata_buffer_acquire_copy(
+            source,
+            ctypes.byref(out_buffer),
+            ctypes.byref(out_view),
+        )
+        raise_for_native_status(status)
+        return cls(entrypoints, NativeBufferHandle.from_ffi(out_buffer), NativeBufferView.from_ffi(out_view))
+
+    def refresh_view(self) -> NativeBufferView:
+        self._ensure_open()
+        out_view = _NnrpBufferView()
+        status = self.entrypoints.object_metadata_buffer_view(self.handle.to_ffi(), ctypes.byref(out_view))
+        raise_for_native_status(status)
+        view = NativeBufferView.from_ffi(out_view)
+        self.view = view
+        return view
+
+    def to_bytes(self) -> bytes:
+        self._ensure_open()
+        out_view = _NnrpBufferView()
+        status = self.entrypoints.object_metadata_buffer_view(self.handle.to_ffi(), ctypes.byref(out_view))
+        raise_for_native_status(status)
+        return _copy_buffer_view(out_view)
+
+    def close(self) -> None:
+        self._ensure_open()
+        status = self.entrypoints.object_metadata_buffer_release(self.handle.to_ffi())
+        raise_for_native_status(status)
+        self._released = True
+
+    def _ensure_open(self) -> None:
+        if self._released:
+            raise NativeInvalidStateError(
+                NativeStatus(FFI_STATUS_INVALID_STATE),
+                "native object metadata buffer is released",
+            )
+
+
+@dataclass
+class NativeObjectDescriptor:
+    entrypoints: NativeRuntimeEntrypoints
+    handle: NativeObjectDescriptorHandle
+    descriptor: Any
+    metadata_view: NativeBufferView
+    _released: bool = field(default=False, init=False, repr=False, compare=False)
+
+    @classmethod
+    def create(
+        cls,
+        entrypoints: NativeRuntimeEntrypoints,
+        descriptor: Any,
+        metadata: bytes | bytearray | memoryview = b"",
+    ) -> NativeObjectDescriptor:
+        metadata_view, _owner = _buffer_view_from_payload(metadata)
+        out_handle = _NnrpHandle()
+        status = entrypoints.object_descriptor_create(
+            _runtime_object_descriptor_to_ffi(descriptor),
+            metadata_view,
+            ctypes.byref(out_handle),
+        )
+        raise_for_native_status(status)
+        native_descriptor = cls(
+            entrypoints,
+            NativeObjectDescriptorHandle.from_ffi(out_handle),
+            descriptor,
+            NativeBufferView.empty(),
+        )
+        native_descriptor.refresh_view()
+        return native_descriptor
+
+    def refresh_view(self) -> tuple[Any, NativeBufferView]:
+        self._ensure_open()
+        out_descriptor = _NnrpRuntimeObjectDescriptor()
+        out_metadata = _NnrpBufferView()
+        status = self.entrypoints.object_descriptor_view(
+            self.handle.to_ffi(),
+            ctypes.byref(out_descriptor),
+            ctypes.byref(out_metadata),
+        )
+        raise_for_native_status(status)
+        descriptor = _runtime_object_descriptor_from_ffi(out_descriptor)
+        metadata_view = NativeBufferView.from_ffi(out_metadata)
+        self.descriptor = descriptor
+        self.metadata_view = metadata_view
+        return descriptor, metadata_view
+
+    def metadata_snapshot(self) -> NativeObjectMetadataBuffer:
+        self._ensure_open()
+        out_buffer = _NnrpHandle()
+        out_view = _NnrpBufferView()
+        status = self.entrypoints.object_descriptor_metadata_snapshot(
+            self.handle.to_ffi(),
+            ctypes.byref(out_buffer),
+            ctypes.byref(out_view),
+        )
+        raise_for_native_status(status)
+        return NativeObjectMetadataBuffer(
+            self.entrypoints,
+            NativeBufferHandle.from_ffi(out_buffer),
+            NativeBufferView.from_ffi(out_view),
+        )
+
+    def close(self) -> None:
+        self._ensure_open()
+        status = self.entrypoints.object_descriptor_release(self.handle.to_ffi())
+        raise_for_native_status(status)
+        self._released = True
+
+    def _ensure_open(self) -> None:
+        if self._released:
+            raise NativeInvalidStateError(
+                NativeStatus(FFI_STATUS_INVALID_STATE),
+                "native object descriptor is released",
+            )
 
 
 @dataclass(frozen=True)
@@ -2542,6 +2741,19 @@ class NativeRuntimeConnection:
     def acquire_buffer_copy(self, payload: bytes | bytearray | memoryview) -> NativeOwnedBuffer:
         self._ensure_open()
         return NativeOwnedBuffer.acquire_copy(self.entrypoints, payload)
+
+    def acquire_object_metadata_copy(self, payload: bytes | bytearray | memoryview) -> NativeObjectMetadataBuffer:
+        self._ensure_open()
+        return NativeObjectMetadataBuffer.acquire_copy(self.entrypoints, payload)
+
+    def create_object_descriptor(
+        self,
+        descriptor: Any,
+        *,
+        metadata: bytes | bytearray | memoryview = b"",
+    ) -> NativeObjectDescriptor:
+        self._ensure_open()
+        return NativeObjectDescriptor.create(self.entrypoints, descriptor, metadata)
 
     def cache_backend(self, *, now_ms: int = 0, ttl_ms: int = 0, expected_version: int = 0) -> NativeCacheLeaseBackend:
         return NativeCacheLeaseBackend(
@@ -4404,6 +4616,40 @@ def _typed_payload_descriptor_to_ffi(descriptor: Any) -> _NnrpTypedPayloadDescri
         0,
         int(descriptor.offset),
         int(descriptor.length),
+    )
+
+
+def _runtime_object_descriptor_from_ffi(descriptor: _NnrpRuntimeObjectDescriptor) -> Any:
+    from nnrp.runtime import MemoryLocationHint, ObjectDescriptorMetadata, OwnershipHint, RuntimeObjectKind, RuntimeRole
+
+    return ObjectDescriptorMetadata(
+        object_id=int(descriptor.object_id),
+        object_kind=RuntimeObjectKind(int(descriptor.object_kind)),
+        producer_role=RuntimeRole(int(descriptor.producer_role)),
+        consumer_role=RuntimeRole(int(descriptor.consumer_role)),
+        session_id=int(descriptor.session_id),
+        byte_size=int(descriptor.byte_size),
+        compute_cost_units=int(descriptor.compute_cost_units),
+        memory_location_hint=MemoryLocationHint(int(descriptor.memory_location_hint)),
+        ownership_hint=OwnershipHint(int(descriptor.ownership_hint)),
+        lifetime_hint_ms=int(descriptor.lifetime_hint_ms),
+        metadata_bytes=int(descriptor.metadata_bytes),
+    )
+
+
+def _runtime_object_descriptor_to_ffi(descriptor: Any) -> _NnrpRuntimeObjectDescriptor:
+    return _NnrpRuntimeObjectDescriptor(
+        int(descriptor.object_id),
+        int(descriptor.object_kind),
+        int(descriptor.producer_role),
+        int(descriptor.consumer_role),
+        int(descriptor.session_id),
+        int(descriptor.byte_size),
+        int(descriptor.compute_cost_units),
+        int(descriptor.memory_location_hint),
+        int(descriptor.ownership_hint),
+        int(descriptor.lifetime_hint_ms),
+        int(descriptor.metadata_bytes),
     )
 
 

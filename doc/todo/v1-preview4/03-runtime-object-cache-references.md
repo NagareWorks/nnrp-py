@@ -16,12 +16,12 @@
 
 ## Native Object Bindings
 
-- [ ] Bind native object descriptor creation.
-- [ ] Bind native object descriptor parsing.
-- [ ] Bind native object release.
+- [x] Bind native object descriptor creation.
+- [x] Bind native object descriptor parsing.
+- [x] Bind native object release.
 - [ ] Bind native object delta descriptor helpers.
-- [ ] Add native-owned metadata buffer wrapper.
-- [ ] Add lifetime guard tests for native-owned object metadata.
+- [x] Add native-owned metadata buffer wrapper.
+- [x] Add lifetime guard tests for native-owned object metadata.
 
 ## Cache References
 

@@ -46,6 +46,7 @@ from nnrp.native import (
     HANDLE_KIND_CACHE_LEASE,
     HANDLE_KIND_CONNECTION,
     HANDLE_KIND_EVENT_PUMP,
+    HANDLE_KIND_OBJECT_DESCRIPTOR,
     HANDLE_KIND_OPERATION,
     HANDLE_KIND_SCHEMA_REGISTRY,
     HANDLE_KIND_SESSION,
@@ -77,6 +78,9 @@ from nnrp.native import (
     NativeInvalidHandleError,
     NativeInvalidStateError,
     NativeMutableBufferView,
+    NativeObjectDescriptor,
+    NativeObjectDescriptorHandle,
+    NativeObjectMetadataBuffer,
     NativeOperationHandle,
     NativeOperationLifecycle,
     NativeOperationSchedulingHint,
@@ -133,6 +137,7 @@ from nnrp.native import (
     _NnrpPollResult,
     _NnrpProtocolVersion,
     _NnrpRuntimeCapabilities,
+    _NnrpRuntimeObjectDescriptor,
     _NnrpSchemaDescriptorHeader,
     _NnrpServerAcceptRequest,
     _NnrpServerBindRequest,
@@ -168,6 +173,7 @@ from nnrp.native import (
     select_native_runtime_backend,
     select_native_transport_provider,
 )
+from nnrp.runtime import MemoryLocationHint, ObjectDescriptorMetadata, OwnershipHint, RuntimeObjectKind, RuntimeRole
 from nnrp.schema import (
     Preview3TypedPayloadDescriptor,
     SchemaDescriptorHeader,
@@ -291,6 +297,13 @@ class FakeRuntimeLibrary(FakeEntrypointLibrary):
         self.nnrp_buffer_acquire_copy.handler = self._buffer_acquire_copy
         self.nnrp_buffer_view.handler = self._buffer_view
         self.nnrp_buffer_release.handler = self._buffer_release
+        self.nnrp_object_metadata_buffer_acquire_copy.handler = self._object_metadata_buffer_acquire_copy
+        self.nnrp_object_metadata_buffer_view.handler = self._object_metadata_buffer_view
+        self.nnrp_object_metadata_buffer_release.handler = self._object_metadata_buffer_release
+        self.nnrp_object_descriptor_create.handler = self._object_descriptor_create
+        self.nnrp_object_descriptor_view.handler = self._object_descriptor_view
+        self.nnrp_object_descriptor_metadata_snapshot.handler = self._object_descriptor_metadata_snapshot
+        self.nnrp_object_descriptor_release.handler = self._object_descriptor_release
         self.nnrp_cache_query.handler = self._cache_query
         self.nnrp_cache_touch.handler = self._cache_touch
         self.nnrp_cache_prefetch.handler = self._cache_prefetch
@@ -298,6 +311,7 @@ class FakeRuntimeLibrary(FakeEntrypointLibrary):
         self.submitted_payloads: list[bytes] = []
         self._schema_registry: dict[tuple[int, int], SchemaDescriptorHeader] = {}
         self._buffers: dict[int, ctypes.Array[ctypes.c_char]] = {}
+        self._object_descriptors: dict[int, tuple[_NnrpRuntimeObjectDescriptor, ctypes.Array[ctypes.c_char]]] = {}
         self._cache_leases: dict[tuple[int, int, int, int], _NnrpHandle] = {}
 
     def _client_connect(self, request: _NnrpClientConnectRequest, out_handle: object) -> _NnrpFfiStatus:
@@ -595,6 +609,66 @@ class FakeRuntimeLibrary(FakeEntrypointLibrary):
         self._buffers.pop(buffer.id, None)
         return self.status
 
+    def _object_metadata_buffer_acquire_copy(
+        self,
+        source: _NnrpBufferView,
+        out_buffer: object,
+        out_view: object,
+    ) -> _NnrpFfiStatus:
+        return self._buffer_acquire_copy(source, out_buffer, out_view)
+
+    def _object_metadata_buffer_view(self, buffer: _NnrpHandle, out_view: object) -> _NnrpFfiStatus:
+        return self._buffer_view(buffer, out_view)
+
+    def _object_metadata_buffer_release(self, buffer: _NnrpHandle) -> _NnrpFfiStatus:
+        return self._buffer_release(buffer)
+
+    def _object_descriptor_create(
+        self,
+        descriptor: _NnrpRuntimeObjectDescriptor,
+        metadata: _NnrpBufferView,
+        out_handle: object,
+    ) -> _NnrpFfiStatus:
+        payload = _read_buffer_view(metadata)
+        descriptor_id = len(self._object_descriptors) + 1000
+        owner = ctypes.create_string_buffer(payload, len(payload))
+        self._object_descriptors[descriptor_id] = (_copy_runtime_object_descriptor(descriptor), owner)
+        _write_handle(out_handle, _NnrpHandle(HANDLE_KIND_OBJECT_DESCRIPTOR, descriptor_id, 1, 0))
+        return self.status
+
+    def _object_descriptor_view(
+        self,
+        handle: _NnrpHandle,
+        out_descriptor: object,
+        out_metadata: object,
+    ) -> _NnrpFfiStatus:
+        item = self._object_descriptors.get(handle.id)
+        if handle.kind != HANDLE_KIND_OBJECT_DESCRIPTOR or item is None:
+            return _NnrpFfiStatus(FFI_STATUS_INVALID_HANDLE, 0, 0, 0)
+        descriptor, owner = item
+        _write_runtime_object_descriptor(out_descriptor, descriptor)
+        _write_buffer_view(out_metadata, owner)
+        return self.status
+
+    def _object_descriptor_metadata_snapshot(
+        self,
+        handle: _NnrpHandle,
+        out_buffer: object,
+        out_view: object,
+    ) -> _NnrpFfiStatus:
+        item = self._object_descriptors.get(handle.id)
+        if handle.kind != HANDLE_KIND_OBJECT_DESCRIPTOR or item is None:
+            return _NnrpFfiStatus(FFI_STATUS_INVALID_HANDLE, 0, 0, 0)
+        _, owner = item
+        source = _NnrpBufferView(ctypes.cast(owner, ctypes.c_void_p), len(owner.raw))
+        return self._buffer_acquire_copy(source, out_buffer, out_view)
+
+    def _object_descriptor_release(self, handle: _NnrpHandle) -> _NnrpFfiStatus:
+        if handle.kind != HANDLE_KIND_OBJECT_DESCRIPTOR:
+            return _NnrpFfiStatus(FFI_STATUS_INVALID_HANDLE, 0, 0, 0)
+        self._object_descriptors.pop(handle.id, None)
+        return self.status
+
     def _cache_query(self, request: _NnrpCacheLeaseRequest, out_result: object) -> _NnrpFfiStatus:
         return self._write_cache_result(request, out_result, outcome=0)
 
@@ -801,6 +875,39 @@ def _write_buffer_view(out_view: object, owner: ctypes.Array[ctypes.c_char]) -> 
     target.len = len(owner.raw)
 
 
+def _copy_runtime_object_descriptor(descriptor: _NnrpRuntimeObjectDescriptor) -> _NnrpRuntimeObjectDescriptor:
+    return _NnrpRuntimeObjectDescriptor(
+        descriptor.object_id,
+        descriptor.object_kind,
+        descriptor.producer_role,
+        descriptor.consumer_role,
+        descriptor.session_id,
+        descriptor.byte_size,
+        descriptor.compute_cost_units,
+        descriptor.memory_location_hint,
+        descriptor.ownership_hint,
+        descriptor.lifetime_hint_ms,
+        descriptor.metadata_bytes,
+    )
+
+
+def _write_runtime_object_descriptor(out_descriptor: object, descriptor: _NnrpRuntimeObjectDescriptor) -> None:
+    target = getattr(out_descriptor, "_obj", None)
+    if target is None:
+        target = ctypes.cast(out_descriptor, ctypes.POINTER(_NnrpRuntimeObjectDescriptor)).contents
+    target.object_id = descriptor.object_id
+    target.object_kind = descriptor.object_kind
+    target.producer_role = descriptor.producer_role
+    target.consumer_role = descriptor.consumer_role
+    target.session_id = descriptor.session_id
+    target.byte_size = descriptor.byte_size
+    target.compute_cost_units = descriptor.compute_cost_units
+    target.memory_location_hint = descriptor.memory_location_hint
+    target.ownership_hint = descriptor.ownership_hint
+    target.lifetime_hint_ms = descriptor.lifetime_hint_ms
+    target.metadata_bytes = descriptor.metadata_bytes
+
+
 def _cache_result_target(out_result: object) -> _NnrpCacheLeaseResult:
     target = getattr(out_result, "_obj", None)
     if target is None:
@@ -939,6 +1046,13 @@ RUNTIME_ENTRYPOINT_SYMBOLS = [
     "nnrp_buffer_acquire_copy",
     "nnrp_buffer_view",
     "nnrp_buffer_release",
+    "nnrp_object_metadata_buffer_acquire_copy",
+    "nnrp_object_metadata_buffer_view",
+    "nnrp_object_metadata_buffer_release",
+    "nnrp_object_descriptor_create",
+    "nnrp_object_descriptor_view",
+    "nnrp_object_descriptor_metadata_snapshot",
+    "nnrp_object_descriptor_release",
     "nnrp_cache_query",
     "nnrp_cache_touch",
     "nnrp_cache_prefetch",
@@ -1889,6 +2003,63 @@ def test_native_owned_buffer_acquires_views_and_releases_handle(tmp_path: Path) 
     buffer.close()
     with pytest.raises(NativeInvalidStateError):
         buffer.to_bytes()
+
+
+def test_native_runtime_connection_manages_object_descriptor_handles(tmp_path: Path) -> None:
+    artifact = tmp_path / "nnrp_ffi.dll"
+    artifact.write_bytes(b"fake")
+    client = load_native_client(artifact, library=FakeRuntimeLibrary())
+    connection = client.connect(connection_id=11, generation=2, transport_id=TRANSPORT_SLOT_TCP)
+    descriptor = ObjectDescriptorMetadata(
+        object_id=101,
+        object_kind=RuntimeObjectKind.TENSOR,
+        producer_role=RuntimeRole.RUNTIME,
+        consumer_role=RuntimeRole.CLIENT,
+        session_id=42,
+        byte_size=4096,
+        compute_cost_units=7,
+        memory_location_hint=MemoryLocationHint.DEVICE_MEMORY,
+        ownership_hint=OwnershipHint.BORROWED,
+        lifetime_hint_ms=250,
+        metadata_bytes=8,
+    )
+
+    native_descriptor = connection.create_object_descriptor(descriptor, metadata=b"metadata")
+    refreshed_descriptor, metadata_view = native_descriptor.refresh_view()
+    metadata_snapshot = native_descriptor.metadata_snapshot()
+
+    assert isinstance(native_descriptor, NativeObjectDescriptor)
+    assert isinstance(native_descriptor.handle, NativeObjectDescriptorHandle)
+    assert refreshed_descriptor == descriptor
+    assert metadata_view.length == len(b"metadata")
+    assert isinstance(metadata_snapshot, NativeObjectMetadataBuffer)
+    assert metadata_snapshot.to_bytes() == b"metadata"
+    assert metadata_snapshot.refresh_view().length == len(b"metadata")
+
+    metadata_snapshot.close()
+    with pytest.raises(NativeInvalidStateError):
+        metadata_snapshot.to_bytes()
+
+    native_descriptor.close()
+    with pytest.raises(NativeInvalidStateError):
+        native_descriptor.refresh_view()
+
+
+def test_native_object_metadata_buffer_acquires_views_and_releases_handle(tmp_path: Path) -> None:
+    artifact = tmp_path / "nnrp_ffi.dll"
+    artifact.write_bytes(b"fake")
+    client = load_native_client(artifact, library=FakeRuntimeLibrary())
+    connection = client.connect(connection_id=11, generation=2, transport_id=TRANSPORT_SLOT_TCP)
+    buffer = connection.acquire_object_metadata_copy(b"object-meta")
+
+    assert isinstance(buffer, NativeObjectMetadataBuffer)
+    assert isinstance(buffer.handle, NativeBufferHandle)
+    assert buffer.view.length == len(b"object-meta")
+    assert buffer.to_bytes() == b"object-meta"
+
+    buffer.close()
+    with pytest.raises(NativeInvalidStateError):
+        buffer.refresh_view()
 
 
 def test_native_recovery_codec_delegates_resume_and_migration_validation(tmp_path: Path) -> None:
@@ -3673,6 +3844,7 @@ def test_native_handle_requires_valid_kind_id_and_generation() -> None:
         (NativeBufferHandle, HANDLE_KIND_BUFFER),
         (NativeSchemaRegistryHandle, HANDLE_KIND_SCHEMA_REGISTRY),
         (NativeCacheLeaseHandle, HANDLE_KIND_CACHE_LEASE),
+        (NativeObjectDescriptorHandle, HANDLE_KIND_OBJECT_DESCRIPTOR),
     ],
 )
 def test_typed_native_handles_accept_only_matching_kind(wrapper_type: type, kind: int) -> None:
@@ -3958,6 +4130,29 @@ def test_native_runtime_entrypoints_bind_frozen_symbol_table() -> None:
     ]
     assert library.nnrp_buffer_view.argtypes == [_NnrpHandle, ctypes.POINTER(_NnrpBufferView)]
     assert library.nnrp_buffer_release.argtypes == [_NnrpHandle]
+    assert library.nnrp_object_metadata_buffer_acquire_copy.argtypes == [
+        _NnrpBufferView,
+        ctypes.POINTER(_NnrpHandle),
+        ctypes.POINTER(_NnrpBufferView),
+    ]
+    assert library.nnrp_object_metadata_buffer_view.argtypes == [_NnrpHandle, ctypes.POINTER(_NnrpBufferView)]
+    assert library.nnrp_object_metadata_buffer_release.argtypes == [_NnrpHandle]
+    assert library.nnrp_object_descriptor_create.argtypes == [
+        _NnrpRuntimeObjectDescriptor,
+        _NnrpBufferView,
+        ctypes.POINTER(_NnrpHandle),
+    ]
+    assert library.nnrp_object_descriptor_view.argtypes == [
+        _NnrpHandle,
+        ctypes.POINTER(_NnrpRuntimeObjectDescriptor),
+        ctypes.POINTER(_NnrpBufferView),
+    ]
+    assert library.nnrp_object_descriptor_metadata_snapshot.argtypes == [
+        _NnrpHandle,
+        ctypes.POINTER(_NnrpHandle),
+        ctypes.POINTER(_NnrpBufferView),
+    ]
+    assert library.nnrp_object_descriptor_release.argtypes == [_NnrpHandle]
     assert library.nnrp_cache_query.argtypes == [_NnrpCacheLeaseRequest, ctypes.POINTER(_NnrpCacheLeaseResult)]
     assert library.nnrp_cache_touch.argtypes == [_NnrpCacheLeaseRequest, ctypes.POINTER(_NnrpCacheLeaseResult)]
     assert library.nnrp_cache_prefetch.argtypes == [

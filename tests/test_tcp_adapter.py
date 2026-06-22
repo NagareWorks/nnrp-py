@@ -35,6 +35,14 @@ from nnrp.core import (
     build_transport_probe_packet,
     unpack_tensor_body,
 )
+from nnrp.runtime import (
+    ObjectReferenceMetadata,
+    PressureMetadata,
+    ProgressMetadata,
+    decode_runtime_control_metadata,
+    decode_runtime_object_metadata,
+    encode_runtime_control_metadata,
+)
 
 
 def test_tcp_loopback_control_stream_preserves_packet_boundaries() -> None:
@@ -69,6 +77,10 @@ def test_tcp_rejects_quic_only_datagram_api() -> None:
 
 def test_tcp_current_transport_probe_loopback() -> None:
     asyncio.run(_run_tcp_transport_probe_loopback())
+
+
+def test_tcp_preview4_runtime_control_and_object_packets_share_control_stream() -> None:
+    asyncio.run(_run_tcp_preview4_runtime_control_and_object_loopback())
 
 
 async def _run_tcp_loopback() -> None:
@@ -203,6 +215,46 @@ async def _run_tcp_transport_probe_loopback() -> None:
             assert TransportProbeAckMetadata.unpack(received_ack.metadata) == ack_metadata
 
 
+async def _run_tcp_preview4_runtime_control_and_object_loopback() -> None:
+    port = _find_free_tcp_port()
+    packets = _build_preview4_runtime_control_packets(session_id=313)
+
+    async with serve_tcp("127.0.0.1", port, configuration=create_tcp_server_configuration()) as listener:
+        async with connect_tcp("127.0.0.1", port, configuration=create_tcp_client_configuration()) as client:
+            server = await listener.accept(timeout=5.0)
+
+            for packet in packets:
+                await client.send_control_packet(packet)
+
+            received_progress = await server.receive_control_packet(timeout=5.0)
+            received_pressure = await server.receive_control_packet(timeout=5.0)
+            received_object_ref = await server.receive_control_packet(timeout=5.0)
+
+            assert received_progress.header.msg_type is MessageType.PROGRESS
+            assert decode_runtime_control_metadata(
+                MessageType.PROGRESS,
+                received_progress.metadata + received_progress.body,
+            ).metadata == ProgressMetadata(41, 1, 7, 2500, 9001, 4)
+            assert received_progress.body == b"step"
+
+            assert received_pressure.header.msg_type is MessageType.BACKPRESSURE
+            assert decode_runtime_control_metadata(
+                MessageType.BACKPRESSURE,
+                received_pressure.metadata,
+            ).metadata == PressureMetadata(41, 16, 2, 3, 5, 0x03)
+
+            assert received_object_ref.header.msg_type is MessageType.OBJECT_REF
+            assert decode_runtime_object_metadata(
+                MessageType.OBJECT_REF,
+                received_object_ref.metadata + received_object_ref.body,
+            ).metadata == ObjectReferenceMetadata(9001, 41, 2, 128, 256, 0x01, 2)
+            assert received_object_ref.body == b"md"
+            assert client.last_submit_stream_id is None
+            assert client.last_result_stream_id is None
+            assert server.last_submit_stream_id is None
+            assert server.last_result_stream_id is None
+
+
 def _build_client_hello_packet(*, requested_session_id: int = 0, auth_block: bytes = b"") -> NnrpPacket:
     metadata = ClientHelloMetadata(
         min_version_major=1,
@@ -322,6 +374,37 @@ def _build_result_push_packet() -> NnrpPacket:
         server_total_ms=13,
         tile_index_mode=TileIndexMode.RAW_U16,
         view_id=1,
+    )
+
+
+def _build_preview4_runtime_control_packets(*, session_id: int) -> tuple[NnrpPacket, NnrpPacket, NnrpPacket]:
+    progress = ProgressMetadata(41, 1, 7, 2500, 9001, 4)
+    pressure = PressureMetadata(41, 16, 2, 3, 5, 0x03)
+    object_ref = ObjectReferenceMetadata(9001, 41, 2, 128, 256, 0x01, 2)
+    return (
+        NnrpPacket.build(
+            version_major=1,
+            wire_format=WireFormat.CURRENT,
+            msg_type=MessageType.PROGRESS,
+            session_id=session_id,
+            metadata=progress.pack(),
+            body=b"step",
+        ),
+        NnrpPacket.build(
+            version_major=1,
+            wire_format=WireFormat.CURRENT,
+            msg_type=MessageType.BACKPRESSURE,
+            session_id=session_id,
+            metadata=encode_runtime_control_metadata(MessageType.BACKPRESSURE, pressure),
+        ),
+        NnrpPacket.build(
+            version_major=1,
+            wire_format=WireFormat.CURRENT,
+            msg_type=MessageType.OBJECT_REF,
+            session_id=session_id,
+            metadata=object_ref.pack(),
+            body=b"md",
+        ),
     )
 
 

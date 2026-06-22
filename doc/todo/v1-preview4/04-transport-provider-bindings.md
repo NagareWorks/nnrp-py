@@ -15,9 +15,9 @@
 
 ## TCP And QUIC Preview4 Runtime Continuity
 
-- [ ] Keep TCP provider behavior aligned with preview4 runtime objects.
-- [ ] Keep QUIC provider behavior aligned with preview4 runtime objects.
-- [ ] Route TCP and QUIC progress/backpressure events through the shared event pump.
+- [x] Keep TCP provider behavior aligned with preview4 runtime objects.
+- [x] Keep QUIC provider behavior aligned with preview4 runtime objects.
+- [x] Route TCP and QUIC progress/backpressure events through the shared event pump.
 - [x] Add tests that TCP and QUIC providers remain distinct native artifact slots.
 
 ## IPC Binding

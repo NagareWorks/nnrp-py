@@ -55,6 +55,14 @@ from nnrp.core import (
     build_transport_probe_packet,
     unpack_tensor_body,
 )
+from nnrp.runtime import (
+    ObjectReferenceMetadata,
+    PressureMetadata,
+    ProgressMetadata,
+    decode_runtime_control_metadata,
+    decode_runtime_object_metadata,
+    encode_runtime_control_metadata,
+)
 
 
 def test_quic_loopback_control_stream_and_datagram() -> None:
@@ -91,6 +99,10 @@ def test_quic_typed_control_and_result_drop_mapping() -> None:
 
 def test_quic_current_transport_probe_loopback() -> None:
     asyncio.run(_run_quic_transport_probe_loopback())
+
+
+def test_quic_preview4_runtime_control_and_object_packets_share_control_stream() -> None:
+    asyncio.run(_run_quic_preview4_runtime_control_and_object_loopback())
 
 
 def test_quic_configuration_exposes_explicit_idle_timeout() -> None:
@@ -434,6 +446,53 @@ async def _run_quic_transport_probe_loopback() -> None:
                 assert TransportProbeAckMetadata.unpack(received_ack.metadata) == ack_metadata
 
 
+async def _run_quic_preview4_runtime_control_and_object_loopback() -> None:
+    with tempfile.TemporaryDirectory() as temp_dir:
+        certificate_path, private_key_path = _write_self_signed_certificate(Path(temp_dir))
+        port = _find_free_udp_port()
+        server_configuration = create_quic_server_configuration(certificate_path, private_key_path)
+        client_configuration = _create_test_client_configuration(certificate_path, wire_format=WireFormat.CURRENT)
+        packets = _build_preview4_runtime_control_packets(session_id=314)
+
+        async with serve_quic("127.0.0.1", port, configuration=server_configuration) as listener:
+            async with connect_quic("127.0.0.1", port, configuration=client_configuration) as client:
+                server = await listener.accept(timeout=5.0)
+
+                for packet in packets:
+                    await client.send_control_packet(packet)
+
+                control_stream_id = client.control_stream_id
+                received_progress = await server.receive_control_packet(timeout=5.0)
+                received_pressure = await server.receive_control_packet(timeout=5.0)
+                received_object_ref = await server.receive_control_packet(timeout=5.0)
+
+                assert control_stream_id is not None
+                assert client.control_stream_id == control_stream_id
+                assert received_progress.header.msg_type is MessageType.PROGRESS
+                assert decode_runtime_control_metadata(
+                    MessageType.PROGRESS,
+                    received_progress.metadata + received_progress.body,
+                ).metadata == ProgressMetadata(41, 1, 7, 2500, 9001, 4)
+                assert received_progress.body == b"step"
+
+                assert received_pressure.header.msg_type is MessageType.BACKPRESSURE
+                assert decode_runtime_control_metadata(
+                    MessageType.BACKPRESSURE,
+                    received_pressure.metadata,
+                ).metadata == PressureMetadata(41, 16, 2, 3, 5, 0x03)
+
+                assert received_object_ref.header.msg_type is MessageType.OBJECT_REF
+                assert decode_runtime_object_metadata(
+                    MessageType.OBJECT_REF,
+                    received_object_ref.metadata + received_object_ref.body,
+                ).metadata == ObjectReferenceMetadata(9001, 41, 2, 128, 256, 0x01, 2)
+                assert received_object_ref.body == b"md"
+                assert client.last_submit_stream_id is None
+                assert client.last_result_stream_id is None
+                assert server.last_submit_stream_id is None
+                assert server.last_result_stream_id is None
+
+
 async def _run_wait_for_queue_or_event_cancellation() -> None:
     queue: asyncio.Queue[str] = asyncio.Queue()
     event = asyncio.Event()
@@ -577,6 +636,37 @@ def _build_result_push_packet(*, session_id: int, frame_id: int, view_id: int) -
         server_total_ms=19,
         tile_index_mode=TileIndexMode.RAW_U16,
         view_id=view_id,
+    )
+
+
+def _build_preview4_runtime_control_packets(*, session_id: int) -> tuple[NnrpPacket, NnrpPacket, NnrpPacket]:
+    progress = ProgressMetadata(41, 1, 7, 2500, 9001, 4)
+    pressure = PressureMetadata(41, 16, 2, 3, 5, 0x03)
+    object_ref = ObjectReferenceMetadata(9001, 41, 2, 128, 256, 0x01, 2)
+    return (
+        NnrpPacket.build(
+            version_major=1,
+            wire_format=WireFormat.CURRENT,
+            msg_type=MessageType.PROGRESS,
+            session_id=session_id,
+            metadata=progress.pack(),
+            body=b"step",
+        ),
+        NnrpPacket.build(
+            version_major=1,
+            wire_format=WireFormat.CURRENT,
+            msg_type=MessageType.BACKPRESSURE,
+            session_id=session_id,
+            metadata=encode_runtime_control_metadata(MessageType.BACKPRESSURE, pressure),
+        ),
+        NnrpPacket.build(
+            version_major=1,
+            wire_format=WireFormat.CURRENT,
+            msg_type=MessageType.OBJECT_REF,
+            session_id=session_id,
+            metadata=object_ref.pack(),
+            body=b"md",
+        ),
     )
 
 

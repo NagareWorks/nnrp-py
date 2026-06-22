@@ -723,6 +723,34 @@ class NativeMutableBufferView:
         return _NnrpBufferViewMut(_void_pointer(self.ptr), self.length)
 
 
+@dataclass
+class NativeBorrowedBufferView:
+    owner: Any
+    view: NativeBufferView
+    _active: bool = field(default=False, init=False, repr=False, compare=False)
+
+    def __enter__(self) -> memoryview:
+        if self._active:
+            raise NativeInvalidStateError(
+                NativeStatus(FFI_STATUS_INVALID_STATE),
+                "native borrowed buffer view is already active",
+            )
+        self.owner._ensure_open()
+        self.owner._borrow_count += 1
+        self._active = True
+        try:
+            return _borrow_buffer_view(self.view)
+        except Exception:
+            self._active = False
+            self.owner._borrow_count -= 1
+            raise
+
+    def __exit__(self, exc_type: object, exc: object, traceback: object) -> None:
+        if self._active:
+            self._active = False
+            self.owner._borrow_count -= 1
+
+
 class _NnrpProtocolVersion(ctypes.Structure):
     _fields_ = [
         ("major", ctypes.c_uint8),
@@ -1555,6 +1583,7 @@ class NativeOwnedBuffer:
     handle: NativeBufferHandle
     view: NativeBufferView
     _released: bool = field(default=False, init=False, repr=False, compare=False)
+    _borrow_count: int = field(default=0, init=False, repr=False, compare=False)
 
     @classmethod
     def acquire_copy(
@@ -1583,8 +1612,17 @@ class NativeOwnedBuffer:
         raise_for_native_status(status)
         return _copy_buffer_view(out_view)
 
+    def borrow_view(self) -> NativeBorrowedBufferView:
+        self._ensure_open()
+        return NativeBorrowedBufferView(self, self.refresh_view())
+
     def close(self) -> None:
         self._ensure_open()
+        if self._borrow_count:
+            raise NativeInvalidStateError(
+                NativeStatus(FFI_STATUS_INVALID_STATE),
+                "native buffer has active borrowed views",
+            )
         status = self.entrypoints.buffer_release(self.handle.to_ffi())
         raise_for_native_status(status)
         self._released = True
@@ -1600,6 +1638,7 @@ class NativeObjectMetadataBuffer:
     handle: NativeBufferHandle
     view: NativeBufferView
     _released: bool = field(default=False, init=False, repr=False, compare=False)
+    _borrow_count: int = field(default=0, init=False, repr=False, compare=False)
 
     @classmethod
     def acquire_copy(
@@ -1632,8 +1671,17 @@ class NativeObjectMetadataBuffer:
         raise_for_native_status(status)
         return _copy_buffer_view(out_view)
 
+    def borrow_view(self) -> NativeBorrowedBufferView:
+        self._ensure_open()
+        return NativeBorrowedBufferView(self, self.refresh_view())
+
     def close(self) -> None:
         self._ensure_open()
+        if self._borrow_count:
+            raise NativeInvalidStateError(
+                NativeStatus(FFI_STATUS_INVALID_STATE),
+                "native object metadata buffer has active borrowed views",
+            )
         status = self.entrypoints.object_metadata_buffer_release(self.handle.to_ffi())
         raise_for_native_status(status)
         self._released = True
@@ -4583,6 +4631,13 @@ def _copy_buffer_view(view: _NnrpBufferView) -> bytes:
     if not view.ptr:
         raise NativeHandleError("native event payload has non-empty null pointer")
     return ctypes.string_at(view.ptr, length)
+
+
+def _borrow_buffer_view(view: NativeBufferView) -> memoryview:
+    if view.length == 0:
+        return memoryview(b"")
+    array_type = ctypes.c_ubyte * view.length
+    return memoryview(array_type.from_address(view.ptr)).toreadonly()
 
 
 def _schema_descriptor_from_ffi(descriptor: _NnrpSchemaDescriptorHeader) -> Any:

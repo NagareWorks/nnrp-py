@@ -64,6 +64,7 @@ from nnrp.native import (
     TRANSPORT_SLOT_TCP,
     TRANSPORT_SLOT_WEBSOCKET,
     NativeArtifactError,
+    NativeBorrowedBufferView,
     NativeBufferHandle,
     NativeBufferView,
     NativeCacheLeaseBackend,
@@ -2059,6 +2060,51 @@ def test_native_owned_buffer_acquires_views_and_releases_handle(tmp_path: Path) 
         buffer.to_bytes()
 
 
+def test_native_owned_buffer_borrows_read_only_view_with_lifetime_guard(tmp_path: Path) -> None:
+    artifact = tmp_path / "nnrp_ffi.dll"
+    artifact.write_bytes(b"fake")
+    client = load_native_client(artifact, library=FakeRuntimeLibrary())
+    connection = client.connect(connection_id=11, generation=2, transport_id=TRANSPORT_SLOT_TCP)
+    buffer = connection.acquire_buffer_copy(b"native-borrow")
+    borrowed = buffer.borrow_view()
+
+    assert isinstance(borrowed, NativeBorrowedBufferView)
+    with borrowed as view:
+        assert view.readonly is True
+        assert view.tobytes() == b"native-borrow"
+        with pytest.raises(NativeInvalidStateError, match="already active"):
+            with borrowed:
+                pass
+        with pytest.raises(NativeInvalidStateError, match="active borrowed views"):
+            buffer.close()
+
+    buffer.close()
+    with pytest.raises(NativeInvalidStateError):
+        buffer.borrow_view()
+
+
+def test_native_borrowed_buffer_releases_guard_when_view_creation_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    artifact = tmp_path / "nnrp_ffi.dll"
+    artifact.write_bytes(b"fake")
+    client = load_native_client(artifact, library=FakeRuntimeLibrary())
+    connection = client.connect(connection_id=11, generation=2, transport_id=TRANSPORT_SLOT_TCP)
+    buffer = connection.acquire_buffer_copy(b"native-borrow")
+
+    def reject_borrowed_view(view: NativeBufferView) -> memoryview:
+        raise RuntimeError("borrow rejected")
+
+    monkeypatch.setattr(native_module, "_borrow_buffer_view", reject_borrowed_view)
+
+    with pytest.raises(RuntimeError, match="borrow rejected"):
+        with buffer.borrow_view():
+            pass
+    assert buffer._borrow_count == 0
+    buffer.close()
+
+
 def test_native_runtime_connection_manages_object_descriptor_handles(tmp_path: Path) -> None:
     artifact = tmp_path / "nnrp_ffi.dll"
     artifact.write_bytes(b"fake")
@@ -2111,9 +2157,29 @@ def test_native_object_metadata_buffer_acquires_views_and_releases_handle(tmp_pa
     assert buffer.view.length == len(b"object-meta")
     assert buffer.to_bytes() == b"object-meta"
 
+    with buffer.borrow_view() as view:
+        assert view.readonly is True
+        assert view.tobytes() == b"object-meta"
+        with pytest.raises(NativeInvalidStateError, match="active borrowed views"):
+            buffer.close()
+
     buffer.close()
     with pytest.raises(NativeInvalidStateError):
         buffer.refresh_view()
+
+
+def test_native_object_metadata_buffer_borrows_empty_view(tmp_path: Path) -> None:
+    artifact = tmp_path / "nnrp_ffi.dll"
+    artifact.write_bytes(b"fake")
+    client = load_native_client(artifact, library=FakeRuntimeLibrary())
+    connection = client.connect(connection_id=11, generation=2, transport_id=TRANSPORT_SLOT_TCP)
+    buffer = connection.acquire_object_metadata_copy(b"")
+
+    with buffer.borrow_view() as view:
+        assert view.readonly is True
+        assert view.tobytes() == b""
+
+    buffer.close()
 
 
 def test_native_object_delta_helpers_acquire_native_metadata_buffers(tmp_path: Path) -> None:

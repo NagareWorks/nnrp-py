@@ -14,7 +14,7 @@ from nnrp.client import (
     connect_native_client_session,
     select_client_native_backend,
 )
-from nnrp.core import MessageType
+from nnrp.core import MessageType, TransportId
 from nnrp.native import NativeArtifactError, NativeWouldBlockError
 from nnrp.runtime import (
     BudgetMetadata,
@@ -395,6 +395,26 @@ def test_connect_native_client_connection_routes_results_for_multiple_sessions()
     assert backend.connections[0].closed is True
     assert first.closed is True
     assert second.closed is True
+
+
+@pytest.mark.parametrize(
+    ("transport_id", "expected_transport_id"),
+    [
+        (TransportId.IPC, int(TransportId.IPC)),
+        (TransportId.WEBSOCKET, int(TransportId.WEBSOCKET)),
+    ],
+)
+def test_connect_native_client_connection_passes_preview4_provider_transport_ids(
+    transport_id: TransportId,
+    expected_transport_id: int,
+) -> None:
+    backend = FakeBackend()
+    options = NativeClientConnectionOptions(transport_id=transport_id)
+
+    with connect_native_client_connection(backend=backend, options=options):
+        pass
+
+    assert backend.connections[0].transport_id == expected_transport_id
 
 
 def test_native_client_connection_rejects_use_after_close() -> None:

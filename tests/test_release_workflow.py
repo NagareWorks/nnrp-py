@@ -25,6 +25,16 @@ def test_release_workflow_rejects_non_preview4_native_artifact_shape() -> None:
     assert "--require-abi-version 1.11.0" in workflow
 
 
+def test_release_workflow_smokes_preview4_ipc_and_websocket_artifacts() -> None:
+    workflow = RELEASE_WORKFLOW.read_text(encoding="utf-8")
+
+    assert "Smoke native IPC and WebSocket artifacts" in workflow
+    assert "scripts/smoke_native_transport_artifacts.py" in workflow
+    assert "--root src/nnrp/native_artifacts" in workflow
+    assert "--transport ipc" in workflow
+    assert "--transport websocket" in workflow
+
+
 def test_release_workflow_runs_native_runtime_benchmark_thresholds() -> None:
     workflow = RELEASE_WORKFLOW.read_text(encoding="utf-8")
 

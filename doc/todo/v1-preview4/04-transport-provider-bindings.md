@@ -26,7 +26,7 @@
 - [x] Add Python endpoint model for `npipe://`.
 - [x] Bind native IPC provider connect.
 - [x] Bind native IPC provider listen.
-- [ ] Add loopback smoke tests against preview4 Rust IPC artifacts.
+- [x] Add loopback smoke tests against preview4 Rust IPC artifacts.
 - [x] Add diagnostic skip behavior when the native artifact does not expose IPC.
 
 ## WebSocket Binding
@@ -36,7 +36,7 @@
 - [x] Bind native WebSocket provider connect.
 - [x] Bind native WebSocket provider listen.
 - [x] Add binary-frame-only validation.
-- [ ] Add loopback smoke tests against preview4 Rust WebSocket artifacts.
+- [x] Add loopback smoke tests against preview4 Rust WebSocket artifacts.
 - [x] Add diagnostic skip behavior when the native artifact does not expose WebSocket.
 
 ## Probe Policy

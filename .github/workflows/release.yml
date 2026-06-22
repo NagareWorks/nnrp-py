@@ -275,6 +275,13 @@ jobs:
       - name: Test
         run: pytest -q
 
+      - name: Smoke native IPC and WebSocket artifacts
+        run: >
+          python scripts/smoke_native_transport_artifacts.py
+          --root src/nnrp/native_artifacts
+          --transport ipc
+          --transport websocket
+
       - name: Download cffi API fast-path modules
         uses: actions/download-artifact@v7
         with:

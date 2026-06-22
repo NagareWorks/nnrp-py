@@ -2709,6 +2709,57 @@ class NativeRuntimeClient:
         raise_for_native_status(status)
         return NativeRuntimeConnection(self.entrypoints, NativeConnectionHandle.from_ffi(out_connection))
 
+    def bind_server(self, *, server_id: int, generation: int, transport_id: int) -> NativeRuntimeServer:
+        request = _NnrpServerBindRequest(server_id, generation, transport_id)
+        out_server = _NnrpHandle()
+        status = self.entrypoints.server_bind(request, ctypes.byref(out_server))
+        raise_for_native_status(status)
+        return NativeRuntimeServer(self.entrypoints, NativeConnectionHandle.from_ffi(out_server))
+
+
+@dataclass(frozen=True)
+class NativeRuntimeServer:
+    entrypoints: NativeRuntimeEntrypoints
+    handle: NativeConnectionHandle
+    _closed: bool = field(default=False, init=False, repr=False, compare=False)
+
+    def accept_session(
+        self,
+        *,
+        session_id: int,
+        generation: int,
+        profile_id: int,
+        schema_id: int,
+        schema_version: int,
+    ) -> NativeRuntimeServerSession:
+        self._ensure_open()
+        request = _NnrpServerAcceptRequest(
+            self.handle.to_ffi(),
+            session_id,
+            generation,
+            profile_id,
+            schema_id,
+            schema_version,
+        )
+        out_session = _NnrpHandle()
+        status = self.entrypoints.server_accept(request, ctypes.byref(out_session))
+        raise_for_native_status(status)
+        return NativeRuntimeServerSession(
+            self.entrypoints,
+            self.handle,
+            NativeSessionHandle.from_ffi(out_session),
+        )
+
+    def close(self) -> None:
+        self._ensure_open()
+        status = self.entrypoints.client_close_connection(self.handle.to_ffi())
+        raise_for_native_status(status)
+        object.__setattr__(self, "_closed", True)
+
+    def _ensure_open(self) -> None:
+        if self._closed:
+            raise NativeInvalidStateError(NativeStatus(FFI_STATUS_INVALID_STATE), "native runtime server is closed")
+
 
 @dataclass(frozen=True)
 class NativeRuntimeConnection:
@@ -3591,6 +3642,76 @@ class NativeRuntimeSession:
     def _ensure_open(self) -> None:
         if self._closed:
             raise NativeInvalidStateError(NativeStatus(FFI_STATUS_INVALID_STATE), "native runtime session is closed")
+
+
+@dataclass(frozen=True)
+class NativeRuntimeServerOperation:
+    entrypoints: NativeRuntimeEntrypoints
+    session: NativeSessionHandle
+    handle: NativeOperationHandle
+    operation_id: int
+    frame_id: int
+
+    def send_result(self, payload: bytes | bytearray | memoryview = b"") -> None:
+        payload_view, _payload_owner = _buffer_view_from_payload(payload)
+        request = _NnrpServerSendResultRequest(self.handle.to_ffi(), payload_view)
+        status = self.entrypoints.server_send_result(request)
+        raise_for_native_status(status)
+
+
+@dataclass(frozen=True)
+class NativeRuntimeServerSession:
+    entrypoints: NativeRuntimeEntrypoints
+    server: NativeConnectionHandle
+    handle: NativeSessionHandle
+    _closed: bool = field(default=False, init=False, repr=False, compare=False)
+
+    def receive_submit(
+        self,
+        *,
+        operation_id: int,
+        frame_id: int,
+        payload: bytes | bytearray | memoryview = b"",
+    ) -> NativeRuntimeServerOperation:
+        self._ensure_open()
+        payload_view, _payload_owner = _buffer_view_from_payload(payload)
+        request = _NnrpServerReceiveSubmitRequest(self.handle.to_ffi(), operation_id, frame_id, payload_view)
+        out_operation = _NnrpHandle()
+        status = self.entrypoints.server_receive_submit(request, ctypes.byref(out_operation))
+        raise_for_native_status(status)
+        return NativeRuntimeServerOperation(
+            self.entrypoints,
+            self.handle,
+            NativeOperationHandle.from_ffi(out_operation),
+            operation_id,
+            frame_id,
+        )
+
+    def send_flow_update(self, *, frame_id: int) -> None:
+        self._ensure_open()
+        request = _NnrpServerFlowUpdateRequest(self.handle.to_ffi(), frame_id)
+        status = self.entrypoints.server_send_flow_update(request)
+        raise_for_native_status(status)
+
+    def control(self, *, control_code: int, payload: bytes | bytearray | memoryview = b"") -> None:
+        self._ensure_open()
+        payload_view, _payload_owner = _buffer_view_from_payload(payload)
+        request = _NnrpControlRequest(self.handle.to_ffi(), control_code, payload_view)
+        status = self.entrypoints.control(request)
+        raise_for_native_status(status)
+
+    def close(self) -> None:
+        self._ensure_open()
+        status = self.entrypoints.server_close(self.handle.to_ffi())
+        raise_for_native_status(status)
+        object.__setattr__(self, "_closed", True)
+
+    def _ensure_open(self) -> None:
+        if self._closed:
+            raise NativeInvalidStateError(
+                NativeStatus(FFI_STATUS_INVALID_STATE),
+                "native runtime server session is closed",
+            )
 
 
 def _event_matches_operation(event: NativeRuntimeEvent, operation: NativeRuntimeOperation) -> bool:

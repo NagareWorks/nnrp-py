@@ -101,6 +101,9 @@ from nnrp.native import (
     NativeRuntimeOperation,
     NativeRuntimePollResult,
     NativeRuntimeResult,
+    NativeRuntimeServer,
+    NativeRuntimeServerOperation,
+    NativeRuntimeServerSession,
     NativeRuntimeSession,
     NativeSchemaCodec,
     NativeSchemaRegistry,
@@ -293,6 +296,12 @@ class FakeRuntimeLibrary(FakeEntrypointLibrary):
         self.nnrp_client_send_result_hint.handler = self._send_result_hint
         self.nnrp_client_await_event.handler = self._await_event
         self.nnrp_client_await_events.handler = self._await_events
+        self.nnrp_server_bind.handler = self._server_bind
+        self.nnrp_server_accept.handler = self._server_accept
+        self.nnrp_server_receive_submit.handler = self._server_receive_submit
+        self.nnrp_server_send_result.handler = self._server_send_result
+        self.nnrp_server_send_flow_update.handler = self._send_flow_update
+        self.nnrp_server_close.handler = self._close
         self.nnrp_control.handler = self._control
         self.nnrp_schema_descriptor_parse.handler = self._schema_descriptor_parse
         self.nnrp_schema_descriptor_write.handler = self._schema_descriptor_write
@@ -338,6 +347,16 @@ class FakeRuntimeLibrary(FakeEntrypointLibrary):
         _write_handle(out_handle, _NnrpHandle(HANDLE_KIND_CONNECTION, request.connection_id, request.generation, 0))
         return self.status
 
+    def _server_bind(self, request: _NnrpServerBindRequest, out_handle: object) -> _NnrpFfiStatus:
+        _write_handle(out_handle, _NnrpHandle(HANDLE_KIND_CONNECTION, request.server_id, request.generation, 0))
+        return self.status
+
+    def _server_accept(self, request: _NnrpServerAcceptRequest, out_handle: object) -> _NnrpFfiStatus:
+        if request.server.kind != HANDLE_KIND_CONNECTION:
+            return _NnrpFfiStatus(FFI_STATUS_INVALID_HANDLE, 0, 0, 0)
+        _write_handle(out_handle, _NnrpHandle(HANDLE_KIND_SESSION, request.session_id, request.generation, 0))
+        return self.status
+
     def _open_session(self, request: _NnrpSessionOpenRequest, out_handle: object) -> _NnrpFfiStatus:
         _write_handle(out_handle, _NnrpHandle(HANDLE_KIND_SESSION, request.requested_session_id, request.generation, 0))
         return self.status
@@ -357,6 +376,17 @@ class FakeRuntimeLibrary(FakeEntrypointLibrary):
         return self.status
 
     def _submit(self, request: _NnrpSubmitRequest, out_handle: object) -> _NnrpFfiStatus:
+        self.submitted_payloads.append(_read_buffer_view(request.payload))
+        _write_handle(out_handle, _NnrpHandle(HANDLE_KIND_OPERATION, request.operation_id, 1, 0))
+        return self.status
+
+    def _server_receive_submit(
+        self,
+        request: _NnrpServerReceiveSubmitRequest,
+        out_handle: object,
+    ) -> _NnrpFfiStatus:
+        if request.session.kind != HANDLE_KIND_SESSION:
+            return _NnrpFfiStatus(FFI_STATUS_INVALID_HANDLE, 0, 0, 0)
         self.submitted_payloads.append(_read_buffer_view(request.payload))
         _write_handle(out_handle, _NnrpHandle(HANDLE_KIND_OPERATION, request.operation_id, 1, 0))
         return self.status
@@ -413,6 +443,13 @@ class FakeRuntimeLibrary(FakeEntrypointLibrary):
             len(result_payload),
         )
         result_target.event.diagnostic.status = NativeStatus.ok().to_ffi()
+        return self.status
+
+    def _server_send_result(self, request: _NnrpServerSendResultRequest) -> _NnrpFfiStatus:
+        if request.operation.kind != HANDLE_KIND_OPERATION:
+            return _NnrpFfiStatus(FFI_STATUS_INVALID_HANDLE, 0, 0, 0)
+        self._event_payload_owner = ctypes.create_string_buffer(_read_buffer_view(request.payload), request.payload.len)
+        self.event_kind = EVENT_KIND_RESULT_PUSHED
         return self.status
 
     def _submit_result_compact(
@@ -2355,6 +2392,68 @@ def test_native_runtime_client_runs_connection_session_submit_close_roundtrip(tm
     assert library.nnrp_client_cancel.calls[1][0].frame_id == 7
     assert library.nnrp_control.calls[1][0].control_code == 11
     assert library.nnrp_control.calls[1][0].payload.len == len(b"session-control")
+
+
+def test_native_runtime_client_binds_native_ipc_and_websocket_servers(tmp_path: Path) -> None:
+    artifact = tmp_path / "nnrp_ffi.dll"
+    artifact.write_bytes(b"fake")
+    library = FakeRuntimeLibrary()
+
+    client = load_native_client(artifact, library=library)
+    ipc_server = client.bind_server(server_id=21, generation=2, transport_id=TRANSPORT_SLOT_IPC)
+    websocket_server = client.bind_server(
+        server_id=22,
+        generation=3,
+        transport_id=TRANSPORT_SLOT_WEBSOCKET,
+    )
+    session = ipc_server.accept_session(
+        session_id=41,
+        generation=4,
+        profile_id=5,
+        schema_id=6,
+        schema_version=7,
+    )
+    operation = session.receive_submit(operation_id=99, frame_id=8, payload=b"server-submit")
+    operation.send_result(b"server-result")
+    session.send_flow_update(frame_id=8)
+    session.control(control_code=11, payload=b"server-control")
+    session.close()
+    websocket_server.close()
+
+    assert isinstance(ipc_server, NativeRuntimeServer)
+    assert isinstance(websocket_server, NativeRuntimeServer)
+    assert isinstance(session, NativeRuntimeServerSession)
+    assert isinstance(operation, NativeRuntimeServerOperation)
+    assert ipc_server.handle.handle.id == 21
+    assert websocket_server.handle.handle.id == 22
+    assert session.server.handle.id == 21
+    assert session.handle.handle.id == 41
+    assert operation.session.handle.id == 41
+    assert operation.handle.handle.id == 99
+    assert operation.operation_id == 99
+    assert operation.frame_id == 8
+    assert library.nnrp_server_bind.calls[0][0].transport_id == TRANSPORT_SLOT_IPC
+    assert library.nnrp_server_bind.calls[1][0].transport_id == TRANSPORT_SLOT_WEBSOCKET
+    assert library.nnrp_server_accept.calls[0][0].server.id == 21
+    assert library.nnrp_server_receive_submit.calls[0][0].frame_id == 8
+    assert library.submitted_payloads[-1] == b"server-submit"
+    assert _read_buffer_view(library.nnrp_server_send_result.calls[0][0].payload) == b"server-result"
+    assert library.nnrp_server_send_flow_update.calls[0][0].frame_id == 8
+    assert library.nnrp_control.calls[0][0].control_code == 11
+    assert _read_buffer_view(library.nnrp_control.calls[0][0].payload) == b"server-control"
+    assert library.nnrp_server_close.calls[0][0].kind == HANDLE_KIND_SESSION
+    assert library.nnrp_client_close_connection.calls[0][0].id == 22
+
+    with pytest.raises(NativeInvalidStateError):
+        session.receive_submit(operation_id=100, frame_id=9)
+    with pytest.raises(NativeInvalidStateError):
+        websocket_server.accept_session(
+            session_id=42,
+            generation=4,
+            profile_id=5,
+            schema_id=6,
+            schema_version=7,
+        )
 
 
 def test_native_submit_request_shape_matches_frozen_ffi_without_private_scheduling_fields() -> None:

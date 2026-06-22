@@ -13,8 +13,8 @@ Preview4 Python work adapts the SDK to runtime control frames, runtime objects, 
 
 ## Coordination Rules
 
-- [ ] Keep Python public APIs thin over Rust-owned runtime behavior.
-- [ ] Keep transport providers meaningful; do not use transport packages as configuration-only switches.
-- [ ] Keep cffi API hot paths coarse and benchmarked.
-- [ ] Keep pure-Python protocol helpers limited to fixtures, diagnostics, and explicit unsupported-runtime paths.
-- [ ] Update this index as workstreams split or complete.
+- [x] Keep Python public APIs thin over Rust-owned runtime behavior.
+- [x] Keep transport providers meaningful; do not use transport packages as configuration-only switches.
+- [x] Keep cffi API hot paths coarse and benchmarked.
+- [x] Keep pure-Python protocol helpers limited to fixtures, diagnostics, and explicit unsupported-runtime paths.
+- [x] Update this index as workstreams split or complete.

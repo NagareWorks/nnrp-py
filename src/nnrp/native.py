@@ -2746,6 +2746,32 @@ class NativeRuntimeConnection:
         self._ensure_open()
         return NativeObjectMetadataBuffer.acquire_copy(self.entrypoints, payload)
 
+    def acquire_object_patch_metadata_copy(
+        self,
+        metadata: Any,
+        *,
+        metadata_tail: bytes | bytearray | memoryview = b"",
+        delta: bytes | bytearray | memoryview = b"",
+    ) -> NativeObjectMetadataBuffer:
+        from nnrp.runtime import patch_runtime_object
+
+        return self.acquire_object_metadata_copy(
+            patch_runtime_object(metadata, metadata_tail=metadata_tail, delta=delta)
+        )
+
+    def acquire_object_delta_metadata_copy(
+        self,
+        metadata: Any,
+        *,
+        metadata_tail: bytes | bytearray | memoryview = b"",
+        delta: bytes | bytearray | memoryview = b"",
+    ) -> NativeObjectMetadataBuffer:
+        from nnrp.runtime import delta_runtime_object
+
+        return self.acquire_object_metadata_copy(
+            delta_runtime_object(metadata, metadata_tail=metadata_tail, delta=delta)
+        )
+
     def create_object_descriptor(
         self,
         descriptor: Any,

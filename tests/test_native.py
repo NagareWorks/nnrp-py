@@ -176,6 +176,7 @@ from nnrp.native import (
 )
 from nnrp.runtime import (
     MemoryLocationHint,
+    ObjectDeltaMetadata,
     ObjectDescriptorMetadata,
     OwnershipHint,
     PartialResultMetadata,
@@ -185,6 +186,7 @@ from nnrp.runtime import (
     RuntimeObjectKind,
     RuntimeRole,
     decode_runtime_control_metadata,
+    decode_runtime_object_metadata,
     encode_runtime_control_metadata,
 )
 from nnrp.schema import (
@@ -2112,6 +2114,36 @@ def test_native_object_metadata_buffer_acquires_views_and_releases_handle(tmp_pa
     buffer.close()
     with pytest.raises(NativeInvalidStateError):
         buffer.refresh_view()
+
+
+def test_native_object_delta_helpers_acquire_native_metadata_buffers(tmp_path: Path) -> None:
+    artifact = tmp_path / "nnrp_ffi.dll"
+    artifact.write_bytes(b"fake")
+    client = load_native_client(artifact, library=FakeRuntimeLibrary())
+    connection = client.connect(connection_id=11, generation=2, transport_id=TRANSPORT_SLOT_TCP)
+    metadata = ObjectDeltaMetadata(
+        object_id=101,
+        delta_sequence=2,
+        region_offset=8,
+        region_bytes=4,
+        delta_bytes=4,
+        flags=0x03,
+        metadata_bytes=2,
+    )
+
+    patch_buffer = connection.acquire_object_patch_metadata_copy(metadata, metadata_tail=b"md", delta=b"xxxx")
+    delta_buffer = connection.acquire_object_delta_metadata_copy(metadata, metadata_tail=b"md", delta=b"yyyy")
+    decoded_patch = decode_runtime_object_metadata(MessageType.OBJECT_PATCH, patch_buffer.to_bytes())
+    decoded_delta = decode_runtime_object_metadata(MessageType.OBJECT_DELTA, delta_buffer.to_bytes())
+
+    assert isinstance(patch_buffer, NativeObjectMetadataBuffer)
+    assert decoded_patch.metadata == metadata
+    assert decoded_patch.tail == b"mdxxxx"
+    assert decoded_delta.metadata == metadata
+    assert decoded_delta.tail == b"mdyyyy"
+
+    patch_buffer.close()
+    delta_buffer.close()
 
 
 def test_native_recovery_codec_delegates_resume_and_migration_validation(tmp_path: Path) -> None:

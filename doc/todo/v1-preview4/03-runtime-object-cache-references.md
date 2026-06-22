@@ -19,7 +19,7 @@
 - [x] Bind native object descriptor creation.
 - [x] Bind native object descriptor parsing.
 - [x] Bind native object release.
-- [ ] Bind native object delta descriptor helpers.
+- [x] Bind native object delta descriptor helpers.
 - [x] Add native-owned metadata buffer wrapper.
 - [x] Add lifetime guard tests for native-owned object metadata.
 

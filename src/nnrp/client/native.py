@@ -11,6 +11,7 @@ from typing import Any
 
 from nnrp.core import MessageType
 from nnrp.native import (
+    FFI_STATUS_WOULD_BLOCK,
     NativeCreditUpdateCallback,
     NativePayloadFamilyCallback,
     NativePlatform,
@@ -21,6 +22,8 @@ from nnrp.native import (
     NativeRuntimeOperation,
     NativeRuntimeResult,
     NativeRuntimeSession,
+    NativeStatus,
+    NativeWouldBlockError,
     select_native_runtime_backend,
 )
 from nnrp.runtime import (
@@ -97,6 +100,8 @@ class NativeClientOperationScope:
 class NativeClientConnection:
     connection: NativeRuntimeConnection
     _sessions: list[NativeRuntimeSession] = field(default_factory=list, init=False, repr=False)
+    _cancelled_frames: dict[int, set[int]] = field(default_factory=dict, init=False, repr=False)
+    _cancelled_operations: dict[int, set[int]] = field(default_factory=dict, init=False, repr=False)
     _closed: bool = field(default=False, init=False, repr=False)
 
     def open_session(self, options: NativeClientSessionOpenOptions | None = None) -> NativeRuntimeSession:
@@ -120,7 +125,12 @@ class NativeClientConnection:
         max_events: int | None = None,
     ) -> NativeRuntimeResult:
         self._ensure_open()
-        return session.poll_result(operation, max_events=max_events)
+        if self._is_cancelled_result(session, operation_id=operation.operation_id, frame_id=operation.frame_id):
+            raise NativeWouldBlockError(NativeStatus(FFI_STATUS_WOULD_BLOCK))
+        result = session.poll_result(operation, max_events=max_events)
+        if self._is_cancelled_result(session, operation_id=result.operation_id, frame_id=result.frame_id):
+            raise NativeWouldBlockError(NativeStatus(FFI_STATUS_WOULD_BLOCK))
+        return result
 
     def dispatch_events(
         self,
@@ -232,6 +242,10 @@ class NativeClientConnection:
     def cancel_operation(self, operation: NativeRuntimeOperation) -> None:
         self._ensure_open()
         operation.cancel()
+        session_id = self._operation_session_identity(operation)
+        if session_id is not None:
+            self._remember_cancelled_frame_by_handle(session_id, operation.frame_id)
+            self._remember_cancelled_operation_by_handle(session_id, operation.operation_id)
 
     def complete_operation(
         self,
@@ -257,6 +271,7 @@ class NativeClientConnection:
     def cancel_frame(self, session: NativeRuntimeSession, *, frame_id: int) -> None:
         self._ensure_open()
         session.cancel(frame_id=frame_id)
+        self._remember_cancelled_frame(session, frame_id)
 
     def send_flow_update(self, session: NativeRuntimeSession, *, frame_id: int) -> None:
         self._ensure_open()
@@ -301,6 +316,7 @@ class NativeClientConnection:
             diagnostic=diagnostic,
             flags=flags,
         )
+        self._remember_cancelled_operation(target, operation_id)
 
     def abort_runtime_operation(
         self,
@@ -545,6 +561,49 @@ class NativeClientConnection:
     def _ensure_open(self) -> None:
         if self._closed:
             raise RuntimeError("native client connection is closed")
+
+    def _session_identity(self, session: object) -> int | None:
+        nested_handle = getattr(getattr(session, "handle", None), "handle", None)
+        if nested_handle is not None:
+            return int(nested_handle.id)
+        handle = getattr(session, "handle", None)
+        if hasattr(handle, "id"):
+            return int(handle.id)
+        requested_session_id = getattr(session, "requested_session_id", None)
+        if requested_session_id is not None:
+            return int(requested_session_id)
+        return None
+
+    def _operation_session_identity(self, operation: object) -> int | None:
+        session = getattr(operation, "session", None)
+        if session is None:
+            session_id = getattr(operation, "session_id", None)
+            return None if session_id is None else int(session_id)
+        return self._session_identity(session)
+
+    def _remember_cancelled_frame(self, session: object, frame_id: int) -> None:
+        session_id = self._session_identity(session)
+        if session_id is not None:
+            self._remember_cancelled_frame_by_handle(session_id, frame_id)
+
+    def _remember_cancelled_frame_by_handle(self, session_id: int, frame_id: int) -> None:
+        self._cancelled_frames.setdefault(session_id, set()).add(int(frame_id))
+
+    def _remember_cancelled_operation(self, session: object, operation_id: int) -> None:
+        session_id = self._session_identity(session)
+        if session_id is not None:
+            self._remember_cancelled_operation_by_handle(session_id, operation_id)
+
+    def _remember_cancelled_operation_by_handle(self, session_id: int, operation_id: int) -> None:
+        self._cancelled_operations.setdefault(session_id, set()).add(int(operation_id))
+
+    def _is_cancelled_result(self, session: object, *, operation_id: int, frame_id: int) -> bool:
+        session_id = self._session_identity(session)
+        if session_id is None:
+            return False
+        return int(frame_id) in self._cancelled_frames.get(session_id, set()) or int(
+            operation_id,
+        ) in self._cancelled_operations.get(session_id, set())
 
     def _send_runtime_control_request(
         self,

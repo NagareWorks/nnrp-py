@@ -2,11 +2,11 @@
 
 ## Client Controls
 
-- [ ] Add client API for cancellation.
+- [x] Add client API for cancellation.
   - [x] Cancel by operation ID.
   - [x] Abort by operation ID.
   - [x] Provide cancellation reason.
-  - [ ] Suppress late results after cancellation.
+  - [x] Suppress late results after cancellation.
 - [x] Add client API for scheduling.
   - [x] Priority update.
   - [x] Deadline.

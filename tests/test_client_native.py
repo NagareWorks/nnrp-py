@@ -15,7 +15,7 @@ from nnrp.client import (
     select_client_native_backend,
 )
 from nnrp.core import MessageType
-from nnrp.native import NativeArtifactError
+from nnrp.native import NativeArtifactError, NativeWouldBlockError
 from nnrp.runtime import (
     BudgetMetadata,
     CapabilityMetadata,
@@ -283,6 +283,56 @@ class FakeResult:
         self.max_events = max_events
 
 
+class FakeNativeHandle:
+    def __init__(self, id: int) -> None:
+        self.id = id
+
+
+class FakeNativeHandleOwner:
+    def __init__(self, id: int) -> None:
+        self.handle = FakeNativeHandle(id)
+
+
+class FakeNativeSessionIdentity:
+    def __init__(self, id: int) -> None:
+        self.handle = FakeNativeHandleOwner(id)
+
+
+class FakeNativeOperationIdentity:
+    def __init__(self, *, session_id: int, operation_id: int, frame_id: int) -> None:
+        self.session = FakeNativeSessionIdentity(session_id)
+        self.operation_id = operation_id
+        self.frame_id = frame_id
+        self.cancelled = False
+
+    def cancel(self) -> None:
+        self.cancelled = True
+
+
+class FakeDirectHandleSession:
+    def __init__(self, id: int) -> None:
+        self.handle = FakeNativeHandle(id)
+        self.cancelled_frames: list[int] = []
+
+    def cancel(self, *, frame_id: int) -> None:
+        self.cancelled_frames.append(frame_id)
+
+
+class FakeAnonymousSession:
+    def __init__(self) -> None:
+        self.poll_result_calls = 0
+
+    def poll_result(self, operation: FakeOperation, *, max_events: int | None = None) -> FakeResult:
+        self.poll_result_calls += 1
+        return FakeResult(
+            session_id=0,
+            operation_id=operation.operation_id,
+            frame_id=operation.frame_id,
+            payload=operation.payload,
+            max_events=max_events,
+        )
+
+
 def test_connect_native_client_session_opens_and_closes_host_session() -> None:
     backend = FakeBackend()
     options = NativeClientSessionOptions(
@@ -418,6 +468,115 @@ def test_native_client_connection_supports_operation_cancellation() -> None:
 
         assert operation.cancelled is True
         assert session.cancelled_frames == [7]
+
+
+def test_native_client_connection_suppresses_cancelled_operation_results() -> None:
+    backend = FakeBackend()
+    with connect_native_client_connection(backend=backend) as connection:
+        session = connection.open_session()
+        operation = session.submit_operation(operation_id=100, frame_id=7, payload=b"payload")
+
+        connection.cancel_operation(operation)
+
+        with pytest.raises(NativeWouldBlockError):
+            connection.poll_result(session, operation)
+
+        assert operation.cancelled is True
+        assert session.poll_result_calls == 0
+
+
+def test_native_client_connection_suppresses_runtime_cancelled_operation_results() -> None:
+    backend = FakeBackend()
+    with connect_native_client_connection(backend=backend) as connection:
+        session = connection.open_session()
+        operation = session.submit_operation(operation_id=201, frame_id=9, payload=b"payload")
+
+        connection.cancel_runtime_operation(session, operation_id=201, control_sequence=1)
+
+        with pytest.raises(NativeWouldBlockError):
+            connection.poll_result(session, operation)
+
+        assert session.control_calls[0][0] == int(MessageType.CANCEL)
+        assert session.poll_result_calls == 0
+
+
+def test_native_client_connection_suppresses_cancelled_frame_results() -> None:
+    backend = FakeBackend()
+    with connect_native_client_connection(backend=backend) as connection:
+        session = connection.open_session()
+        operation = session.submit_operation(operation_id=100, frame_id=7, payload=b"payload")
+
+        connection.cancel_frame(session, frame_id=7)
+
+        with pytest.raises(NativeWouldBlockError):
+            connection.poll_result(session, operation)
+
+        assert session.cancelled_frames == [7]
+        assert session.poll_result_calls == 0
+
+
+def test_native_client_connection_suppresses_late_result_after_poll() -> None:
+    backend = FakeBackend()
+    with connect_native_client_connection(backend=backend) as connection:
+        session = connection.open_session()
+        operation = session.submit_operation(operation_id=100, frame_id=7, payload=b"payload")
+
+        def poll_late_result(
+            _operation: FakeOperation,
+            *,
+            max_events: int | None = None,
+        ) -> FakeResult:
+            session.poll_result_calls += 1
+            return FakeResult(
+                session_id=session.requested_session_id,
+                operation_id=101,
+                frame_id=8,
+                payload=b"late",
+                max_events=max_events,
+            )
+
+        session.poll_result = poll_late_result
+        connection.cancel_frame(session, frame_id=8)
+
+        with pytest.raises(NativeWouldBlockError):
+            connection.poll_result(session, operation)
+
+        assert session.poll_result_calls == 1
+
+
+def test_native_client_connection_tracks_native_handle_cancel_identity() -> None:
+    backend = FakeBackend()
+    with connect_native_client_connection(backend=backend) as connection:
+        session = FakeNativeSessionIdentity(77)
+        operation = FakeNativeOperationIdentity(session_id=77, operation_id=100, frame_id=7)
+
+        connection.cancel_operation(operation)
+
+        assert operation.cancelled is True
+        assert connection._is_cancelled_result(session, operation_id=100, frame_id=7)
+
+
+def test_native_client_connection_tracks_direct_handle_cancel_identity() -> None:
+    backend = FakeBackend()
+    with connect_native_client_connection(backend=backend) as connection:
+        session = FakeDirectHandleSession(88)
+
+        connection.cancel_frame(session, frame_id=7)
+
+        assert session.cancelled_frames == [7]
+        assert connection._is_cancelled_result(session, operation_id=100, frame_id=7)
+
+
+def test_native_client_connection_allows_unknown_session_identity_results() -> None:
+    backend = FakeBackend()
+    with connect_native_client_connection(backend=backend) as connection:
+        session = FakeAnonymousSession()
+        operation = FakeOperation(session_id=0, operation_id=100, frame_id=7, payload=b"payload")
+
+        result = connection.poll_result(session, operation)
+
+        assert result.payload == b"payload"
+        assert session.poll_result_calls == 1
 
 
 def test_native_client_connection_supports_completion_drop_and_control_aliases() -> None:

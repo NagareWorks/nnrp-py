@@ -13,6 +13,8 @@ import nnrp.native as native_module
 from nnrp.cache import CacheLeaseOutcome, CacheObjectIdentity
 from nnrp.core import MessageType
 from nnrp.core.messages.control import (
+    CacheInvalidateMetadata,
+    CacheInvalidateScope,
     ResultHintBudgetPolicy,
     ResultHintCongestionState,
     ResultHintMetadata,
@@ -22,6 +24,7 @@ from nnrp.core.messages.control import (
     TransportPolicy,
 )
 from nnrp.native import (
+    _NATIVE_RUNTIME_DIAGNOSTIC_OK,
     CACHE_ERROR_DEPENDENCY_INVALID,
     CACHE_ERROR_MISS,
     DEFAULT_ARTIFACT_ROOT_ENV,
@@ -34,6 +37,7 @@ from nnrp.native import (
     EVENT_KIND_RESULT_DROPPED,
     EVENT_KIND_RESULT_HINT,
     EVENT_KIND_RESULT_PUSHED,
+    EVENT_KIND_RUNTIME_FRAME,
     EVENT_KIND_SUBMIT_ACCEPTED,
     FFI_STATUS_CALLBACK_REJECTED,
     FFI_STATUS_INTERNAL_ERROR,
@@ -98,6 +102,7 @@ from nnrp.native import (
     NativeRuntimeEntrypoints,
     NativeRuntimeEvent,
     NativeRuntimeFeatureFlag,
+    NativeRuntimeFrameEvent,
     NativeRuntimeOperation,
     NativeRuntimePollResult,
     NativeRuntimeResult,
@@ -142,6 +147,7 @@ from nnrp.native import (
     _NnrpPollResult,
     _NnrpProtocolVersion,
     _NnrpRuntimeCapabilities,
+    _NnrpRuntimeFrameSendRequest,
     _NnrpRuntimeObjectDescriptor,
     _NnrpSchemaDescriptorHeader,
     _NnrpServerAcceptRequest,
@@ -179,19 +185,37 @@ from nnrp.native import (
     select_native_transport_provider,
 )
 from nnrp.runtime import (
+    BudgetMetadata,
+    CacheMissMetadata,
+    CacheMissReason,
+    CacheReferenceMetadata,
+    CacheReuseScope,
+    CapabilityMetadata,
+    ControlRequestMetadata,
     MemoryLocationHint,
     ObjectDeltaMetadata,
     ObjectDescriptorMetadata,
+    ObjectReferenceMetadata,
+    ObjectReleaseMetadata,
+    ObjectReleaseReason,
     OwnershipHint,
     PartialResultMetadata,
+    PressureMetadata,
     ProgressMetadata,
+    RecoverableErrorMetadata,
     ResultDropReasonCode,
     ResultDropReasonMetadata,
+    RetryAfterMetadata,
+    RouteHintMetadata,
     RuntimeObjectKind,
     RuntimeRole,
+    SchedulingMetadata,
+    SupersedeMetadata,
+    TraceContextMetadata,
     decode_runtime_control_metadata,
     decode_runtime_object_metadata,
     encode_runtime_control_metadata,
+    encode_runtime_object_metadata,
 )
 from nnrp.schema import (
     Preview3TypedPayloadDescriptor,
@@ -209,7 +233,7 @@ class FakeLibrary:
         self,
         *,
         abi_major: int = 1,
-        abi_minor: int = 5,
+        abi_minor: int = 12,
         abi_patch: int = 0,
         protocol_major: int = 1,
         wire_format: int = 0,
@@ -270,11 +294,13 @@ class FakeRuntimeLibrary(FakeEntrypointLibrary):
         status: _NnrpFfiStatus | None = None,
         event_payload: bytes = b"",
         event_kind: int = 6,
+        event_message_type: int = 0,
         await_event_delay_seconds: float = 0.0,
     ) -> None:
         super().__init__()
         self.status = status or NativeStatus.ok().to_ffi()
         self.event_kind = event_kind
+        self.event_message_type = event_message_type
         self.await_event_delay_seconds = await_event_delay_seconds
         self._event_payload_owner = (
             ctypes.create_string_buffer(event_payload, len(event_payload)) if event_payload else None
@@ -303,6 +329,7 @@ class FakeRuntimeLibrary(FakeEntrypointLibrary):
         self.nnrp_server_send_flow_update.handler = self._send_flow_update
         self.nnrp_server_close.handler = self._close
         self.nnrp_control.handler = self._control
+        self.nnrp_runtime_frame_send.handler = self._runtime_frame_send
         self.nnrp_schema_descriptor_parse.handler = self._schema_descriptor_parse
         self.nnrp_schema_descriptor_write.handler = self._schema_descriptor_write
         self.nnrp_token_delta_schema_descriptor.handler = self._token_delta_schema_descriptor
@@ -334,6 +361,7 @@ class FakeRuntimeLibrary(FakeEntrypointLibrary):
         self.nnrp_cache_prefetch.handler = self._cache_prefetch
         self.nnrp_cache_release.handler = self._cache_release
         self.submitted_payloads: list[bytes] = []
+        self.runtime_frames: list[tuple[int, int, bytes]] = []
         self._schema_registry: dict[tuple[int, int], SchemaDescriptorHeader] = {}
         self._buffers: dict[int, ctypes.Array[ctypes.c_char]] = {}
         self._object_descriptors: dict[int, tuple[_NnrpRuntimeObjectDescriptor, ctypes.Array[ctypes.c_char]]] = {}
@@ -505,6 +533,14 @@ class FakeRuntimeLibrary(FakeEntrypointLibrary):
 
     def _control(self, request: _NnrpControlRequest) -> _NnrpFfiStatus:
         return self.status if request.handle.kind != 0 else _NnrpFfiStatus(FFI_STATUS_INVALID_HANDLE, 0, 0, 0)
+
+    def _runtime_frame_send(self, request: _NnrpRuntimeFrameSendRequest) -> _NnrpFfiStatus:
+        if request.handle.kind not in {HANDLE_KIND_SESSION, HANDLE_KIND_CONNECTION}:
+            return _NnrpFfiStatus(FFI_STATUS_INVALID_HANDLE, 0, 0, 0)
+        self.runtime_frames.append(
+            (int(request.message_type), int(request.frame_id), _read_buffer_view(request.payload))
+        )
+        return self.status
 
     def _schema_descriptor_parse(
         self,
@@ -849,10 +885,12 @@ class FakeRuntimeLibrary(FakeEntrypointLibrary):
         target.has_event = 1 if self._event_payload_owner is not None else 0
         if self._event_payload_owner is not None:
             target.event.kind = self.event_kind
+            target.event.message_type = self.event_message_type
             target.event.connection = handle
             target.event.session = _NnrpHandle(HANDLE_KIND_SESSION, 41, 3, 0)
             target.event.operation = _NnrpHandle(HANDLE_KIND_OPERATION, 99, 1, 0)
             target.event.frame_id = 7
+            target.event.payload_owner = _NnrpHandle()
             target.event.payload = _NnrpBufferView(
                 ctypes.cast(self._event_payload_owner, ctypes.c_void_p),
                 len(self._event_payload_owner.raw),
@@ -881,10 +919,12 @@ class FakeRuntimeLibrary(FakeEntrypointLibrary):
         events = ctypes.cast(out_events, ctypes.POINTER(_NnrpEvent))
         for index in range(event_capacity):
             events[index].kind = self.event_kind
+            events[index].message_type = self.event_message_type
             events[index].connection = handle
             events[index].session = _NnrpHandle(HANDLE_KIND_SESSION, 41 + index, 3, 0)
             events[index].operation = _NnrpHandle(HANDLE_KIND_OPERATION, 99 + index, 1, 0)
             events[index].frame_id = 7 + index
+            events[index].payload_owner = _NnrpHandle()
             events[index].payload = _NnrpBufferView(
                 ctypes.cast(self._event_payload_owner, ctypes.c_void_p),
                 len(self._event_payload_owner.raw),
@@ -923,10 +963,12 @@ class BatchControlRuntimeLibrary(FakeRuntimeLibrary):
             kind, payload = self._batch_events[index]
             owner = self._batch_payload_owners[index]
             events[index].kind = kind
+            events[index].message_type = 0
             events[index].connection = handle
             events[index].session = _NnrpHandle(HANDLE_KIND_SESSION, 41 + index, 3, 0)
             events[index].operation = _NnrpHandle(HANDLE_KIND_OPERATION, 99 + index, 1, 0)
             events[index].frame_id = 7 + index
+            events[index].payload_owner = _NnrpHandle()
             events[index].payload = _NnrpBufferView(ctypes.cast(owner, ctypes.c_void_p), len(payload))
             events[index].diagnostic.status = NativeStatus.ok().to_ffi()
         count_target.value = emitted
@@ -1119,6 +1161,7 @@ RUNTIME_ENTRYPOINT_SYMBOLS = [
     "nnrp_server_send_flow_update",
     "nnrp_server_close",
     "nnrp_control",
+    "nnrp_runtime_frame_send",
     "nnrp_schema_descriptor_parse",
     "nnrp_schema_descriptor_write",
     "nnrp_token_delta_schema_descriptor",
@@ -1829,7 +1872,7 @@ def test_probe_native_artifact_accepts_matching_protocol(tmp_path: Path) -> None
 
     assert result.artifact_path == artifact
     assert result.abi_major == 1
-    assert result.abi_minor == 5
+    assert result.abi_minor == 12
     assert result.abi_patch == 0
     assert result.protocol_major == 1
     assert result.protocol_wire_format == 0
@@ -2358,10 +2401,9 @@ def test_native_runtime_client_runs_connection_session_submit_close_roundtrip(tm
             deadline_ms=250,
         ),
     )
-    connection.control(control_code=10, payload=b"connection-control")
     operation_scope.cancel()
     session.cancel(frame_id=7)
-    session.control(control_code=11, payload=b"session-control")
+    session.send_trace_context(TraceContextMetadata(1, 2, 0, 3, 0, 0))
     session.close()
 
     assert isinstance(client, NativeRuntimeClient)
@@ -2386,12 +2428,10 @@ def test_native_runtime_client_runs_connection_session_submit_close_roundtrip(tm
     assert not hasattr(scheduled_submit_request, "parent_operation_id")
     assert not hasattr(scheduled_submit_request, "operation_group_id")
     assert not hasattr(scheduled_submit_request, "deadline_ms")
-    assert library.nnrp_control.calls[0][0].control_code == 10
-    assert library.nnrp_control.calls[0][0].payload.len == len(b"connection-control")
+    assert not hasattr(connection, "control")
     assert library.nnrp_client_cancel.calls[0][0].frame_id == 8
     assert library.nnrp_client_cancel.calls[1][0].frame_id == 7
-    assert library.nnrp_control.calls[1][0].control_code == 11
-    assert library.nnrp_control.calls[1][0].payload.len == len(b"session-control")
+    assert library.runtime_frames[0][:2] == (int(MessageType.TRACE_CONTEXT), 1)
 
 
 def test_native_runtime_client_binds_native_ipc_and_websocket_servers(tmp_path: Path) -> None:
@@ -2416,7 +2456,7 @@ def test_native_runtime_client_binds_native_ipc_and_websocket_servers(tmp_path: 
     operation = session.receive_submit(operation_id=99, frame_id=8, payload=b"server-submit")
     operation.send_result(b"server-result")
     session.send_flow_update(frame_id=8)
-    session.control(control_code=11, payload=b"server-control")
+    session.send_trace_context(TraceContextMetadata(1, 2, 0, 3, 0, 0))
     session.close()
     websocket_server.close()
 
@@ -2439,8 +2479,7 @@ def test_native_runtime_client_binds_native_ipc_and_websocket_servers(tmp_path: 
     assert library.submitted_payloads[-1] == b"server-submit"
     assert _read_buffer_view(library.nnrp_server_send_result.calls[0][0].payload) == b"server-result"
     assert library.nnrp_server_send_flow_update.calls[0][0].frame_id == 8
-    assert library.nnrp_control.calls[0][0].control_code == 11
-    assert _read_buffer_view(library.nnrp_control.calls[0][0].payload) == b"server-control"
+    assert library.runtime_frames[0][:2] == (int(MessageType.TRACE_CONTEXT), 1)
     assert library.nnrp_server_close.calls[0][0].kind == HANDLE_KIND_SESSION
     assert library.nnrp_client_close_connection.calls[0][0].id == 22
 
@@ -2738,6 +2777,397 @@ def test_native_runtime_event_snapshot_survives_native_buffer_reuse(tmp_path: Pa
     library._event_payload_owner.value = b"reuse!"
 
     assert result.event.payload == b"result"
+
+
+def test_native_runtime_frame_event_copies_and_releases_owned_payload() -> None:
+    library = FakeRuntimeLibrary()
+    entrypoints = NativeRuntimeEntrypoints(library)
+    metadata = ProgressMetadata(
+        operation_id=42,
+        progress_sequence=7,
+        stage_code=3,
+        percent_x100=2500,
+        object_id=11,
+        body_bytes=4,
+    )
+    payload = encode_runtime_control_metadata(MessageType.PROGRESS, metadata, tail=b"step")
+    owner = ctypes.create_string_buffer(payload, len(payload))
+    library._buffers[777] = owner
+    event = _NnrpEvent()
+    event.kind = EVENT_KIND_RUNTIME_FRAME
+    event.message_type = int(MessageType.PROGRESS)
+    event.connection = _NnrpHandle(HANDLE_KIND_CONNECTION, 12, 2, 0)
+    event.session = _NnrpHandle(HANDLE_KIND_SESSION, 41, 3, 0)
+    event.operation = _NnrpHandle(HANDLE_KIND_OPERATION, 42, 1, 0)
+    event.frame_id = 9
+    event.payload_owner = _NnrpHandle(HANDLE_KIND_BUFFER, 777, 1, 0)
+    event.payload = _NnrpBufferView(ctypes.cast(owner, ctypes.c_void_p), len(payload))
+    event.diagnostic.status = NativeStatus.ok().to_ffi()
+
+    snapshot = NativeRuntimeEvent.from_ffi(event, entrypoints)
+    frame = snapshot.to_runtime_frame()
+    owner[0] = b"x"
+
+    assert 777 not in library._buffers
+    assert isinstance(frame, NativeRuntimeFrameEvent)
+    assert frame.type == "progress"
+    assert frame.metadata == metadata
+    assert frame.body == b"step"
+    assert frame.frame_id == 9
+    assert snapshot.payload == payload
+
+
+@pytest.mark.parametrize(
+    ("message_type", "payload", "expected_fields"),
+    [
+        (
+            MessageType.CANCEL,
+            encode_runtime_control_metadata(
+                MessageType.CANCEL,
+                ControlRequestMetadata(42, 1, 0, RuntimeRole.CLIENT, 0, 2),
+                tail=b"no",
+            ),
+            {"diagnostic": b"no"},
+        ),
+        (
+            MessageType.OBJECT_PATCH,
+            encode_runtime_object_metadata(
+                MessageType.OBJECT_PATCH,
+                ObjectDeltaMetadata(9, 2, 128, 64, 4, 0x03, 2),
+                tail=b"mdxxxx",
+            ),
+            {"metadata_body": b"md", "delta": b"xxxx"},
+        ),
+        (
+            MessageType.CACHE_INVALIDATE,
+            CacheInvalidateMetadata(
+                invalidate_scope=CacheInvalidateScope.OBJECT_KEY,
+                cache_namespace=3,
+                cache_key_hi=4,
+                cache_key_lo=5,
+                reason_code=6,
+            ).pack(),
+            {},
+        ),
+    ],
+)
+def test_native_runtime_frame_event_decodes_frozen_payload_families(
+    message_type: MessageType,
+    payload: bytes,
+    expected_fields: dict[str, bytes],
+) -> None:
+    event = NativeRuntimeEvent(
+        EVENT_KIND_RUNTIME_FRAME,
+        NativeHandle(HANDLE_KIND_CONNECTION, 12, 2),
+        NativeHandle(HANDLE_KIND_SESSION, 41, 3),
+        NativeHandle(HANDLE_KIND_OPERATION, 42, 1),
+        9,
+        payload,
+        _NATIVE_RUNTIME_DIAGNOSTIC_OK,
+        message_type=int(message_type),
+    )
+
+    frame = event.to_runtime_frame()
+
+    assert isinstance(frame, NativeRuntimeFrameEvent)
+    assert frame.message_type is message_type
+    for field_name, expected in expected_fields.items():
+        assert getattr(frame, field_name) == expected
+
+
+def test_native_runtime_event_rejects_unknown_runtime_message_type() -> None:
+    event = NativeRuntimeEvent(
+        EVENT_KIND_RUNTIME_FRAME,
+        NativeHandle.invalid(),
+        NativeHandle.invalid(),
+        NativeHandle.invalid(),
+        0,
+        b"",
+        _NATIVE_RUNTIME_DIAGNOSTIC_OK,
+        message_type=0xFFFF,
+    )
+
+    with pytest.raises(NativeProtocolError, match="unknown Preview4 runtime message type"):
+        event.to_runtime_frame()
+
+
+def test_native_runtime_connection_polls_and_iterates_named_runtime_frames(tmp_path: Path) -> None:
+    artifact = tmp_path / "nnrp_ffi.dll"
+    artifact.write_bytes(b"fake")
+    metadata = ProgressMetadata(42, 7, 3, 2500, 11, 4)
+    payload = encode_runtime_control_metadata(MessageType.PROGRESS, metadata, tail=b"step")
+
+    def create_connection() -> NativeRuntimeConnection:
+        library = FakeRuntimeLibrary(
+            event_payload=payload,
+            event_kind=EVENT_KIND_RUNTIME_FRAME,
+            event_message_type=int(MessageType.PROGRESS),
+        )
+        return load_native_client(artifact, library=library).connect(
+            connection_id=12,
+            generation=2,
+            transport_id=TRANSPORT_SLOT_TCP,
+        )
+
+    frames = create_connection().poll_runtime_frames(max_events=1)
+
+    async def collect() -> tuple[NativeRuntimeFrameEvent, ...]:
+        return tuple([frame async for frame in create_connection().iter_runtime_frames(max_events=1)])
+
+    async_frames = asyncio.run(collect())
+
+    assert [(frame.type, frame.body) for frame in frames] == [("progress", b"step")]
+    assert [(frame.type, frame.body) for frame in async_frames] == [("progress", b"step")]
+
+
+def test_non_runtime_event_has_no_named_runtime_frame() -> None:
+    event = NativeRuntimeEvent(
+        EVENT_KIND_CONTROL,
+        NativeHandle.invalid(),
+        NativeHandle.invalid(),
+        NativeHandle.invalid(),
+        0,
+        b"",
+        _NATIVE_RUNTIME_DIAGNOSTIC_OK,
+    )
+
+    assert event.to_runtime_frame() is None
+
+
+def test_native_runtime_sessions_expose_named_preview4_methods_without_raw_frame_api() -> None:
+    client_methods = {
+        "cancel_operation",
+        "abort_operation",
+        "update_priority",
+        "update_deadline",
+        "expire_at",
+        "supersede",
+        "update_budget",
+        "negotiate_capabilities",
+        "degrade_profile",
+        "send_route_hint",
+        "send_execution_hint",
+        "send_trace_context",
+        "declare_object",
+        "reference_object",
+        "release_object",
+        "patch_object",
+        "send_object_delta",
+        "reference_cache",
+        "report_cache_miss",
+        "invalidate_cache",
+    }
+    server_methods = {
+        "send_progress",
+        "send_partial_result",
+        "send_backpressure",
+        "send_credit_update",
+        "send_result_drop_reason",
+        "send_trace_context",
+        "send_recoverable_error",
+        "send_retry_after",
+        "declare_object",
+        "reference_object",
+        "release_object",
+        "patch_object",
+        "send_object_delta",
+        "reference_cache",
+        "report_cache_miss",
+        "invalidate_cache",
+    }
+
+    assert all(callable(getattr(NativeRuntimeSession, name, None)) for name in client_methods)
+    assert all(callable(getattr(NativeRuntimeServerSession, name, None)) for name in server_methods)
+    assert not hasattr(NativeRuntimeSession, "control")
+    assert not hasattr(NativeRuntimeSession, "send_runtime_frame")
+    assert not hasattr(NativeRuntimeServerSession, "control")
+    assert not hasattr(NativeRuntimeServerSession, "send_runtime_frame")
+
+
+def test_native_runtime_client_named_methods_share_one_coarse_frame_abi(tmp_path: Path) -> None:
+    artifact = tmp_path / "nnrp_ffi.dll"
+    artifact.write_bytes(b"fake")
+    library = FakeRuntimeLibrary()
+    session = (
+        load_native_client(artifact, library=library)
+        .connect(
+            connection_id=12,
+            generation=2,
+            transport_id=TRANSPORT_SLOT_TCP,
+        )
+        .open_session(
+            requested_session_id=42,
+            generation=3,
+            profile_id=0,
+            schema_id=0,
+            schema_version=0,
+        )
+    )
+    control = ControlRequestMetadata(10, 1, 0, RuntimeRole.CLIENT, 0, 2)
+    scheduling = SchedulingMetadata(10, 2, 4, -1, 1000, 0)
+    supersede = SupersedeMetadata(10, 11, 3, ResultDropReasonCode.SUPERSEDED, 0, 2)
+    budget = BudgetMetadata(10, 20, 30, 40, 50, 0)
+    capability = CapabilityMetadata(3, 1, 4, 2, 99, 88, 2, 0)
+    route = RouteHintMetadata(10, 20, 2, 3, 1000, 2, 0)
+    trace = TraceContextMetadata(1, 2, 0, 3, 0, 2)
+    descriptor = ObjectDescriptorMetadata(
+        9,
+        RuntimeObjectKind.IMAGE_TILE,
+        RuntimeRole.RUNTIME,
+        RuntimeRole.CLIENT,
+        3,
+        4096,
+        12,
+        MemoryLocationHint.HOST_MEMORY,
+        OwnershipHint.CONSUMER_OWNED,
+        1000,
+        2,
+    )
+    object_ref = ObjectReferenceMetadata(9, 10, 2, 0, 4096, 0, 2)
+    release = ObjectReleaseMetadata(9, 10, ObjectReleaseReason.COMPLETED, RuntimeRole.CLIENT, 0, 2)
+    delta = ObjectDeltaMetadata(9, 2, 128, 64, 4, 0x03, 2)
+    cache_ref = CacheReferenceMetadata(1, 2, 3, CacheReuseScope.SESSION, 4, 5, 1000, 2, 0)
+    cache_miss = CacheMissMetadata(1, 2, CacheMissReason.UNKNOWN, 3, 2)
+    invalidate = CacheInvalidateMetadata(CacheInvalidateScope.OBJECT_KEY, 3, 4, 5, 6)
+
+    session.cancel_operation(control, b"no")
+    session.abort_operation(control, b"no")
+    session.update_priority(scheduling)
+    session.update_deadline(scheduling)
+    session.expire_at(scheduling)
+    session.supersede(supersede, b"no")
+    session.update_budget(budget)
+    session.negotiate_capabilities(capability, b"{}")
+    session.degrade_profile(capability, b"{}")
+    session.send_route_hint(route, b"rt")
+    session.send_execution_hint(route, b"rt")
+    session.send_trace_context(trace, b"tr")
+    session.declare_object(descriptor, b"md")
+    session.reference_object(object_ref, b"md")
+    session.release_object(release, b"ok")
+    session.patch_object(delta, b"data", b"md")
+    session.send_object_delta(delta, b"data", b"md")
+    session.reference_cache(cache_ref, b"md")
+    session.report_cache_miss(cache_miss, b"no")
+    session.invalidate_cache(invalidate)
+
+    expected_types = [
+        MessageType.CANCEL,
+        MessageType.ABORT,
+        MessageType.PRIORITY_UPDATE,
+        MessageType.DEADLINE,
+        MessageType.EXPIRE_AT,
+        MessageType.SUPERSEDE,
+        MessageType.BUDGET_UPDATE,
+        MessageType.CAPABILITY_NEGOTIATION,
+        MessageType.DEGRADE_PROFILE,
+        MessageType.ROUTE_HINT,
+        MessageType.EXECUTION_HINT,
+        MessageType.TRACE_CONTEXT,
+        MessageType.OBJECT_DECLARE,
+        MessageType.OBJECT_REF,
+        MessageType.OBJECT_RELEASE,
+        MessageType.OBJECT_PATCH,
+        MessageType.OBJECT_DELTA,
+        MessageType.CACHE_REFERENCE,
+        MessageType.CACHE_MISS,
+        MessageType.CACHE_INVALIDATE,
+    ]
+    assert [message_type for message_type, _frame_id, _payload in library.runtime_frames] == [
+        int(message_type) for message_type in expected_types
+    ]
+    assert [frame_id for _message_type, frame_id, _payload in library.runtime_frames] == list(range(1, 21))
+    assert decode_runtime_control_metadata(MessageType.CANCEL, library.runtime_frames[0][2]).tail == b"no"
+    assert decode_runtime_object_metadata(MessageType.OBJECT_PATCH, library.runtime_frames[15][2]).tail == b"mddata"
+
+
+def test_native_runtime_server_named_methods_share_one_coarse_frame_abi(tmp_path: Path) -> None:
+    artifact = tmp_path / "nnrp_ffi.dll"
+    artifact.write_bytes(b"fake")
+    library = FakeRuntimeLibrary()
+    session = (
+        load_native_client(artifact, library=library)
+        .bind_server(
+            server_id=21,
+            generation=2,
+            transport_id=TRANSPORT_SLOT_IPC,
+        )
+        .accept_session(
+            session_id=42,
+            generation=3,
+            profile_id=0,
+            schema_id=0,
+            schema_version=0,
+        )
+    )
+    progress = ProgressMetadata(10, 1, 2, 2500, 20, 4)
+    partial = PartialResultMetadata(10, 2, 20, 1, 4, 0)
+    pressure = PressureMetadata(10, 4, 2, 1, 5, 0)
+    drop = ResultDropReasonMetadata(10, 1, ResultDropReasonCode.PEER_CANCELLED, RuntimeRole.RUNTIME, 0, 2)
+    trace = TraceContextMetadata(1, 2, 0, 3, 0, 2)
+    recoverable = RecoverableErrorMetadata(20, 21, 22, RuntimeRole.RUNTIME, 0, 23, 24, 25, 26, 2)
+    retry = RetryAfterMetadata(10, 1, 100, 10, 2, RuntimeRole.RUNTIME, 0, 2)
+    descriptor = ObjectDescriptorMetadata(
+        9,
+        RuntimeObjectKind.IMAGE_TILE,
+        RuntimeRole.RUNTIME,
+        RuntimeRole.CLIENT,
+        3,
+        4096,
+        12,
+        MemoryLocationHint.HOST_MEMORY,
+        OwnershipHint.CONSUMER_OWNED,
+        1000,
+        2,
+    )
+    object_ref = ObjectReferenceMetadata(9, 10, 2, 0, 4096, 0, 2)
+    release = ObjectReleaseMetadata(9, 10, ObjectReleaseReason.COMPLETED, RuntimeRole.RUNTIME, 0, 2)
+    delta = ObjectDeltaMetadata(9, 2, 128, 64, 4, 0x03, 2)
+    cache_ref = CacheReferenceMetadata(1, 2, 3, CacheReuseScope.SESSION, 4, 5, 1000, 2, 0)
+    cache_miss = CacheMissMetadata(1, 2, CacheMissReason.UNKNOWN, 3, 2)
+    invalidate = CacheInvalidateMetadata(CacheInvalidateScope.OBJECT_KEY, 3, 4, 5, 6)
+
+    session.send_progress(progress, b"step")
+    session.send_partial_result(partial, b"part")
+    session.send_backpressure(pressure)
+    session.send_credit_update(pressure)
+    session.send_result_drop_reason(drop, b"no")
+    session.send_trace_context(trace, b"tr")
+    session.send_recoverable_error(recoverable, b"er")
+    session.send_retry_after(retry, b"ra")
+    session.declare_object(descriptor, b"md")
+    session.reference_object(object_ref, b"md")
+    session.release_object(release, b"ok")
+    session.patch_object(delta, b"data", b"md")
+    session.send_object_delta(delta, b"data", b"md")
+    session.reference_cache(cache_ref, b"md")
+    session.report_cache_miss(cache_miss, b"no")
+    session.invalidate_cache(invalidate)
+
+    expected_types = [
+        MessageType.PROGRESS,
+        MessageType.PARTIAL_RESULT,
+        MessageType.BACKPRESSURE,
+        MessageType.CREDIT_UPDATE,
+        MessageType.RESULT_DROP_REASON,
+        MessageType.TRACE_CONTEXT,
+        MessageType.ERROR_RECOVERABLE,
+        MessageType.RETRY_AFTER,
+        MessageType.OBJECT_DECLARE,
+        MessageType.OBJECT_REF,
+        MessageType.OBJECT_RELEASE,
+        MessageType.OBJECT_PATCH,
+        MessageType.OBJECT_DELTA,
+        MessageType.CACHE_REFERENCE,
+        MessageType.CACHE_MISS,
+        MessageType.CACHE_INVALIDATE,
+    ]
+    assert [message_type for message_type, _frame_id, _payload in library.runtime_frames] == [
+        int(message_type) for message_type in expected_types
+    ]
+    assert [frame_id for _message_type, frame_id, _payload in library.runtime_frames] == list(range(1, 17))
+    assert decode_runtime_control_metadata(MessageType.PROGRESS, library.runtime_frames[0][2]).tail == b"step"
+    assert decode_runtime_object_metadata(MessageType.OBJECT_DELTA, library.runtime_frames[12][2]).tail == b"mddata"
 
 
 def test_native_submit_payload_boundary_snapshots_mutable_inputs(tmp_path: Path) -> None:
@@ -3334,8 +3764,7 @@ def test_native_runtime_connection_rejects_use_after_close(tmp_path: Path) -> No
         )
     with pytest.raises(NativeInvalidStateError, match="connection is closed"):
         connection.poll_event()
-    with pytest.raises(NativeInvalidStateError, match="connection is closed"):
-        connection.control(control_code=10)
+    assert not hasattr(connection, "control")
     with pytest.raises(NativeInvalidStateError, match="connection is closed"):
         connection.close()
 
@@ -4048,7 +4477,7 @@ def test_native_runtime_session_rejects_use_after_close(tmp_path: Path) -> None:
     with pytest.raises(NativeInvalidStateError, match="closed"):
         session.cancel(frame_id=7)
     with pytest.raises(NativeInvalidStateError, match="closed"):
-        session.control(control_code=11)
+        session.cancel_operation(ControlRequestMetadata(99, 1, 0, RuntimeRole.CLIENT, 0, 0))
     with pytest.raises(NativeInvalidStateError, match="closed"):
         session.close()
 
@@ -4492,6 +4921,7 @@ def test_native_runtime_entrypoints_bind_frozen_symbol_table() -> None:
         ctypes.POINTER(_NnrpCacheLeaseResult),
     ]
     assert library.nnrp_cache_release.argtypes == [_NnrpHandle, ctypes.POINTER(_NnrpCacheLeaseResult)]
+    assert library.nnrp_runtime_frame_send.argtypes == [_NnrpRuntimeFrameSendRequest]
     assert library.nnrp_poll_empty.argtypes == [ctypes.POINTER(_NnrpPollResult)]
     assert library.nnrp_dispatch_event.argtypes == [_NnrpCallbackSink, ctypes.POINTER(_NnrpEvent)]
 

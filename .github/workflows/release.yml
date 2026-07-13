@@ -13,7 +13,7 @@ on:
       rust_native_version:
         description: nnrp-rs native artifact version to embed in wheels
         required: true
-        default: 1.0.0-preview.4.0
+        default: 1.0.0-preview.4.1
       create_tag:
         description: Create and push the resolved release tag before publishing
         required: true
@@ -173,7 +173,7 @@ jobs:
     env:
       PYPI_PUBLISH_MODE: ${{ vars.PYPI_PUBLISH_MODE || 'disabled' }}
       PYPI_API_TOKEN: ${{ secrets.PYPI_API_TOKEN }}
-      NNRP_RS_NATIVE_VERSION: ${{ github.event_name == 'workflow_dispatch' && inputs.rust_native_version || vars.NNRP_RS_NATIVE_VERSION || '1.0.0-preview.4.0' }}
+      NNRP_RS_NATIVE_VERSION: ${{ github.event_name == 'workflow_dispatch' && inputs.rust_native_version || vars.NNRP_RS_NATIVE_VERSION || '1.0.0-preview.4.1' }}
       NNRP_PY_RELEASE_PYTHON_VERSION: ${{ github.event_name == 'workflow_dispatch' && inputs.python_version || vars.NNRP_PY_RELEASE_PYTHON_VERSION || '3.11' }}
 
     steps:
@@ -339,7 +339,7 @@ jobs:
           --require-compiled-cffi-api
           --require-split-transports
           --require-preview4-native-artifacts
-          --require-abi-version 1.11.0
+          --require-abi-version 1.12.0
 
       - name: Upload workflow artifacts
         uses: actions/upload-artifact@v6

@@ -2,7 +2,7 @@
 
 ## Rust Artifact Baseline
 
-- [x] Pin the preview4 Rust artifact version used by Python.
+- [x] Pin Rust artifact `1.0.0-preview.4.1` and ABI `1.12.0` used by Python.
 - [x] Probe preview4 protocol version before accepting native artifacts.
 - [x] Probe ABI version before enabling preview4 native paths.
 - [x] Probe transport slots.
@@ -22,10 +22,11 @@
 
 ## Public API Boundary
 
-- [x] Keep host-facing client and server entrypoints stable where semantics match preview3.
+- [x] Expose only the preview4 host-facing client and server entrypoints frozen in `nnrp-doc`.
 - [x] Add preview4-specific request options without overloading preview3 packet helper APIs.
 - [x] Keep fixture builders out of runtime quick-start paths.
 - [x] Document explicit native requirement for preview4 runtime-control hot paths.
+- [x] Keep role-neutral frame encoding and raw control codes internal to the SDK.
 
 ## Capability Token Catalog
 

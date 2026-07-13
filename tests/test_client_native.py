@@ -25,7 +25,6 @@ from nnrp.runtime import (
     RuntimeRole,
     SchedulingMetadata,
     SupersedeMetadata,
-    TraceContextMetadata,
     decode_runtime_control_metadata,
     encode_runtime_control_metadata,
 )
@@ -80,8 +79,10 @@ class FakeConnection:
         self.sessions.append(session)
         return session
 
-    def control(self, *, control_code: int, payload: bytes | bytearray | memoryview = b"") -> None:
-        self.control_calls.append((control_code, payload))
+    def _send_runtime_frame(self, message_type, metadata, tail=b"") -> None:
+        self.control_calls.append(
+            (int(message_type), encode_runtime_control_metadata(message_type, metadata, tail=bytes(tail)))
+        )
 
     def dispatch_events(self, callback, *, max_events: int | None = None, event_kind: int | None = None) -> int:
         self.dispatch_calls.append(("events", max_events, event_kind))
@@ -240,8 +241,10 @@ class FakeSession:
     def send_result_hint(self, payload: bytes | bytearray | memoryview = b"") -> None:
         self.result_hints.append(payload)
 
-    def control(self, *, control_code: int, payload: bytes | bytearray | memoryview = b"") -> None:
-        self.control_calls.append((control_code, payload))
+    def _send_runtime_frame(self, message_type, metadata, tail=b"") -> None:
+        self.control_calls.append(
+            (int(message_type), encode_runtime_control_metadata(message_type, metadata, tail=bytes(tail)))
+        )
 
 
 class FakeOperation:
@@ -711,16 +714,13 @@ def test_native_client_connection_submits_and_polls_result_through_coarse_runtim
         assert len(session.operations) == 1
 
 
-def test_native_client_connection_sends_control_to_connection_and_session() -> None:
+def test_native_client_connection_does_not_expose_raw_control() -> None:
     backend = FakeBackend()
     with connect_native_client_connection(backend=backend) as client_connection:
         session = client_connection.open_session()
 
-        client_connection.send_control(client_connection.connection, control_code=10, payload=b"connection")
-        client_connection.send_control(session, control_code=11, payload=b"session")
-
-        assert backend.connections[0].control_calls == [(10, b"connection")]
-        assert session.control_calls == [(11, b"session")]
+        assert not hasattr(client_connection, "send_control")
+        assert not hasattr(session, "control")
 
 
 def test_native_client_connection_sends_runtime_control_helpers() -> None:
@@ -782,7 +782,7 @@ def test_native_client_connection_sends_runtime_control_helpers() -> None:
             flags=0x02,
         )
         client_connection.send_runtime_route_hint(
-            client_connection.connection,
+            session,
             operation_id=101,
             route_id=55,
             executor_class=6,
@@ -791,7 +791,7 @@ def test_native_client_connection_sends_runtime_control_helpers() -> None:
             body=b"route",
         )
         client_connection.send_runtime_execution_hint(
-            client_connection.connection,
+            session,
             operation_id=101,
             route_id=56,
             executor_class=8,
@@ -800,7 +800,7 @@ def test_native_client_connection_sends_runtime_control_helpers() -> None:
             flags=0x01,
         )
         client_connection.negotiate_runtime_capabilities(
-            client_connection.connection,
+            session,
             profile_id=3,
             capability_count=2,
             cost_model_id=4,
@@ -810,7 +810,7 @@ def test_native_client_connection_sends_runtime_control_helpers() -> None:
             body=b"profiles",
         )
         client_connection.degrade_runtime_profile(
-            client_connection.connection,
+            session,
             profile_id=3,
             capability_count=1,
             cost_model_id=5,
@@ -829,6 +829,10 @@ def test_native_client_connection_sends_runtime_control_helpers() -> None:
         int(MessageType.EXPIRE_AT),
         int(MessageType.SUPERSEDE),
         int(MessageType.BUDGET_UPDATE),
+        int(MessageType.ROUTE_HINT),
+        int(MessageType.EXECUTION_HINT),
+        int(MessageType.CAPABILITY_NEGOTIATION),
+        int(MessageType.DEGRADE_PROFILE),
     ]
     cancel = decode_runtime_control_metadata(MessageType.CANCEL, session.control_calls[0][1])
     assert cancel.metadata == ControlRequestMetadata(100, 1, 7, RuntimeRole.CLIENT, 0x03, 6)
@@ -854,50 +858,31 @@ def test_native_client_connection_sends_runtime_control_helpers() -> None:
     budget = decode_runtime_control_metadata(MessageType.BUDGET_UPDATE, session.control_calls[6][1])
     assert budget.metadata == BudgetMetadata(101, 11, 22, 33, 44, 0x02)
 
-    assert [control_code for control_code, _ in backend.connections[0].control_calls] == [
-        int(MessageType.ROUTE_HINT),
-        int(MessageType.EXECUTION_HINT),
-        int(MessageType.CAPABILITY_NEGOTIATION),
-        int(MessageType.DEGRADE_PROFILE),
-    ]
-    route = decode_runtime_control_metadata(MessageType.ROUTE_HINT, backend.connections[0].control_calls[0][1])
+    route = decode_runtime_control_metadata(MessageType.ROUTE_HINT, session.control_calls[7][1])
     assert route.metadata == RouteHintMetadata(101, 55, 6, 7, 1_800_000_020_000, 5, 0)
     assert route.tail == b"route"
     execution = decode_runtime_control_metadata(
         MessageType.EXECUTION_HINT,
-        backend.connections[0].control_calls[1][1],
+        session.control_calls[8][1],
     )
     assert execution.metadata == RouteHintMetadata(101, 56, 8, 9, 0, 4, 0x01)
     assert execution.tail == b"exec"
     capabilities = decode_runtime_control_metadata(
         MessageType.CAPABILITY_NEGOTIATION,
-        backend.connections[0].control_calls[2][1],
+        session.control_calls[9][1],
     )
     assert capabilities.metadata == CapabilityMetadata(3, 2, 4, 1, 99, 88, 8, 0)
     assert capabilities.tail == b"profiles"
-    degrade = decode_runtime_control_metadata(MessageType.DEGRADE_PROFILE, backend.connections[0].control_calls[3][1])
+    degrade = decode_runtime_control_metadata(MessageType.DEGRADE_PROFILE, session.control_calls[10][1])
     assert degrade.metadata == CapabilityMetadata(3, 1, 5, 9, 77, 66, 7, 0x02)
     assert degrade.tail == b"degrade"
 
 
-def test_native_client_connection_keeps_trace_context_adjacent_to_cancellation() -> None:
+def test_native_client_connection_keeps_runtime_controls_adjacent() -> None:
     backend = FakeBackend()
     with connect_native_client_connection(backend=backend) as client_connection:
         session = client_connection.open_session()
 
-        trace_payload = encode_runtime_control_metadata(
-            MessageType.TRACE_CONTEXT,
-            TraceContextMetadata(
-                trace_id=0xAABBCCDD,
-                span_id=2,
-                parent_span_id=1,
-                stage_code=3,
-                flags=0x01,
-                body_bytes=5,
-            ),
-            tail=b"trace",
-        )
-        client_connection.send_control(session, control_code=int(MessageType.TRACE_CONTEXT), payload=trace_payload)
         client_connection.cancel_runtime_operation(
             session,
             operation_id=42,
@@ -907,15 +892,9 @@ def test_native_client_connection_keeps_trace_context_adjacent_to_cancellation()
             diagnostic=b"cancelled",
         )
 
-    trace = decode_runtime_control_metadata(MessageType.TRACE_CONTEXT, session.control_calls[0][1])
-    cancel = decode_runtime_control_metadata(MessageType.CANCEL, session.control_calls[1][1])
+    cancel = decode_runtime_control_metadata(MessageType.CANCEL, session.control_calls[0][1])
 
-    assert [control_code for control_code, _ in session.control_calls] == [
-        int(MessageType.TRACE_CONTEXT),
-        int(MessageType.CANCEL),
-    ]
-    assert trace.metadata == TraceContextMetadata(0xAABBCCDD, 2, 1, 3, 0x01, 5)
-    assert trace.tail == b"trace"
+    assert [control_code for control_code, _ in session.control_calls] == [int(MessageType.CANCEL)]
     assert cancel.metadata == ControlRequestMetadata(
         42,
         7,

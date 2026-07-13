@@ -93,8 +93,8 @@ The native helpers provide:
 3. `NativeClientConnection.submit_and_poll_result()` for a host-friendly submit/result roundtrip over native session operations.
 4. `NativeRuntimeSession.submit_operation()` and `NativeClientConnection.operation_scope()` for operation handles, parent/group metadata, and cancellation on exceptional exits.
 5. `NativeClientConnection.poll_result()`, native async polling helpers, and callback dispatch helpers for result/event delivery.
-6. `NativeClientConnection.cancel_frame()` / `NativeClientConnection.cancel_operation()` / `NativeClientConnection.send_control()` for low-level host control paths.
-7. Preview4 runtime-control helpers for cancellation, scheduling, route hints, execution hints, capability negotiation, and profile degradation.
+6. `NativeClientConnection.cancel_frame()` and `NativeClientConnection.cancel_operation()` for operation-aware cancellation.
+7. Named Preview4 runtime-control helpers for scheduling, route hints, execution hints, capability negotiation, and profile degradation. Raw control codes are internal.
 
 By default the native loader searches `nnrp/native_artifacts/<os>-<arch>/` inside the installed package. Set `NNRP_NATIVE_ARTIFACT_ROOT` when testing an external artifact tree. Pass `require_native=True` in host code that must fail fast instead of falling back to SDK-local fixtures.
 
@@ -104,7 +104,7 @@ Polled native events and results expose Python-owned `bytes` payload snapshots. 
 
 ### Preview4 Runtime Controls
 
-Client control helpers build the frozen preview4 metadata payloads and send one coarse native `control` call through the selected connection or session target:
+Client control helpers build the frozen preview4 metadata payloads and send one coarse `nnrp_runtime_frame_send` ABI call through the selected session. Applications do not construct raw frames or pass control codes:
 
 ```python
 from nnrp.client import NativeClientSessionOpenOptions, connect_native_client_connection

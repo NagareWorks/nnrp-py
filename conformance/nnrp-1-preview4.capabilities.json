@@ -1,0 +1,22 @@
+{
+  "implementation_name": "nnrp-py",
+  "protocol_version": "nnrp-1-preview4",
+  "supports": [
+    "control.cancel_abort",
+    "control.priority_update",
+    "control.deadline_expire",
+    "control.progress_partial",
+    "control.credit_backpressure",
+    "control.capability_costs",
+    "control.route_execution_hint",
+    "control.trace_context",
+    "control.result_drop_reason",
+    "control.degrade_profile",
+    "control.budget_update",
+    "object.lifecycle",
+    "object.delta",
+    "object.cost",
+    "object.ownership",
+    "cache.reference"
+  ]
+}

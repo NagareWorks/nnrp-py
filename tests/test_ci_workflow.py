@@ -29,6 +29,32 @@ def test_ci_runs_adapter_conformance_as_required_job() -> None:
     assert "- conformance" in workflow
 
 
+def test_adapter_conformance_manifest_claims_preview4_runtime_capabilities() -> None:
+    manifest_path = CI_WORKFLOW.parents[2] / "conformance" / "nnrp-1-preview4.capabilities.json"
+    manifest = manifest_path.read_text(encoding="utf-8")
+
+    assert '"protocol_version": "nnrp-1-preview4"' in manifest
+    for capability in (
+        "control.cancel_abort",
+        "control.priority_update",
+        "control.deadline_expire",
+        "control.progress_partial",
+        "control.credit_backpressure",
+        "control.capability_costs",
+        "control.route_execution_hint",
+        "control.trace_context",
+        "control.result_drop_reason",
+        "control.degrade_profile",
+        "control.budget_update",
+        "object.lifecycle",
+        "object.delta",
+        "object.cost",
+        "object.ownership",
+        "cache.reference",
+    ):
+        assert f'"{capability}"' in manifest
+
+
 def test_ci_runs_wire_conformance_plan_and_result_validation() -> None:
     workflow = _read_ci_workflow()
 

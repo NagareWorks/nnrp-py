@@ -13,6 +13,7 @@ from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
 from cryptography.x509.oid import NameOID
 
+import nnrp.adapters.quic as quic_adapter
 from nnrp.adapters import (
     NNRP_CURRENT_ALPN,
     NnrpQuicConnectionClosedError,
@@ -87,6 +88,10 @@ def test_quic_connect_raises_on_alpn_mismatch() -> None:
 
 def test_quic_control_stream_accepts_multiple_packets() -> None:
     asyncio.run(_run_quic_multiple_control_packets())
+
+
+def test_quic_listener_closes_server_when_drain_fails(monkeypatch: pytest.MonkeyPatch) -> None:
+    asyncio.run(_run_quic_listener_drain_failure(monkeypatch))
 
 
 def test_quic_control_stream_preserves_client_hello_and_ack_bodies() -> None:
@@ -298,6 +303,31 @@ async def _run_quic_alpn_mismatch() -> None:
             with pytest.raises(NnrpQuicConnectionClosedError, match="connection terminated"):
                 async with connect_quic("127.0.0.1", port, configuration=client_configuration):
                     pass
+
+
+async def _run_quic_listener_drain_failure(monkeypatch: pytest.MonkeyPatch) -> None:
+    class FakeServer:
+        closed = False
+
+        def close(self) -> None:
+            self.closed = True
+
+    class FailingConnection:
+        async def ping(self) -> None:
+            raise RuntimeError("drain failed")
+
+    server = FakeServer()
+
+    async def fake_serve(**_kwargs) -> FakeServer:
+        return server
+
+    monkeypatch.setattr(quic_adapter, "serve", fake_serve)
+
+    with pytest.raises(RuntimeError, match="drain failed"):
+        async with serve_quic("127.0.0.1", 19091, configuration=object()) as listener:
+            listener._accepted_connections.append(FailingConnection())  # type: ignore[arg-type]
+
+    assert server.closed is True
 
 
 async def _run_quic_multiple_control_packets() -> None:

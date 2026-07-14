@@ -301,9 +301,21 @@ class NnrpQuicListener:
     port: int
     _server: object
     _connections: asyncio.Queue[NnrpQuicConnection] = field(repr=False)
+    _accepted_connections: list[NnrpQuicConnection] = field(default_factory=list, repr=False)
 
     async def accept(self, timeout: float | None = None) -> NnrpQuicConnection:
-        return await _wait_for(self._connections.get(), timeout)
+        connection = await _wait_for(self._connections.get(), timeout)
+        self._accepted_connections.append(connection)
+        return connection
+
+    async def _drain_accepted_connections(self, timeout: float = 1.0) -> None:
+        async def drain(connection: NnrpQuicConnection) -> None:
+            try:
+                await asyncio.wait_for(connection.ping(), timeout=timeout)
+            except (ConnectionError, TimeoutError):
+                pass
+
+        await asyncio.gather(*(drain(connection) for connection in self._accepted_connections))
 
     def close(self) -> None:
         close = getattr(self._server, "close", None)
@@ -333,7 +345,10 @@ async def serve_quic(
     try:
         yield listener
     finally:
-        listener.close()
+        try:
+            await listener._drain_accepted_connections()
+        finally:
+            listener.close()
 
 
 @asynccontextmanager

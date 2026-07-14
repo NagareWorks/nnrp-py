@@ -2073,13 +2073,14 @@ class NativeRuntimeEvent:
 
     @classmethod
     def from_ffi(cls, event: _NnrpEvent, entrypoints: NativeRuntimeEntrypoints) -> NativeRuntimeEvent:
+        payload = _copy_owned_event_payload(entrypoints, event)
         return cls(
             kind=int(event.kind),
             connection=_native_handle_from_trusted_ffi(event.connection),
             session=_native_handle_from_trusted_ffi(event.session),
             operation=_native_handle_from_trusted_ffi(event.operation),
             frame_id=int(event.frame_id),
-            payload=_copy_owned_event_payload(entrypoints, event),
+            payload=payload,
             diagnostic=NativeRuntimeDiagnostic.from_ffi(event.diagnostic),
             message_type=int(event.message_type),
         )
@@ -2291,9 +2292,13 @@ def _copy_owned_event_payload(entrypoints: NativeRuntimeEntrypoints, event: _Nnr
     try:
         return _copy_buffer_view(event.payload)
     finally:
-        if int(event.payload_owner.kind) == HANDLE_KIND_BUFFER:
-            status = entrypoints.buffer_release(event.payload_owner)
-            raise_for_native_status(status)
+        _release_owned_event_payload(entrypoints, event)
+
+
+def _release_owned_event_payload(entrypoints: NativeRuntimeEntrypoints, event: _NnrpEvent) -> None:
+    if int(event.payload_owner.kind) == HANDLE_KIND_BUFFER:
+        status = entrypoints.buffer_release(event.payload_owner)
+        raise_for_native_status(status)
 
 
 def _decode_native_runtime_frame_event(event: NativeRuntimeEvent) -> NativeRuntimeFrameEvent:
@@ -3173,10 +3178,11 @@ class NativeRuntimeConnection:
 
         events: list[NativeRuntimeEvent] = []
         for index in range(int(event_count.value)):
-            event = NativeRuntimeEvent.from_ffi(event_buffer[index], self.entrypoints)
-            if event_kind is not None and event.kind != event_kind:
+            raw_event = event_buffer[index]
+            if event_kind is not None and int(raw_event.kind) != event_kind:
+                _release_owned_event_payload(self.entrypoints, raw_event)
                 continue
-            events.append(event)
+            events.append(NativeRuntimeEvent.from_ffi(raw_event, self.entrypoints))
         return tuple(events)
 
     def poll_credit_updates(self, *, max_events: int | None = None) -> tuple[NativeCreditUpdateEvent, ...]:
@@ -3543,13 +3549,19 @@ class NativeRuntimeSession:
             return None
         raise_for_native_status(native_status)
 
+        matched_result: NativeRuntimeResult | None = None
         for index in range(int(event_count.value)):
             raw_event = event_buffer[index]
-            event = NativeRuntimeEvent.from_ffi(raw_event, self.entrypoints)
-            if not _event_is_result_event(event) or not _event_matches_operation(event, operation):
+            if (
+                matched_result is not None
+                or not _raw_event_is_result_event(raw_event)
+                or not _raw_event_matches_operation(raw_event, operation)
+            ):
+                _release_owned_event_payload(self.entrypoints, raw_event)
                 continue
-            return NativeRuntimeResult.from_event(event, state=state)
-        return None
+            event = NativeRuntimeEvent.from_ffi(raw_event, self.entrypoints)
+            matched_result = NativeRuntimeResult.from_event(event, state=state)
+        return matched_result
 
     def _borrow_poll_event_buffer(self, max_events: int) -> tuple[Any, ctypes.c_size_t]:
         event_buffer = self._poll_event_buffer

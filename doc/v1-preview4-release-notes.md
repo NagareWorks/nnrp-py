@@ -14,6 +14,10 @@ benchmark documents and are not used as preview4 release criteria.
   Python client facade after a cancellation path.
 - Event dispatch keeps progress, partial-result, result-drop, backpressure, and payload-family updates on coarse native
   polling calls.
+- Named client and server methods perform one role-neutral `nnrp_runtime_frame_send` ABI call; raw control codes and
+  frame encoding remain internal to the SDK.
+- Runtime-frame events copy native-owned payloads before releasing their owner handle, then expose typed metadata,
+  body, diagnostic, and delta fields.
 
 ## Runtime Objects And Cache References
 

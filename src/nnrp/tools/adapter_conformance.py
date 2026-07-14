@@ -10,7 +10,43 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from nnrp.native import NativeArtifactError, NativeRuntimeBackend, NativeRuntimeError, select_native_runtime_backend
+from nnrp.core import MessageType
+from nnrp.native import (
+    NativeArtifactError,
+    NativeRuntimeBackend,
+    NativeRuntimeError,
+    NativeRuntimeSession,
+    select_native_runtime_backend,
+)
+from nnrp.runtime import (
+    BudgetMetadata,
+    CacheMissMetadata,
+    CacheMissReason,
+    CacheReferenceMetadata,
+    CacheReuseScope,
+    CapabilityMetadata,
+    ControlRequestMetadata,
+    MemoryLocationHint,
+    ObjectDeltaMetadata,
+    ObjectDescriptorMetadata,
+    ObjectReferenceMetadata,
+    ObjectReleaseMetadata,
+    ObjectReleaseReason,
+    OwnershipHint,
+    PartialResultMetadata,
+    PressureMetadata,
+    ProgressMetadata,
+    ResultDropReasonCode,
+    ResultDropReasonMetadata,
+    RouteHintMetadata,
+    RuntimeObjectKind,
+    RuntimeRole,
+    SchedulingMetadata,
+    TraceContextMetadata,
+    decode_runtime_control_metadata,
+    encode_runtime_control_metadata,
+    encode_runtime_object_metadata,
+)
 
 _RESULTS_SCHEMA_URL = "https://raw.githubusercontent.com/NagareWorks/nnrp-conformance/main/schemas/adapter-case-results.schema.json"
 _DEFAULT_IMPLEMENTATION_NAME = "nnrp-py"
@@ -21,6 +57,15 @@ _CASE_DISPATCH = {
     "l1.frame_submit.tensor.inline": "_execute_inline_tensor_submit",
     "l1.frame_submit.tensor.inline.routing.validation": "_execute_inline_tensor_submit_with_routing",
     "l1.result_push.basic.terminal.validation": "_execute_result_push_terminal",
+    "l1.control.cancel-abort": "_execute_runtime_cancel_abort",
+    "l1.control.priority-deadline": "_execute_runtime_priority_deadline",
+    "l1.control.progress-backpressure": "_execute_runtime_progress_backpressure",
+    "l1.control.capability-costs": "_execute_runtime_capability_costs",
+    "l1.object.lifecycle": "_execute_runtime_object_lifecycle",
+    "l1.object.delta": "_execute_runtime_object_delta",
+    "l1.control.route-execution-hint": "_execute_runtime_route_execution_hint",
+    "l1.control.cache-reference": "_execute_runtime_cache_reference",
+    "l1.control.degrade-budget": "_execute_runtime_degrade_budget",
 }
 
 
@@ -210,7 +255,7 @@ class _AdapterCaseExecution:
     def _execute_handshake_basic(self) -> dict[str, Any]:
         connection = self._connect()
         control_payload = self._payload_parameter("control_payload", b"hello")
-        connection.control(control_code=self._int_parameter("control_code", 1), payload=control_payload)
+        connection._control(control_code=self._int_parameter("control_code", 1), payload=control_payload)
         return self._evidence(
             "handshake",
             connection_id=_runtime_id(connection),
@@ -233,7 +278,7 @@ class _AdapterCaseExecution:
         session = self._open_session(self._connect())
         operation = self._submit_operation(session)
         route_payload = self._payload_parameter("route_payload", b"route")
-        session.control(control_code=self._int_parameter("route_control_code", 2), payload=route_payload)
+        session._control(control_code=self._int_parameter("route_control_code", 2), payload=route_payload)
         session.close()
         return self._evidence(
             "inline-submit-routing",
@@ -272,6 +317,95 @@ class _AdapterCaseExecution:
             frame_id=operation.frame_id,
             result_payload_bytes=len(getattr(result, "payload", b"")),
         )
+
+    def _execute_runtime_cancel_abort(self) -> dict[str, Any]:
+        session = self._open_session(self._connect())
+        session.cancel_operation(ControlRequestMetadata(10, 1, 1, RuntimeRole.CLIENT, 0, 0))
+        session.abort_operation(ControlRequestMetadata(10, 2, 2, RuntimeRole.SCHEDULER, 0, 0))
+        session.send_trace_context(TraceContextMetadata(100, 2, 1, 3, 0, 0))
+        drop = ResultDropReasonMetadata(10, 1, ResultDropReasonCode.PEER_CANCELLED, RuntimeRole.RUNTIME, 0, 0)
+        decoded = decode_runtime_control_metadata(
+            MessageType.RESULT_DROP_REASON,
+            encode_runtime_control_metadata(MessageType.RESULT_DROP_REASON, drop),
+        )
+        return self._evidence(
+            "runtime-cancel-abort",
+            session_id=_runtime_id(session),
+            terminal_reason=int(decoded.metadata.drop_reason_code),
+        )
+
+    def _execute_runtime_priority_deadline(self) -> dict[str, Any]:
+        session = self._open_session(self._connect())
+        session.update_priority(SchedulingMetadata(10, 1, 2, 4, 0, 0))
+        session.update_deadline(SchedulingMetadata(10, 2, 2, 0, 1_800_000_000_000, 0))
+        session.expire_at(SchedulingMetadata(10, 3, 0, 0, 1_800_000_010_000, 0))
+        return self._evidence("runtime-priority-deadline", session_id=_runtime_id(session), update_count=3)
+
+    def _execute_runtime_progress_backpressure(self) -> dict[str, Any]:
+        frames = (
+            (MessageType.PROGRESS, ProgressMetadata(10, 1, 2, 2500, 20, 4), b"step"),
+            (MessageType.PARTIAL_RESULT, PartialResultMetadata(10, 2, 20, 1, 4, 0), b"part"),
+            (MessageType.BACKPRESSURE, PressureMetadata(10, 4, 2, 1, 5, 0), b""),
+            (MessageType.CREDIT_UPDATE, PressureMetadata(10, 8, 0, 0, 0, 0), b""),
+        )
+        for message_type, metadata, tail in frames:
+            decoded = decode_runtime_control_metadata(
+                message_type,
+                encode_runtime_control_metadata(message_type, metadata, tail=tail),
+            )
+            if decoded.metadata != metadata or decoded.tail != tail:
+                raise ValueError(f"{message_type.name} runtime metadata did not round-trip")
+        return self._evidence("runtime-progress-backpressure", frame_count=len(frames))
+
+    def _execute_runtime_capability_costs(self) -> dict[str, Any]:
+        session = self._open_session(self._connect())
+        session.negotiate_capabilities(CapabilityMetadata(3, 2, 4, 1, 99, 88, 2, 0), b"{}")
+        return self._evidence("runtime-capability-costs", session_id=_runtime_id(session), capability_count=2)
+
+    def _execute_runtime_object_lifecycle(self) -> dict[str, Any]:
+        session = self._open_session(self._connect())
+        descriptor = ObjectDescriptorMetadata(
+            9,
+            RuntimeObjectKind.IMAGE_TILE,
+            RuntimeRole.RUNTIME,
+            RuntimeRole.CLIENT,
+            3,
+            4096,
+            12,
+            MemoryLocationHint.HOST_MEMORY,
+            OwnershipHint.CONSUMER_OWNED,
+            1000,
+            2,
+        )
+        session.declare_object(descriptor, b"md")
+        session.reference_object(ObjectReferenceMetadata(9, 10, 2, 0, 4096, 0, 0))
+        session.release_object(ObjectReleaseMetadata(9, 10, ObjectReleaseReason.COMPLETED, RuntimeRole.CLIENT, 0, 0))
+        return self._evidence("runtime-object-lifecycle", session_id=_runtime_id(session), object_id=9)
+
+    def _execute_runtime_object_delta(self) -> dict[str, Any]:
+        session = self._open_session(self._connect())
+        metadata = ObjectDeltaMetadata(9, 2, 128, 64, 4, 0x03, 2)
+        session.patch_object(metadata, b"xxxx", b"md")
+        session.send_object_delta(metadata, b"xxxx", b"md")
+        return self._evidence("runtime-object-delta", session_id=_runtime_id(session), delta_bytes=4)
+
+    def _execute_runtime_route_execution_hint(self) -> dict[str, Any]:
+        session = self._open_session(self._connect())
+        session.send_route_hint(RouteHintMetadata(10, 20, 2, 3, 0, 2, 0), b"rt")
+        session.send_execution_hint(RouteHintMetadata(10, 21, 4, 5, 0, 2, 0), b"ex")
+        return self._evidence("runtime-route-execution-hint", session_id=_runtime_id(session), hint_count=2)
+
+    def _execute_runtime_cache_reference(self) -> dict[str, Any]:
+        session = self._open_session(self._connect())
+        session.reference_cache(CacheReferenceMetadata(1, 2, 3, CacheReuseScope.SESSION, 4, 5, 1000, 0, 0))
+        session.report_cache_miss(CacheMissMetadata(1, 2, CacheMissReason.UNKNOWN, 3, 0))
+        return self._evidence("runtime-cache-reference", session_id=_runtime_id(session), cache_key_hi=1)
+
+    def _execute_runtime_degrade_budget(self) -> dict[str, Any]:
+        session = self._open_session(self._connect())
+        session.degrade_profile(CapabilityMetadata(3, 1, 4, 2, 99, 88, 2, 0), b"{}")
+        session.update_budget(BudgetMetadata(10, 20, 30, 40, 50, 0))
+        return self._evidence("runtime-degrade-budget", session_id=_runtime_id(session), operation_id=10)
 
     def _drain_setup_events(self, connection: Any) -> None:
         poll_events_batch = getattr(connection, "poll_events_batch", None)
@@ -400,7 +534,7 @@ class _AdapterSmokeConnection:
             schema_version=schema_version,
         )
 
-    def control(self, *, control_code: int, payload: bytes | bytearray | memoryview = b"") -> None:
+    def _control(self, *, control_code: int, payload: bytes | bytearray | memoryview = b"") -> None:
         self.controls.append((control_code, bytes(payload)))
 
 
@@ -430,6 +564,35 @@ class _AdapterSmokeSession:
     controls: list[tuple[int, bytes]] = field(default_factory=list)
     cancelled_frames: list[int] = field(default_factory=list)
     closed: bool = False
+
+    cancel_operation = NativeRuntimeSession.cancel_operation
+    abort_operation = NativeRuntimeSession.abort_operation
+    update_priority = NativeRuntimeSession.update_priority
+    update_deadline = NativeRuntimeSession.update_deadline
+    expire_at = NativeRuntimeSession.expire_at
+    update_budget = NativeRuntimeSession.update_budget
+    negotiate_capabilities = NativeRuntimeSession.negotiate_capabilities
+    degrade_profile = NativeRuntimeSession.degrade_profile
+    send_route_hint = NativeRuntimeSession.send_route_hint
+    send_execution_hint = NativeRuntimeSession.send_execution_hint
+    send_trace_context = NativeRuntimeSession.send_trace_context
+    declare_object = NativeRuntimeSession.declare_object
+    reference_object = NativeRuntimeSession.reference_object
+    release_object = NativeRuntimeSession.release_object
+    patch_object = NativeRuntimeSession.patch_object
+    send_object_delta = NativeRuntimeSession.send_object_delta
+    reference_cache = NativeRuntimeSession.reference_cache
+    report_cache_miss = NativeRuntimeSession.report_cache_miss
+
+    _OBJECT_MESSAGE_TYPES = {
+        MessageType.OBJECT_DECLARE,
+        MessageType.OBJECT_REF,
+        MessageType.OBJECT_RELEASE,
+        MessageType.OBJECT_PATCH,
+        MessageType.OBJECT_DELTA,
+        MessageType.CACHE_REFERENCE,
+        MessageType.CACHE_MISS,
+    }
 
     def submit_operation(
         self,
@@ -470,9 +633,17 @@ class _AdapterSmokeSession:
         self._ensure_open()
         self.cancelled_frames.append(frame_id)
 
-    def control(self, *, control_code: int, payload: bytes | bytearray | memoryview = b"") -> None:
+    def _control(self, *, control_code: int, payload: bytes | bytearray | memoryview = b"") -> None:
         self._ensure_open()
         self.controls.append((control_code, bytes(payload)))
+
+    def _send_runtime_frame(self, message_type: MessageType, metadata: Any, tail: bytes = b"") -> None:
+        self._ensure_open()
+        if message_type in self._OBJECT_MESSAGE_TYPES:
+            payload = encode_runtime_object_metadata(message_type, metadata, tail=tail)
+        else:
+            payload = encode_runtime_control_metadata(message_type, metadata, tail=tail)
+        self.controls.append((int(message_type), payload))
 
     def close(self) -> None:
         self._ensure_open()

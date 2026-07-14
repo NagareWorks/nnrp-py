@@ -50,6 +50,9 @@
 ## Native Binding
 
 - [x] Bind preview4 control-frame native calls.
+  - [x] Send each named control through one `nnrp_runtime_frame_send` ABI call.
+  - [x] Decode `message_type` and native-owned payloads into named Python events.
+  - [x] Release native payload owners after copying event bytes.
 - [x] Bind batch event polling for progress, partial result, and drop reason events.
 - [x] Keep submit/control/result loops on coarse native calls.
 - [x] Add tests that count Python-to-native calls on representative hot paths.

@@ -35,11 +35,10 @@ from nnrp.runtime import (
     RuntimeRole,
     SchedulingMetadata,
     SupersedeMetadata,
-    encode_runtime_control_metadata,
 )
 from nnrp.runtime.types import _FixedRuntimeMetadata
 
-NativeControlTarget = NativeRuntimeConnection | NativeRuntimeSession
+NativeControlTarget = NativeRuntimeSession
 
 _MAX_CANCELLED_RESULT_SUPPRESSIONS_PER_SESSION = 4096
 
@@ -286,16 +285,6 @@ class NativeClientConnection:
     ) -> None:
         self._ensure_open()
         session.send_result_hint(payload)
-
-    def send_control(
-        self,
-        target: NativeControlTarget,
-        *,
-        control_code: int,
-        payload: bytes | bytearray | memoryview = b"",
-    ) -> None:
-        self._ensure_open()
-        target.control(control_code=control_code, payload=payload)
 
     def cancel_runtime_operation(
         self,
@@ -729,8 +718,8 @@ class NativeClientConnection:
         *,
         tail: bytes | bytearray | memoryview = b"",
     ) -> None:
-        payload = encode_runtime_control_metadata(message_type, metadata, tail=tail)
-        self.send_control(target, control_code=int(message_type), payload=payload)
+        self._ensure_open()
+        target._send_runtime_frame(message_type, metadata, tail)
 
 
 def select_client_native_backend(

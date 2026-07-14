@@ -102,6 +102,30 @@ def test_build_adapter_case_results_report_executes_all_supported_smoke_paths() 
     assert [result["outcome"] for result in report["results"]] == ["pass", "pass", "pass"]
 
 
+def test_build_adapter_case_results_report_executes_all_preview4_runtime_cases() -> None:
+    case_ids = [
+        "l1.control.cancel-abort",
+        "l1.control.priority-deadline",
+        "l1.control.progress-backpressure",
+        "l1.control.capability-costs",
+        "l1.object.lifecycle",
+        "l1.object.delta",
+        "l1.control.route-execution-hint",
+        "l1.control.cache-reference",
+        "l1.control.degrade-budget",
+    ]
+
+    report = build_adapter_case_results_report(
+        {
+            "protocol_version": "nnrp-1-preview4",
+            "cases": [{"id": case_id} for case_id in case_ids],
+        }
+    )
+
+    assert [result["id"] for result in report["results"]] == case_ids
+    assert [result["outcome"] for result in report["results"]] == ["pass"] * len(case_ids)
+
+
 def test_build_adapter_case_results_report_uses_case_parameters_and_writes_evidence(tmp_path: Path) -> None:
     evidence_dir = tmp_path / "evidence"
 
@@ -400,7 +424,7 @@ def test_adapter_smoke_backend_bootstrap_and_closed_session_guards() -> None:
         operation_group_id=2,
     )
     result = session.poll_result(operation, max_events=1)
-    session.control(control_code=11, payload=bytearray(b"control"))
+    session._control(control_code=11, payload=bytearray(b"control"))
     session.cancel(frame_id=10)
     session.close()
 

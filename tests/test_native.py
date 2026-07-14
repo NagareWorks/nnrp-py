@@ -975,6 +975,48 @@ class BatchControlRuntimeLibrary(FakeRuntimeLibrary):
         return self.status
 
 
+class OwnedBatchRuntimeLibrary(FakeRuntimeLibrary):
+    def __init__(self, events: list[tuple[int, int, int, int, bytes]]) -> None:
+        super().__init__()
+        self._owned_batch_events: list[tuple[int, int, int, int, int, ctypes.Array[ctypes.c_char]]] = []
+        for index, (kind, session_id, operation_id, frame_id, payload) in enumerate(events):
+            owner_id = 1000 + index
+            owner = ctypes.create_string_buffer(payload, len(payload))
+            self._buffers[owner_id] = owner
+            self._owned_batch_events.append((kind, session_id, operation_id, frame_id, owner_id, owner))
+
+    def _await_events(
+        self,
+        handle: _NnrpHandle,
+        out_events: object,
+        event_capacity: int,
+        out_event_count: object,
+    ) -> _NnrpFfiStatus:
+        count_target = getattr(out_event_count, "_obj", None)
+        if count_target is None:
+            count_target = ctypes.cast(out_event_count, ctypes.POINTER(ctypes.c_size_t)).contents
+        emitted = min(event_capacity, len(self._owned_batch_events))
+        if emitted == 0:
+            count_target.value = 0
+            return _NnrpFfiStatus(FFI_STATUS_WOULD_BLOCK, 0, 0, 0)
+
+        events = ctypes.cast(out_events, ctypes.POINTER(_NnrpEvent))
+        for index in range(emitted):
+            kind, session_id, operation_id, frame_id, owner_id, owner = self._owned_batch_events[index]
+            events[index].kind = kind
+            events[index].message_type = 0
+            events[index].connection = handle
+            events[index].session = _NnrpHandle(HANDLE_KIND_SESSION, session_id, 3, 0)
+            events[index].operation = _NnrpHandle(HANDLE_KIND_OPERATION, operation_id, 1, 0)
+            events[index].frame_id = frame_id
+            events[index].payload_owner = _NnrpHandle(HANDLE_KIND_BUFFER, owner_id, 1, 0)
+            events[index].payload = _NnrpBufferView(ctypes.cast(owner, ctypes.c_void_p), len(owner.raw))
+            events[index].diagnostic.status = NativeStatus.ok().to_ffi()
+        del self._owned_batch_events[:emitted]
+        count_target.value = emitted
+        return self.status
+
+
 class ExpiringCacheRuntimeLibrary(FakeRuntimeLibrary):
     def _cache_query(self, request: _NnrpCacheLeaseRequest, out_result: object) -> _NnrpFfiStatus:
         result = _cache_result_target(out_result)
@@ -3438,6 +3480,42 @@ def test_native_runtime_connection_batch_polls_preview4_control_events(tmp_path:
     assert decoded[2].tail == b"drop"
 
 
+def test_native_runtime_connection_filters_owned_batch_events_before_copy(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    artifact = tmp_path / "nnrp_ffi.dll"
+    artifact.write_bytes(b"fake")
+    library = OwnedBatchRuntimeLibrary(
+        [
+            (EVENT_KIND_RESULT_PUSHED, 41, 99, 7, b"skip"),
+            (EVENT_KIND_CONTROL, 41, 100, 8, b"keep"),
+        ]
+    )
+    copied_payloads: list[bytes] = []
+    original_copy = native_module._copy_buffer_view
+
+    def track_copy(view: _NnrpBufferView) -> bytes:
+        payload = original_copy(view)
+        copied_payloads.append(payload)
+        return payload
+
+    monkeypatch.setattr(native_module, "_copy_buffer_view", track_copy)
+    connection = load_native_client(artifact, library=library).connect(
+        connection_id=12,
+        generation=2,
+        transport_id=TRANSPORT_SLOT_TCP,
+    )
+
+    events = connection.poll_events_batch(max_events=2, event_kind=EVENT_KIND_CONTROL)
+
+    assert [event.payload for event in events] == [b"keep"]
+    assert connection.poll_events_batch(max_events=2, event_kind=EVENT_KIND_CONTROL) == ()
+    assert copied_payloads == [b"keep"]
+    assert library._buffers == {}
+    assert [call[0].id for call in library.nnrp_buffer_release.calls] == [1000, 1001]
+
+
 def test_native_runtime_connection_batch_poll_maps_would_block_to_empty(tmp_path: Path) -> None:
     artifact = tmp_path / "nnrp_ffi.dll"
     artifact.write_bytes(b"fake")
@@ -4315,6 +4393,50 @@ def test_native_runtime_session_batch_poll_skips_submit_accepted_events(tmp_path
 
     assert result.state is NativeOperationLifecycle.COMPLETED
     assert result.payload == b"result"
+
+
+def test_native_runtime_session_batch_poll_copies_only_matching_owned_result(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    artifact = tmp_path / "nnrp_ffi.dll"
+    artifact.write_bytes(b"fake")
+    library = OwnedBatchRuntimeLibrary(
+        [
+            (EVENT_KIND_RESULT_PUSHED, 42, 99, 7, b"wrong-session"),
+            (EVENT_KIND_SUBMIT_ACCEPTED, 41, 99, 7, b"not-result"),
+            (EVENT_KIND_RESULT_PUSHED, 41, 99, 7, b"result"),
+            (EVENT_KIND_RESULT_PUSHED, 41, 100, 8, b"trailing"),
+        ]
+    )
+    copied_payloads: list[bytes] = []
+    original_copy = native_module._copy_buffer_view
+
+    def track_copy(view: _NnrpBufferView) -> bytes:
+        payload = original_copy(view)
+        copied_payloads.append(payload)
+        return payload
+
+    monkeypatch.setattr(native_module, "_copy_buffer_view", track_copy)
+    session = (
+        load_native_client(artifact, library=library)
+        .connect(connection_id=12, generation=2, transport_id=TRANSPORT_SLOT_TCP)
+        .open_session(
+            requested_session_id=41,
+            generation=3,
+            profile_id=4,
+            schema_id=5,
+            schema_version=6,
+        )
+    )
+    operation = session.submit_operation(operation_id=99, frame_id=7)
+
+    result = session.poll_result(operation, max_events=4)
+
+    assert result.payload == b"result"
+    assert copied_payloads == [b"result"]
+    assert library._buffers == {}
+    assert [call[0].id for call in library.nnrp_buffer_release.calls] == [1000, 1001, 1002, 1003]
 
 
 def test_native_runtime_session_accepts_read_only_memoryview_payloads(tmp_path: Path) -> None:

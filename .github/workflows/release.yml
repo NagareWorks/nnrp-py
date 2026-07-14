@@ -309,6 +309,7 @@ jobs:
 
           rm -rf src/nnrp/native_artifacts
           python -m build --sdist --outdir dist
+          python scripts/verify_sdist.py --dist dist --max-bytes 5000000
           python scripts/prepare_native_artifacts.py --clean artifacts/native-downloads/*.zip
 
       - name: Build staged wheel with native payloads

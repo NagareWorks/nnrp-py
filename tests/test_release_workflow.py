@@ -50,3 +50,9 @@ def test_release_workflow_runs_native_runtime_benchmark_thresholds() -> None:
     assert "doc/benchmarks/native-runtime-benchmark-plan.json" in workflow
     assert "scripts/check_benchmark_thresholds.py" in workflow
     assert "doc/benchmarks/native-runtime-smoke-thresholds.json" in workflow
+
+
+def test_release_workflow_rejects_polluted_source_distributions() -> None:
+    workflow = RELEASE_WORKFLOW.read_text(encoding="utf-8")
+
+    assert "scripts/verify_sdist.py --dist dist --max-bytes 5000000" in workflow

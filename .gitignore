@@ -5,7 +5,7 @@ __pycache__/
 .Python
 .coverage
 .coverage.*
-artifacts/coverage/
+artifacts/
 .hypothesis/
 .mypy_cache/
 .nox/

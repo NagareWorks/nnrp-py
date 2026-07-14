@@ -345,8 +345,10 @@ async def serve_quic(
     try:
         yield listener
     finally:
-        await listener._drain_accepted_connections()
-        listener.close()
+        try:
+            await listener._drain_accepted_connections()
+        finally:
+            listener.close()
 
 
 @asynccontextmanager

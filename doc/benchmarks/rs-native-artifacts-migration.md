@@ -18,7 +18,7 @@ delegated to versioned native artifacts.
 
 ## Pinned Native Contract
 
-The current Python package consumes `nnrp-rs` native artifact version `1.0.0-preview.4.1`.
+The current Python package consumes `nnrp-rs` native artifact version `1.0.0-preview.4.2`.
 
 This artifact contract includes:
 

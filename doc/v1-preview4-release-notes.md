@@ -44,6 +44,8 @@ benchmark documents and are not used as preview4 release criteria.
 
 ## Release Gates
 
+- Python `1.0.0rc4.post1` pins Rust `1.0.0-preview.4.2`, including corrected flattened
+  `OBJECT_PATCH` / `OBJECT_DELTA` validation while retaining ABI `1.12.0`.
 - Preview4 native wheels must embed preview4-shaped Rust artifact metadata.
 - Universal wheels are rejected for native preview4 releases.
 - Native hot paths must remain coarse-grained and covered by benchmark smoke thresholds before release.

@@ -4,6 +4,7 @@ import asyncio
 import ctypes
 import json
 import time
+from collections.abc import Callable
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -1330,14 +1331,81 @@ def _write_provider_artifact(root: Path, scope: str, *, slots: list[str] | None 
                 "transport_scope": scope,
                 "transport_slots": slots or [scope],
                 "enabled_features": [f"transport-{scope}"],
-                "provider_cost": {"latency_bias": 1},
-                "provider_preference": {"locality": "node"},
-                "platform_limitations": ["loopback-only"],
+                "provider": _provider_manifest(scope),
             }
         ),
         encoding="utf-8",
     )
     return artifact
+
+
+def _provider_manifest(scope: str) -> dict[str, object]:
+    provider_ids = {
+        "tcp": "nnrp.transport.tcp.native",
+        "quic": "nnrp.transport.quic.native",
+        "ipc": "nnrp.transport.ipc.native",
+        "websocket": "nnrp.transport.websocket.native",
+    }
+    preference_ranks = {"tcp": 2, "quic": 1, "ipc": 0, "websocket": 3}
+    limitations = {
+        "tcp": ["requires-tcp", "native-host-only"],
+        "quic": ["requires-udp", "native-host-only"],
+        "ipc": ["local-host-only", "native-host-only", "unix-domain-socket"],
+        "websocket": ["requires-tcp", "native-host-only"],
+    }
+    return {
+        "id": provider_ids[scope],
+        "cost": {"model_id": 0, "units": "0"},
+        "preference_rank": preference_ranks[scope],
+        "limits": {"max_frame_bytes": "67108864"},
+        "limitations": limitations[scope],
+    }
+
+
+def _provider_metadata(scope: str) -> native_module.NativeTransportProviderMetadata:
+    manifest = _provider_manifest(scope)
+    return native_module.NativeTransportProviderMetadata(
+        id=str(manifest["id"]),
+        cost=native_module.NativeTransportProviderCost(model_id=0, units=0),
+        preference_rank=int(manifest["preference_rank"]),
+        limits=native_module.NativeTransportProviderLimits(max_frame_bytes=67108864),
+        limitations=tuple(
+            native_module.NativeTransportProviderLimitation(value)
+            for value in manifest["limitations"]
+        ),
+    )
+
+
+def _provider_artifact_manifest(scope: str) -> dict[str, object]:
+    return {
+        "package": f"nnrp-ffi-transport-{scope}",
+        "transport_scope": scope,
+        "transport_slots": [scope],
+        "enabled_features": [f"transport-{scope}"],
+        "provider": _provider_manifest(scope),
+    }
+
+
+def _probe_sample(
+    scope: str,
+    *,
+    elapsed_us: int = 1_000,
+    rtt_us: int | None = 1_000,
+    bytes_sent: int = 512,
+    bytes_received: int = 512,
+    timed_out: bool = False,
+    failed: bool = False,
+) -> NativeTransportProbeSample:
+    return NativeTransportProbeSample(
+        provider_id=str(_provider_manifest(scope)["id"]),
+        transport_name=scope,
+        elapsed_us=elapsed_us,
+        rtt_us=rtt_us,
+        bytes_sent=bytes_sent,
+        bytes_received=bytes_received,
+        timed_out=timed_out,
+        failed=failed,
+    )
 
 
 def _write_provider_artifact_with_manifest(root: Path, scope: str, manifest: object) -> Path:
@@ -1366,9 +1434,7 @@ def test_discover_native_transport_providers_reports_preview4_artifact_metadata(
             package="nnrp-ffi-transport-tcp",
             transport_scope="tcp",
             platform_tag="linux-x86_64",
-            cost={"latency_bias": 1},
-            preference={"locality": "node"},
-            limitations=("loopback-only",),
+            metadata=_provider_metadata("tcp"),
         ),
         NativeTransportProvider(
             name="ipc",
@@ -1379,9 +1445,7 @@ def test_discover_native_transport_providers_reports_preview4_artifact_metadata(
             package="nnrp-ffi-transport-ipc",
             transport_scope="ipc",
             platform_tag="linux-x86_64",
-            cost={"latency_bias": 1},
-            preference={"locality": "node"},
-            limitations=("loopback-only",),
+            metadata=_provider_metadata("ipc"),
         ),
         NativeTransportProvider(
             name="websocket",
@@ -1392,14 +1456,12 @@ def test_discover_native_transport_providers_reports_preview4_artifact_metadata(
             package="nnrp-ffi-transport-websocket",
             transport_scope="websocket",
             platform_tag="linux-x86_64",
-            cost={"latency_bias": 1},
-            preference={"locality": "node"},
-            limitations=("loopback-only",),
+            metadata=_provider_metadata("websocket"),
         ),
     )
 
 
-def test_discover_native_transport_provider_all_scope_infers_slots_from_manifest(tmp_path: Path) -> None:
+def test_discover_native_transport_provider_ignores_removed_aggregate_artifact(tmp_path: Path) -> None:
     platform_dir = tmp_path / "linux-x86_64"
     platform_dir.mkdir()
     artifact = platform_dir / "libnnrp_ffi.so"
@@ -1408,18 +1470,7 @@ def test_discover_native_transport_provider_all_scope_infers_slots_from_manifest
 
     providers = discover_native_transport_providers(tmp_path, NativePlatform("linux", "x86_64"))
 
-    assert providers == (
-        NativeTransportProvider(
-            name="tcp",
-            artifact_path=artifact,
-            manifest_path=artifact.with_name("manifest.json"),
-            transport_slots=("tcp", "quic", "ipc", "websocket"),
-            enabled_features=(),
-            package=None,
-            transport_scope="all",
-            platform_tag="linux-x86_64",
-        ),
-    )
+    assert providers == ()
 
 
 def test_resolve_native_transport_provider_rejects_unadvertised_provider(tmp_path: Path) -> None:
@@ -1467,34 +1518,62 @@ def test_discover_native_transport_provider_rejects_invalid_manifest_document(
 @pytest.mark.parametrize(
     ("manifest", "match"),
     [
-        ({"transport_scope": 7}, "transport_scope must be a string"),
-        ({"transport_scope": "stdio"}, "unsupported native transport scope"),
-        ({"transport_scope": "ipc", "transport_slots": []}, "transport_slots must be a non-empty list"),
-        ({"transport_scope": "ipc", "transport_slots": [7]}, "transport_slots entries must be strings"),
-        ({"transport_scope": "ipc", "transport_slots": ["stdio"]}, "unsupported native transport slot"),
+        (_provider_artifact_manifest("ipc") | {"transport_scope": 7}, "transport_scope must be a string"),
+        (_provider_artifact_manifest("ipc") | {"transport_scope": "stdio"}, "unsupported native transport scope"),
+        (_provider_artifact_manifest("ipc") | {"transport_slots": []}, "transport_slots must be a non-empty list"),
+        (_provider_artifact_manifest("ipc") | {"transport_slots": [7]}, "transport_slots entries must be strings"),
+        (_provider_artifact_manifest("ipc") | {"transport_slots": ["stdio"]}, "unsupported native transport slot"),
         (
-            {"transport_scope": "ipc", "transport_slots": ["ipc"], "enabled_features": "transport-ipc"},
+            _provider_artifact_manifest("ipc") | {"enabled_features": "transport-ipc"},
             "enabled_features must be a list",
         ),
         (
-            {"transport_scope": "ipc", "transport_slots": ["ipc"], "enabled_features": [""]},
+            _provider_artifact_manifest("ipc") | {"enabled_features": [""]},
             "enabled_features entries must be non-empty strings",
         ),
+        (_provider_artifact_manifest("ipc") | {"package": ""}, "package must be a non-empty string"),
+        (_provider_artifact_manifest("ipc") | {"provider": []}, "provider must be an object"),
         (
-            {"transport_scope": "ipc", "transport_slots": ["ipc"], "package": ""},
-            "package must be a non-empty string",
+            _provider_artifact_manifest("ipc") | {"provider": _provider_manifest("ipc") | {"id": ""}},
+            "id must be a non-empty string",
         ),
         (
-            {"transport_scope": "ipc", "transport_slots": ["ipc"], "provider_cost": []},
-            "provider_cost must be an object",
+            _provider_artifact_manifest("ipc") | {"provider": _provider_manifest("ipc") | {"cost": []}},
+            "provider.cost must be an object",
         ),
         (
-            {"transport_scope": "ipc", "transport_slots": ["ipc"], "provider_preference": []},
-            "provider_preference must be an object",
+            _provider_artifact_manifest("ipc")
+            | {"provider": _provider_manifest("ipc") | {"cost": {"model_id": True, "units": "0"}}},
+            "model_id must be an integer",
         ),
         (
-            {"transport_scope": "ipc", "transport_slots": ["ipc"], "platform_limitations": "linux"},
-            "platform_limitations must be a list",
+            _provider_artifact_manifest("ipc")
+            | {"provider": _provider_manifest("ipc") | {"cost": {"model_id": 0, "units": "01"}}},
+            "units must be a canonical decimal u64 string",
+        ),
+        (
+            _provider_artifact_manifest("ipc")
+            | {"provider": _provider_manifest("ipc") | {"preference_rank": 65536}},
+            "preference_rank must be an integer",
+        ),
+        (
+            _provider_artifact_manifest("ipc") | {"provider": _provider_manifest("ipc") | {"limits": []}},
+            "provider.limits must be an object",
+        ),
+        (
+            _provider_artifact_manifest("ipc")
+            | {"provider": _provider_manifest("ipc") | {"limits": {"max_frame_bytes": "-1"}}},
+            "max_frame_bytes must be a canonical decimal u64 string",
+        ),
+        (
+            _provider_artifact_manifest("ipc")
+            | {"provider": _provider_manifest("ipc") | {"limitations": "local-host-only"}},
+            "provider.limitations must be a list",
+        ),
+        (
+            _provider_artifact_manifest("ipc")
+            | {"provider": _provider_manifest("ipc") | {"limitations": ["unknown"]}},
+            "unsupported native transport provider limitation",
         ),
     ],
 )
@@ -1643,10 +1722,10 @@ def test_diagnose_nnrp_endpoint_support_reports_missing_provider(tmp_path: Path)
         ),
         selection=None,
         available=False,
-        skip_reason="no native transport providers are advertised by the native artifact",
+        skip_reason="no viable native transport provider after applying policy and remote support",
         diagnostic=(
             "skip nnrp://runtime.example/session/default: "
-            "no native transport providers are advertised by the native artifact"
+            "no viable native transport provider after applying policy and remote support"
         ),
     )
 
@@ -1678,9 +1757,7 @@ def test_diagnose_native_transport_endpoint_support_reports_available_provider(t
             package="nnrp-ffi-transport-websocket",
             transport_scope="websocket",
             platform_tag="linux-x86_64",
-            cost={"latency_bias": 1},
-            preference={"locality": "node"},
-            limitations=("loopback-only",),
+            metadata=_provider_metadata("websocket"),
         ),
         available=True,
         diagnostic="native transport provider 'websocket' exposes websocket",
@@ -1723,8 +1800,9 @@ def test_select_native_transport_provider_selects_single_installed_transport(tmp
     assert selection.selected_transport_name == "tcp"
     assert selection.selected_transport_id is TransportId.TCP
     assert selection.policy is TransportPolicy.AUTO
-    assert selection.rejected == ()
-    assert selection.diagnostic == "single installed transport selected directly"
+    assert selection.candidates[0].selection_rank == 0
+    assert selection.candidates[0].probe_state is native_module.NativeTransportProbeState.NOT_RUN
+    assert selection.diagnostic == "single eligible native transport selected directly"
 
 
 def test_select_native_transport_provider_applies_preview4_policy_order(tmp_path: Path) -> None:
@@ -1733,16 +1811,23 @@ def test_select_native_transport_provider_applies_preview4_policy_order(tmp_path
     _write_provider_artifact(tmp_path, "ipc")
     _write_provider_artifact(tmp_path, "websocket")
 
-    auto = select_native_transport_provider(root=tmp_path, native_platform=NativePlatform("linux", "x86_64"))
+    samples = [_probe_sample(scope) for scope in ("tcp", "quic", "ipc", "websocket")]
+    auto = select_native_transport_provider(
+        root=tmp_path,
+        native_platform=NativePlatform("linux", "x86_64"),
+        probe_samples=samples,
+    )
     preferred_websocket = select_native_transport_provider(
         TransportPolicy.PREFER_WEBSOCKET,
         root=tmp_path,
         native_platform=NativePlatform("linux", "x86_64"),
+        probe_samples=samples,
     )
     preferred_tcp = select_native_transport_provider(
         "prefer-tcp",
         root=tmp_path,
         native_platform=NativePlatform("linux", "x86_64"),
+        probe_samples=samples,
     )
 
     assert auto.selected_transport_id is TransportId.IPC
@@ -1761,8 +1846,27 @@ def test_select_native_transport_provider_rejects_missing_forced_transport(tmp_p
         )
 
 
+def test_select_native_transport_provider_reports_forced_transport_rejection(tmp_path: Path) -> None:
+    _write_provider_artifact(tmp_path, "tcp")
+
+    with pytest.raises(
+        NativeArtifactError,
+        match="forced native transport tcp rejected: peer-unsupported",
+    ) as caught:
+        select_native_transport_provider(
+            TransportPolicy.FORCE_TCP,
+            root=tmp_path,
+            native_platform=NativePlatform("linux", "x86_64"),
+            supported_transports=(TransportId.QUIC,),
+        )
+
+    assert caught.value.candidates[0].rejection_reason is (
+        native_module.NativeTransportRejectionReason.PEER_UNSUPPORTED
+    )
+
+
 def test_select_native_transport_provider_rejects_empty_provider_registry(tmp_path: Path) -> None:
-    with pytest.raises(NativeArtifactError, match="no native transport providers are advertised"):
+    with pytest.raises(NativeArtifactError, match="no viable native transport provider"):
         select_native_transport_provider(root=tmp_path, native_platform=NativePlatform("linux", "x86_64"))
 
 
@@ -1811,21 +1915,16 @@ def test_select_native_transport_provider_reports_remote_unsupported_transport(t
         root=tmp_path,
         native_platform=NativePlatform("linux", "x86_64"),
         supported_transports=(TransportId.TCP, TransportId.QUIC),
+        probe_samples=[_probe_sample("tcp"), _probe_sample("quic")],
     )
 
     assert selection.selected_transport_id is TransportId.QUIC
-    assert selection.rejected == (
-        native_module.NativeTransportRejection(
-            provider_name="ipc",
-            transport_name="ipc",
-            transport_id=TransportId.IPC,
-            reason="remote_unsupported",
-            diagnostic="native transport was not declared by the remote endpoint",
-        ),
-    )
+    ipc = next(candidate for candidate in selection.candidates if candidate.transport_id is TransportId.IPC)
+    assert ipc.rejection_reason is native_module.NativeTransportRejectionReason.PEER_UNSUPPORTED
+    assert ipc.peer_supported is False
 
 
-def test_select_native_transport_provider_scores_probe_samples(tmp_path: Path) -> None:
+def test_select_native_transport_provider_uses_deterministic_probe_metrics(tmp_path: Path) -> None:
     _write_provider_artifact(tmp_path, "tcp")
     _write_provider_artifact(tmp_path, "quic")
     _write_provider_artifact(tmp_path, "ipc")
@@ -1834,26 +1933,26 @@ def test_select_native_transport_provider_scores_probe_samples(tmp_path: Path) -
         root=tmp_path,
         native_platform=NativePlatform("linux", "x86_64"),
         probe_samples=[
-            NativeTransportProbeSample(
-                provider_name="tcp",
-                transport_name="tcp",
+            _probe_sample(
+                "tcp",
                 elapsed_us=1_500,
                 rtt_us=1_500,
                 bytes_sent=128,
                 bytes_received=128,
             ),
-            NativeTransportProbeSample(
-                provider_name="quic",
-                transport_name="quic",
+            _probe_sample(
+                "quic",
                 elapsed_us=800,
                 rtt_us=800,
                 bytes_sent=512,
                 bytes_received=512,
             ),
-            NativeTransportProbeSample(
-                provider_name="ipc",
-                transport_name="ipc",
+            _probe_sample(
+                "ipc",
                 elapsed_us=2_000,
+                rtt_us=None,
+                bytes_sent=0,
+                bytes_received=0,
                 timed_out=True,
                 failed=True,
             ),
@@ -1861,23 +1960,151 @@ def test_select_native_transport_provider_scores_probe_samples(tmp_path: Path) -
     )
 
     assert selection.selected_transport_id is TransportId.QUIC
-    assert selection.selected_probe_score is not None
-    assert selection.selected_probe_score.median_rtt_us == 800
-    assert [candidate.transport_name for candidate in selection.probe_candidates] == ["quic", "tcp"]
-    assert selection.rejected[-1].reason == "probe_failed"
-    assert selection.diagnostic == "native transport selected by probe score"
+    assert selection.candidates[0].probe is not None
+    assert selection.candidates[0].probe.median_rtt_us == 800
+    assert [candidate.transport_name for candidate in selection.candidates[:2]] == ["quic", "tcp"]
+    assert selection.candidates[-1].rejection_reason is native_module.NativeTransportRejectionReason.PROBE_FAILED
+    assert selection.diagnostic == "native transport selected by deterministic probe ordering"
 
 
 def test_select_native_transport_provider_requires_probe_samples_for_probe_mode(tmp_path: Path) -> None:
     _write_provider_artifact(tmp_path, "tcp")
     _write_provider_artifact(tmp_path, "quic")
 
-    with pytest.raises(NativeArtifactError, match="probe_missing"):
+    with pytest.raises(NativeArtifactError, match="no viable native transport provider") as caught:
         select_native_transport_provider(
             root=tmp_path,
             native_platform=NativePlatform("linux", "x86_64"),
             probe_samples=[],
         )
+    assert all(
+        candidate.rejection_reason is native_module.NativeTransportRejectionReason.PROBE_MISSING
+        for candidate in caught.value.candidates
+    )
+
+
+def test_select_native_transport_provider_enforces_requested_frame_limit(tmp_path: Path) -> None:
+    _write_provider_artifact(tmp_path, "tcp")
+
+    with pytest.raises(NativeArtifactError, match="no viable native transport provider") as caught:
+        select_native_transport_provider(
+            root=tmp_path,
+            native_platform=NativePlatform("linux", "x86_64"),
+            requested_max_frame_bytes=67108865,
+        )
+
+    assert len(caught.value.candidates) == 1
+    candidate = caught.value.candidates[0]
+    assert candidate.within_limits is False
+    assert candidate.rejection_reason is native_module.NativeTransportRejectionReason.LIMIT_EXCEEDED
+
+
+def test_select_native_transport_provider_rejects_invalid_requested_frame_limit(tmp_path: Path) -> None:
+    _write_provider_artifact(tmp_path, "tcp")
+
+    with pytest.raises(ValueError, match="requested_max_frame_bytes"):
+        select_native_transport_provider(
+            root=tmp_path,
+            native_platform=NativePlatform("linux", "x86_64"),
+            requested_max_frame_bytes=True,
+        )
+
+
+def test_summarize_native_provider_probe_uses_per_sample_even_medians(tmp_path: Path) -> None:
+    _write_provider_artifact(tmp_path, "tcp")
+    provider = resolve_native_transport_provider(
+        "tcp",
+        root=tmp_path,
+        native_platform=NativePlatform("linux", "x86_64"),
+    )
+
+    metrics = native_module.summarize_native_provider_probe(
+        provider,
+        [
+            _probe_sample("tcp", elapsed_us=1_000, rtt_us=10, bytes_sent=100, bytes_received=0),
+            _probe_sample("tcp", elapsed_us=1_000, rtt_us=20, bytes_sent=300, bytes_received=0),
+            _probe_sample("tcp", elapsed_us=1_000, rtt_us=None, failed=True),
+        ],
+    )
+
+    assert metrics == native_module.NativeTransportProbeMetrics(
+        sample_count=3,
+        success_count=2,
+        median_throughput_bytes_per_sec=200_000,
+        median_rtt_us=15,
+    )
+
+
+def test_select_native_transport_provider_compares_shared_cost_model_before_preference(tmp_path: Path) -> None:
+    tcp_manifest = _provider_artifact_manifest("tcp")
+    tcp_manifest["provider"] = _provider_manifest("tcp") | {
+        "cost": {"model_id": 7, "units": "1"}
+    }
+    ipc_manifest = _provider_artifact_manifest("ipc")
+    ipc_manifest["provider"] = _provider_manifest("ipc") | {
+        "cost": {"model_id": 7, "units": "2"}
+    }
+    _write_provider_artifact_with_manifest(tmp_path, "tcp", tcp_manifest)
+    _write_provider_artifact_with_manifest(tmp_path, "ipc", ipc_manifest)
+
+    selection = select_native_transport_provider(
+        root=tmp_path,
+        native_platform=NativePlatform("linux", "x86_64"),
+        probe_samples=[_probe_sample("tcp"), _probe_sample("ipc")],
+    )
+
+    assert selection.selected_transport_id is TransportId.TCP
+    assert [candidate.selection_rank for candidate in selection.candidates] == [0, 1]
+
+
+@pytest.mark.parametrize(
+    ("constructor", "match"),
+    [
+        (lambda: native_module.NativeTransportProviderCost(model_id=True, units=0), "model_id"),
+        (lambda: native_module.NativeTransportProviderLimits(max_frame_bytes=-1), "max_frame_bytes"),
+        (
+            lambda: native_module.NativeTransportProviderMetadata(
+                id="provider",
+                cost={},  # type: ignore[arg-type]
+                preference_rank=0,
+                limits=native_module.NativeTransportProviderLimits(max_frame_bytes=1),
+                limitations=(),
+            ),
+            "cost",
+        ),
+        (
+            lambda: native_module.NativeTransportProbeMetrics(
+                sample_count=1,
+                success_count=2,
+                median_throughput_bytes_per_sec=1,
+                median_rtt_us=1,
+            ),
+            "success_count",
+        ),
+        (
+            lambda: NativeTransportProbeSample(
+                provider_id="",
+                transport_name="tcp",
+                elapsed_us=1,
+            ),
+            "provider_id",
+        ),
+        (
+            lambda: NativeTransportProbeSample(
+                provider_id="provider",
+                transport_name="auto",
+                elapsed_us=1,
+            ),
+            "transport_name",
+        ),
+    ],
+)
+def test_native_transport_public_models_reject_invalid_values(
+    constructor: Callable[[], object],
+    match: str,
+) -> None:
+    with pytest.raises(ValueError, match=match):
+        constructor()
 
 
 def test_resolve_native_artifact_uses_current_platform_when_not_provided(

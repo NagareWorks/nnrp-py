@@ -8,8 +8,13 @@
   - [x] QUIC.
   - [x] IPC.
   - [x] WebSocket.
-- [x] Report provider cost and preference metadata.
-- [x] Report provider platform limitations.
+- [x] Validate and expose the complete frozen provider metadata object.
+  - [x] Stable provider id.
+  - [x] Typed cost model id and units.
+  - [x] Preference rank.
+  - [x] Maximum frame bytes.
+  - [x] Registered platform limitations.
+- [x] Reject aggregate and legacy provider manifest shapes.
 - [x] Reject provider names that are not advertised by the native artifact.
 - [x] Keep application-facing `nnrp://` / `nnrps://` endpoints separate from provider-local locators.
 
@@ -44,4 +49,9 @@
 - [x] Select the installed transport directly for single-provider installations.
 - [x] Probe installed transports by policy for multi-provider installations.
 - [x] Preserve explicit user transport selection.
-- [x] Surface probe results in diagnostics.
+- [x] Match probe samples by transport id and stable provider id.
+- [x] Compute per-sample throughput and exact odd/even medians.
+- [x] Apply the frozen success, throughput, RTT, cost, preference, transport-id, and provider-id comparator.
+- [x] Surface typed probe metrics and complete ordered candidate diagnostics.
+- [x] Carry complete candidate diagnostics on selection errors.
+- [x] Remove the Python-specific weighted score API.

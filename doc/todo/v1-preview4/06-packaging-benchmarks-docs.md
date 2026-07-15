@@ -12,7 +12,7 @@
 - [x] Keep ctypes diagnostic execution available for environments without the cffi API fast path.
 - [x] Reject universal wheels for native preview4 releases.
 - [x] Verify wheel contents per platform.
-- [x] Require Rust ABI `1.12.0` in the release workflow.
+- [x] Require Rust ABI `1.12.1` in the release workflow.
 
 ## Benchmarks
 
@@ -40,5 +40,6 @@
 - [x] Run adapter conformance.
 - [x] Run wire conformance dry-run.
 - [x] Run native wheel inspection.
+- [x] Run real bidirectional complete-packet IPC and WebSocket loopbacks against packaged artifacts.
 - [x] Run benchmark smoke thresholds.
 - [x] Publish only after platform wheel checks pass.

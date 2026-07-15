@@ -31,6 +31,8 @@
 - [x] Add Python endpoint model for `npipe://`.
 - [x] Bind native IPC provider connect.
 - [x] Bind native IPC provider listen.
+- [x] Exchange ordered batches of complete NNRP packets through the IPC artifact FFI.
+- [x] Release Rust-owned receive and listener-endpoint buffers exactly once.
 - [x] Add loopback smoke tests against preview4 Rust IPC artifacts.
 - [x] Add diagnostic skip behavior when the native artifact does not expose IPC.
 
@@ -40,6 +42,8 @@
 - [x] Add Python endpoint model for `wss://`.
 - [x] Bind native WebSocket provider connect.
 - [x] Bind native WebSocket provider listen.
+- [x] Exchange ordered batches of complete NNRP packets through the WebSocket artifact FFI.
+- [x] Keep blocking carrier operations off the Python event-loop thread.
 - [x] Add binary-frame-only validation.
 - [x] Add loopback smoke tests against preview4 Rust WebSocket artifacts.
 - [x] Add diagnostic skip behavior when the native artifact does not expose WebSocket.
@@ -55,3 +59,11 @@
 - [x] Surface typed probe metrics and complete ordered candidate diagnostics.
 - [x] Carry complete candidate diagnostics on selection errors.
 - [x] Remove the Python-specific weighted score API.
+
+## Public Binding Surface
+
+- [x] Expose one `NativeTransportBinding` per transport-scoped Rust artifact.
+- [x] Expose typed connection and listener wrappers instead of raw native handles.
+- [x] Expose typed client and server security configuration objects.
+- [x] Make connection and listener close idempotent.
+- [x] Reject provider-local endpoint locators that do not match the owning artifact.

@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import asyncio
 import sys
+from dataclasses import dataclass
 from importlib.util import module_from_spec, spec_from_file_location
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -18,91 +21,169 @@ smoke_native_transport_artifacts = _MODULE.smoke_native_transport_artifacts
 smoke_native_transport_artifacts_main = _MODULE.main
 
 
-class FakeClient:
-    def __init__(self, calls: list[tuple[str, object]]) -> None:
-        self.calls = calls
-
-    def bind_server(self, *, server_id: int, generation: int, transport_id: int):
-        self.calls.append(("bind", (server_id, generation, transport_id)))
-        return FakeServer(self.calls, server_id)
+@dataclass(frozen=True)
+class FakeEndpoint:
+    uri: str
 
 
-class FakeServer:
-    def __init__(self, calls: list[tuple[str, object]], server_id: int) -> None:
-        self.calls = calls
-        self.server_id = server_id
+class FakeConnection:
+    def __init__(self, received: tuple[bytes, ...]) -> None:
+        self.received = received
+        self.sent: list[bytes] = []
+        self.closed = False
 
-    def accept_session(
-        self,
-        *,
-        session_id: int,
-        generation: int,
-        profile_id: int,
-        schema_id: int,
-        schema_version: int,
-    ):
-        self.calls.append(("accept", (self.server_id, session_id, generation, profile_id, schema_id, schema_version)))
-        return FakeSession(self.calls, session_id)
+    async def send(self, packet: bytes) -> None:
+        self.sent.append(packet)
 
-    def close(self) -> None:
-        self.calls.append(("close_server", self.server_id))
+    async def receive(self, *, max_packets: int, timeout_ms: int) -> tuple[bytes, ...]:
+        assert max_packets == 1
+        assert timeout_ms == 10_000
+        return self.received
+
+    async def close(self) -> None:
+        self.closed = True
 
 
-class FakeSession:
-    def __init__(self, calls: list[tuple[str, object]], session_id: int) -> None:
-        self.calls = calls
-        self.session_id = session_id
+class FakeListener:
+    def __init__(self, endpoint: str, connection: FakeConnection) -> None:
+        self.endpoint = FakeEndpoint(endpoint)
+        self.connection = connection
+        self.closed = False
 
-    def receive_submit(self, *, operation_id: int, frame_id: int, payload: bytes):
-        self.calls.append(("receive_submit", (self.session_id, operation_id, frame_id, payload)))
-        return FakeOperation(self.calls, operation_id)
+    async def accept(self, *, timeout_ms: int) -> FakeConnection:
+        assert timeout_ms == 10_000
+        return self.connection
 
-    def send_flow_update(self, *, frame_id: int) -> None:
-        self.calls.append(("send_flow_update", (self.session_id, frame_id)))
-
-    def close(self) -> None:
-        self.calls.append(("close_session", self.session_id))
+    async def close(self) -> None:
+        self.closed = True
 
 
-class FakeOperation:
-    def __init__(self, calls: list[tuple[str, object]], operation_id: int) -> None:
-        self.calls = calls
-        self.operation_id = operation_id
+class FakeReachableBinding:
+    kind = "websocket"
 
-    def send_result(self, payload: bytes) -> None:
-        self.calls.append(("send_result", (self.operation_id, payload)))
+    def __init__(self, *, client_received: tuple[bytes, ...], server_received: tuple[bytes, ...]) -> None:
+        self.client = FakeConnection(client_received)
+        self.server = FakeConnection(server_received)
+        self.listener = FakeListener("ws://127.0.0.1:43123/nnrp", self.server)
+
+    async def listen(self, endpoint: str, *, timeout_ms: int) -> FakeListener:
+        assert endpoint == "ws://127.0.0.1:0/nnrp"
+        assert timeout_ms == 10_000
+        return self.listener
+
+    async def connect(self, endpoint: FakeEndpoint, *, timeout_ms: int) -> FakeConnection:
+        assert endpoint == self.listener.endpoint
+        assert timeout_ms == 10_000
+        return self.client
+
+
+class FakeConnectFailureBinding(FakeReachableBinding):
+    async def connect(self, endpoint: FakeEndpoint, *, timeout_ms: int) -> FakeConnection:
+        await super().connect(endpoint, timeout_ms=timeout_ms)
+        await asyncio.sleep(0)
+        raise _MODULE.NativeArtifactError("connect failed")
 
 
 def test_smoke_native_transport_artifacts_routes_ipc_and_websocket(monkeypatch: pytest.MonkeyPatch) -> None:
-    calls: list[tuple[str, object]] = []
-    loaded: list[tuple[Path | None, str]] = []
+    loaded: list[tuple[str, Path | None]] = []
 
-    def fake_load_native_client(*, root=None, transport: str):
-        loaded.append((root, transport))
-        return FakeClient(calls)
+    class FakeBinding:
+        def __init__(self, kind: str) -> None:
+            self.kind = kind
 
-    monkeypatch.setattr(_MODULE, "load_native_client", fake_load_native_client)
+    def fake_load_native_transport_binding(transport: str, *, root=None):
+        loaded.append((transport, root))
+        return FakeBinding(transport)
+
+    async def fake_smoke_binding(binding, endpoint: str, index: int):
+        return NativeTransportSmokeResult(binding.kind, f"{endpoint}/{index}", 2)
+
+    monkeypatch.setattr(_MODULE, "load_native_transport_binding", fake_load_native_transport_binding)
+    monkeypatch.setattr(_MODULE, "_smoke_endpoint", lambda transport, _index: f"{transport}://loopback")
+    monkeypatch.setattr(_MODULE, "_smoke_binding", fake_smoke_binding)
 
     results = smoke_native_transport_artifacts(root=Path("native-root"))
 
     assert results == (
-        NativeTransportSmokeResult("ipc", 40_100, 40_101, 40_102),
-        NativeTransportSmokeResult("websocket", 40_200, 40_201, 40_202),
+        NativeTransportSmokeResult("ipc", "ipc://loopback/1", 2),
+        NativeTransportSmokeResult("websocket", "websocket://loopback/2", 2),
     )
-    assert loaded == [(Path("native-root"), "ipc"), (Path("native-root"), "websocket")]
-    assert calls[0] == ("bind", (40_100, 1, int(_MODULE.NATIVE_TRANSPORT_ID_BY_NAME["ipc"])))
-    assert calls[1] == ("accept", (40_100, 40_101, 1, 2, 0x1001, 1))
-    assert calls[2] == ("receive_submit", (40_101, 40_102, 1, b"preview4-native-transport-smoke"))
-    assert calls[3] == ("send_result", (40_102, b"preview4-native-transport-smoke"))
-    assert calls[4] == ("send_flow_update", (40_101, 1))
-    assert calls[5] == ("close_session", 40_101)
-    assert calls[6] == ("close_server", 40_100)
-    assert calls[7] == ("bind", (40_200, 1, int(_MODULE.NATIVE_TRANSPORT_ID_BY_NAME["websocket"])))
+    assert loaded == [("ipc", Path("native-root")), ("websocket", Path("native-root"))]
 
 
 def test_smoke_native_transport_artifacts_rejects_unknown_transport() -> None:
     with pytest.raises(_MODULE.NativeArtifactError, match="unsupported native transport smoke target"):
         smoke_native_transport_artifacts(transports=["stdio"])
+
+
+@pytest.mark.asyncio
+async def test_smoke_binding_exchanges_packets_and_closes_all_handles() -> None:
+    ping = _MODULE.build_ping_packet(session_id=7, trace_id=7).pack()
+    pong = _MODULE.build_pong_packet(session_id=7, trace_id=7).pack()
+    binding = FakeReachableBinding(client_received=(pong,), server_received=(ping,))
+
+    result = await _MODULE._smoke_binding(binding, "ws://127.0.0.1:0/nnrp", 7)
+
+    assert result == NativeTransportSmokeResult("websocket", "ws://127.0.0.1:43123/nnrp", 2)
+    assert binding.client.sent == [ping]
+    assert binding.server.sent == [pong]
+    assert binding.client.closed
+    assert binding.server.closed
+    assert binding.listener.closed
+
+
+@pytest.mark.asyncio
+async def test_smoke_binding_rejects_mismatched_packet_and_still_closes() -> None:
+    binding = FakeReachableBinding(client_received=(), server_received=(b"wrong-packet",))
+
+    with pytest.raises(_MODULE.NativeArtifactError, match="server received a different"):
+        await _MODULE._smoke_binding(binding, "ws://127.0.0.1:0/nnrp", 8)
+
+    assert binding.client.closed
+    assert binding.server.closed
+    assert binding.listener.closed
+
+
+@pytest.mark.asyncio
+async def test_smoke_binding_rejects_mismatched_client_packet_and_still_closes() -> None:
+    ping = _MODULE.build_ping_packet(session_id=9, trace_id=9).pack()
+    binding = FakeReachableBinding(client_received=(b"wrong-packet",), server_received=(ping,))
+
+    with pytest.raises(_MODULE.NativeArtifactError, match="client received a different"):
+        await _MODULE._smoke_binding(binding, "ws://127.0.0.1:0/nnrp", 9)
+
+    assert binding.client.closed
+    assert binding.server.closed
+    assert binding.listener.closed
+
+
+@pytest.mark.asyncio
+async def test_smoke_binding_closes_an_accepted_connection_when_connect_fails() -> None:
+    binding = FakeConnectFailureBinding(client_received=(), server_received=())
+
+    with pytest.raises(_MODULE.NativeArtifactError, match="connect failed"):
+        await _MODULE._smoke_binding(binding, "ws://127.0.0.1:0/nnrp", 10)
+
+    assert not binding.client.closed
+    assert binding.server.closed
+    assert binding.listener.closed
+
+
+def test_smoke_endpoint_selects_websocket_and_platform_ipc_schemes(monkeypatch: pytest.MonkeyPatch) -> None:
+    assert _MODULE._smoke_endpoint("websocket", 1) == "ws://127.0.0.1:0/nnrp"
+
+    monkeypatch.setattr(_MODULE, "current_native_platform", lambda: SimpleNamespace(os_name="windows"))
+    windows_endpoint = _MODULE._smoke_endpoint("ipc", 2)
+    assert windows_endpoint.startswith("npipe://nnrp-py-smoke-")
+    assert windows_endpoint.endswith("-2")
+
+    monkeypatch.setattr(_MODULE, "current_native_platform", lambda: SimpleNamespace(os_name="linux"))
+    unix_endpoint = _MODULE._smoke_endpoint("ipc", 3)
+    assert unix_endpoint.startswith("unix://")
+    assert unix_endpoint.endswith("-3.sock")
+
+    with pytest.raises(_MODULE.NativeArtifactError, match="does not define a loopback endpoint"):
+        _MODULE._smoke_endpoint("tcp", 4)
 
 
 def test_smoke_native_transport_artifacts_cli_uses_default_transports(
@@ -113,8 +194,8 @@ def test_smoke_native_transport_artifacts_cli_uses_default_transports(
         _MODULE,
         "smoke_native_transport_artifacts",
         lambda root, transports: (
-            NativeTransportSmokeResult(transports[0], 1, 2, 3),
-            NativeTransportSmokeResult(transports[1], 4, 5, 6),
+            NativeTransportSmokeResult(transports[0], "npipe://smoke", 2),
+            NativeTransportSmokeResult(transports[1], "ws://127.0.0.1:1/nnrp", 2),
         ),
     )
     monkeypatch.setattr(sys, "argv", ["smoke_native_transport_artifacts.py", "--root", "native-root"])
@@ -122,5 +203,5 @@ def test_smoke_native_transport_artifacts_cli_uses_default_transports(
     assert smoke_native_transport_artifacts_main() == 0
 
     output = capsys.readouterr().out
-    assert "smoked native transport ipc: server=1 session=2 operation=3" in output
-    assert "smoked native transport websocket: server=4 session=5 operation=6" in output
+    assert "smoked native transport ipc: endpoint=npipe://smoke packets=2" in output
+    assert "smoked native transport websocket: endpoint=ws://127.0.0.1:1/nnrp packets=2" in output

@@ -8,7 +8,8 @@ import importlib
 import json
 import os
 import platform
-from collections.abc import AsyncIterator, Callable, Mapping
+import threading
+from collections.abc import AsyncIterator, Callable, Iterable, Mapping
 from dataclasses import dataclass, field, replace
 from enum import IntFlag, StrEnum
 from functools import cmp_to_key
@@ -253,6 +254,9 @@ HANDLE_KIND_SCHEMA_REGISTRY = 6
 HANDLE_KIND_CACHE_LEASE = 7
 HANDLE_KIND_OBJECT_DESCRIPTOR = 8
 HANDLE_KIND_CACHE_REFERENCE_DESCRIPTOR = 9
+HANDLE_KIND_TRANSPORT_CONNECTION = 10
+HANDLE_KIND_TRANSPORT_LISTENER = 11
+HANDLE_KIND_TRANSPORT_SECURITY_CONFIG = 12
 EVENT_KIND_NONE = 0
 EVENT_KIND_CONNECTION_OPENED = 1
 EVENT_KIND_SESSION_OPENED = 2
@@ -396,6 +400,30 @@ class NativeTransportProvider:
     transport_scope: str
     platform_tag: str
     metadata: NativeTransportProviderMetadata
+
+
+@dataclass(frozen=True)
+class NativeTransportClientSecurity:
+    server_name: str
+    trusted_certificate_der: bytes
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.server_name, str) or not self.server_name:
+            raise ValueError("server_name must be non-empty")
+        if not isinstance(self.trusted_certificate_der, bytes) or not self.trusted_certificate_der:
+            raise ValueError("trusted_certificate_der must be non-empty")
+
+
+@dataclass(frozen=True)
+class NativeTransportServerSecurity:
+    certificate_der: bytes
+    private_key_pkcs8_der: bytes
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.certificate_der, bytes) or not self.certificate_der:
+            raise ValueError("certificate_der must be non-empty")
+        if not isinstance(self.private_key_pkcs8_der, bytes) or not self.private_key_pkcs8_der:
+            raise ValueError("private_key_pkcs8_der must be non-empty")
 
 
 @dataclass(frozen=True)
@@ -1251,6 +1279,88 @@ class _NnrpSessionResumeRequest(ctypes.Structure):
     ]
 
 
+class _NnrpTransportOpenRequest(ctypes.Structure):
+    _fields_ = [
+        ("transport_id", ctypes.c_uint32),
+        ("flags", ctypes.c_uint32),
+        ("endpoint", _NnrpBufferView),
+        ("config", _NnrpHandle),
+        ("max_packet_bytes", ctypes.c_uint64),
+        ("timeout_ms", ctypes.c_uint32),
+        ("reserved0", ctypes.c_uint32),
+    ]
+
+
+class _NnrpTransportAcceptRequest(ctypes.Structure):
+    _fields_ = [
+        ("listener", _NnrpHandle),
+        ("timeout_ms", ctypes.c_uint32),
+        ("reserved0", ctypes.c_uint32),
+    ]
+
+
+class _NnrpTransportWriteBatchRequest(ctypes.Structure):
+    _fields_ = [
+        ("connection", _NnrpHandle),
+        ("frames", ctypes.POINTER(_NnrpBufferView)),
+        ("frame_count", ctypes.c_uint32),
+        ("flags", ctypes.c_uint32),
+    ]
+
+
+class _NnrpTransportReadBatchRequest(ctypes.Structure):
+    _fields_ = [
+        ("connection", _NnrpHandle),
+        ("max_frames", ctypes.c_uint32),
+        ("timeout_ms", ctypes.c_uint32),
+        ("max_bytes", ctypes.c_uint64),
+    ]
+
+
+class _NnrpTransportFrameBatch(ctypes.Structure):
+    _fields_ = [
+        ("payload_owner", _NnrpHandle),
+        ("payload", _NnrpBufferView),
+        ("frame_count", ctypes.c_uint32),
+        ("reserved0", ctypes.c_uint32),
+    ]
+
+
+class _NnrpTransportProbeRequest(ctypes.Structure):
+    _fields_ = [
+        ("open", _NnrpTransportOpenRequest),
+        ("sample_count", ctypes.c_uint32),
+        ("probe_payload_bytes", ctypes.c_uint32),
+    ]
+
+
+class _NnrpTransportProbeResult(ctypes.Structure):
+    _fields_ = [
+        ("sample_count", ctypes.c_uint32),
+        ("success_count", ctypes.c_uint32),
+        ("median_throughput_bytes_per_second", ctypes.c_uint64),
+        ("median_rtt_microseconds", ctypes.c_uint64),
+    ]
+
+
+class _NnrpTransportClientSecurityConfigRequest(ctypes.Structure):
+    _fields_ = [
+        ("transport_id", ctypes.c_uint32),
+        ("flags", ctypes.c_uint32),
+        ("server_name", _NnrpBufferView),
+        ("trusted_certificate_der", _NnrpBufferView),
+    ]
+
+
+class _NnrpTransportServerSecurityConfigRequest(ctypes.Structure):
+    _fields_ = [
+        ("transport_id", ctypes.c_uint32),
+        ("flags", ctypes.c_uint32),
+        ("certificate_der", _NnrpBufferView),
+        ("private_key_pkcs8_der", _NnrpBufferView),
+    ]
+
+
 class NativeRuntimeEntrypoints:
     """ctypes entrypoint table for the frozen Rust runtime ABI."""
 
@@ -1579,6 +1689,481 @@ class NativeRuntimeEntrypoints:
     @property
     def binding_mode(self) -> str:
         return "cffi_api" if self.cffi_submit_result_api is not None else "ctypes"
+
+
+class _NativeTransportEntrypoints:
+    """ctypes entrypoint table for complete-packet native transport I/O."""
+
+    def __init__(self, library: Any, *, artifact_path: Path | None = None) -> None:
+        self.artifact_path = artifact_path
+        self.client_security_config_create = _bind_native_function(
+            library,
+            "nnrp_transport_client_security_config_create",
+            _NnrpFfiStatus,
+            [_NnrpTransportClientSecurityConfigRequest, ctypes.POINTER(_NnrpHandle)],
+        )
+        self.server_security_config_create = _bind_native_function(
+            library,
+            "nnrp_transport_server_security_config_create",
+            _NnrpFfiStatus,
+            [_NnrpTransportServerSecurityConfigRequest, ctypes.POINTER(_NnrpHandle)],
+        )
+        self.probe = _bind_native_function(
+            library,
+            "nnrp_transport_probe",
+            _NnrpFfiStatus,
+            [_NnrpTransportProbeRequest, ctypes.POINTER(_NnrpTransportProbeResult)],
+        )
+        self.connect = _bind_native_function(
+            library,
+            "nnrp_transport_connect",
+            _NnrpFfiStatus,
+            [_NnrpTransportOpenRequest, ctypes.POINTER(_NnrpHandle)],
+        )
+        self.listen = _bind_native_function(
+            library,
+            "nnrp_transport_listen",
+            _NnrpFfiStatus,
+            [_NnrpTransportOpenRequest, ctypes.POINTER(_NnrpHandle)],
+        )
+        self.accept = _bind_native_function(
+            library,
+            "nnrp_transport_accept",
+            _NnrpFfiStatus,
+            [_NnrpTransportAcceptRequest, ctypes.POINTER(_NnrpHandle)],
+        )
+        self.listener_endpoint = _bind_native_function(
+            library,
+            "nnrp_transport_listener_endpoint",
+            _NnrpFfiStatus,
+            [_NnrpHandle, ctypes.POINTER(_NnrpHandle), ctypes.POINTER(_NnrpBufferView)],
+        )
+        self.write_batch = _bind_native_function(
+            library,
+            "nnrp_transport_write_batch",
+            _NnrpFfiStatus,
+            [_NnrpTransportWriteBatchRequest],
+        )
+        self.read_batch = _bind_native_function(
+            library,
+            "nnrp_transport_read_batch",
+            _NnrpFfiStatus,
+            [_NnrpTransportReadBatchRequest, ctypes.POINTER(_NnrpTransportFrameBatch)],
+        )
+        self.close = _bind_native_function(
+            library,
+            "nnrp_transport_close",
+            _NnrpFfiStatus,
+            [_NnrpHandle],
+        )
+        self.buffer_release = _bind_native_function(
+            library,
+            "nnrp_buffer_release",
+            _NnrpFfiStatus,
+            [_NnrpHandle],
+        )
+
+
+class NativeTransportConnection:
+    """One native carrier connection exchanging complete NNRP packets."""
+
+    def __init__(
+        self,
+        entrypoints: _NativeTransportEntrypoints,
+        provider: NativeTransportProvider,
+        endpoint: NativeTransportEndpoint,
+        handle: NativeHandle,
+    ) -> None:
+        handle.require_kind(HANDLE_KIND_TRANSPORT_CONNECTION)
+        self._entrypoints = entrypoints
+        self._provider = provider
+        self._endpoint = endpoint
+        self._handle = handle
+        self._closed = False
+        self._lock = threading.Lock()
+
+    @property
+    def kind(self) -> str:
+        return self._provider.name
+
+    @property
+    def endpoint(self) -> NativeTransportEndpoint:
+        return self._endpoint
+
+    @property
+    def connected(self) -> bool:
+        return not self._closed
+
+    async def send(
+        self,
+        packets: bytes | bytearray | memoryview | Iterable[bytes | bytearray | memoryview],
+    ) -> None:
+        await asyncio.to_thread(self._send, packets)
+
+    def _send(
+        self,
+        packets: bytes | bytearray | memoryview | Iterable[bytes | bytearray | memoryview],
+    ) -> None:
+        payloads = _normalize_transport_packets(packets)
+        with self._lock:
+            self._require_open()
+            views_and_owners = tuple(_buffer_view_from_payload(payload) for payload in payloads)
+            views = (_NnrpBufferView * len(views_and_owners))(*(item[0] for item in views_and_owners))
+            status = self._entrypoints.write_batch(
+                _NnrpTransportWriteBatchRequest(self._handle.to_ffi(), views, len(views_and_owners), 0)
+            )
+            _raise_for_native_ffi_status(status)
+
+    async def receive(
+        self,
+        *,
+        max_packets: int = 0,
+        max_bytes: int = 0,
+        timeout_ms: int = 0,
+    ) -> tuple[bytes, ...]:
+        return await asyncio.to_thread(
+            self._receive,
+            max_packets=max_packets,
+            max_bytes=max_bytes,
+            timeout_ms=timeout_ms,
+        )
+
+    def _receive(self, *, max_packets: int, max_bytes: int, timeout_ms: int) -> tuple[bytes, ...]:
+        _require_bounded_integer("max_packets", max_packets, 0xFFFFFFFF)
+        _require_bounded_integer("max_bytes", max_bytes, 0xFFFFFFFFFFFFFFFF)
+        _require_bounded_integer("timeout_ms", timeout_ms, 0xFFFFFFFF)
+        with self._lock:
+            self._require_open()
+            batch = _NnrpTransportFrameBatch()
+            status = self._entrypoints.read_batch(
+                _NnrpTransportReadBatchRequest(
+                    self._handle.to_ffi(),
+                    max_packets,
+                    timeout_ms,
+                    max_bytes,
+                ),
+                ctypes.byref(batch),
+            )
+            _raise_for_native_ffi_status(status)
+            owner = NativeHandle.from_ffi(batch.payload_owner)
+            try:
+                encoded = _copy_buffer_view(batch.payload)
+                return _decode_transport_packet_batch(encoded, int(batch.frame_count))
+            finally:
+                if owner.is_valid:
+                    owner.require_kind(HANDLE_KIND_BUFFER)
+                    _raise_for_native_ffi_status(self._entrypoints.buffer_release(owner.to_ffi()))
+
+    async def close(self) -> None:
+        await asyncio.to_thread(self._close)
+
+    def _close(self) -> None:
+        with self._lock:
+            if self._closed:
+                return
+            _raise_for_native_ffi_status(self._entrypoints.close(self._handle.to_ffi()))
+            self._closed = True
+
+    def _require_open(self) -> None:
+        if self._closed:
+            raise NativeInvalidStateError(
+                NativeStatus(FFI_STATUS_INVALID_STATE), "native transport connection is closed"
+            )
+
+
+class NativeTransportListener:
+    """One native carrier listener that accepts complete-packet connections."""
+
+    def __init__(
+        self,
+        entrypoints: _NativeTransportEntrypoints,
+        provider: NativeTransportProvider,
+        endpoint: NativeTransportEndpoint,
+        handle: NativeHandle,
+    ) -> None:
+        handle.require_kind(HANDLE_KIND_TRANSPORT_LISTENER)
+        self._entrypoints = entrypoints
+        self._provider = provider
+        self._endpoint = endpoint
+        self._handle = handle
+        self._closed = False
+        self._lock = threading.Lock()
+
+    @property
+    def kind(self) -> str:
+        return self._provider.name
+
+    @property
+    def endpoint(self) -> NativeTransportEndpoint:
+        return self._endpoint
+
+    @property
+    def listening(self) -> bool:
+        return not self._closed
+
+    async def accept(self, *, timeout_ms: int = 0) -> NativeTransportConnection:
+        return await asyncio.to_thread(self._accept, timeout_ms)
+
+    def _accept(self, timeout_ms: int) -> NativeTransportConnection:
+        _require_bounded_integer("timeout_ms", timeout_ms, 0xFFFFFFFF)
+        with self._lock:
+            self._require_open()
+            output = _NnrpHandle()
+            status = self._entrypoints.accept(
+                _NnrpTransportAcceptRequest(self._handle.to_ffi(), timeout_ms, 0),
+                ctypes.byref(output),
+            )
+            _raise_for_native_ffi_status(status)
+            return NativeTransportConnection(
+                self._entrypoints,
+                self._provider,
+                self._endpoint,
+                NativeHandle.from_ffi(output),
+            )
+
+    async def close(self) -> None:
+        await asyncio.to_thread(self._close)
+
+    def _close(self) -> None:
+        with self._lock:
+            if self._closed:
+                return
+            _raise_for_native_ffi_status(self._entrypoints.close(self._handle.to_ffi()))
+            self._closed = True
+
+    def _require_open(self) -> None:
+        if self._closed:
+            raise NativeInvalidStateError(NativeStatus(FFI_STATUS_INVALID_STATE), "native transport listener is closed")
+
+
+class NativeTransportBinding:
+    """Host-facing binding for one transport-scoped Rust artifact."""
+
+    def __init__(self, entrypoints: _NativeTransportEntrypoints, provider: NativeTransportProvider) -> None:
+        if provider.name not in provider.transport_slots:
+            raise NativeArtifactError(f"native provider {provider.name!r} does not own its transport slot")
+        self.entrypoints = entrypoints
+        self.provider = provider
+
+    @property
+    def kind(self) -> str:
+        return self.provider.name
+
+    async def probe(
+        self,
+        endpoint: str | NativeTransportEndpoint,
+        *,
+        security: NativeTransportClientSecurity | None = None,
+        sample_count: int = 0,
+        probe_payload_bytes: int = 0,
+        max_packet_bytes: int = 0,
+        timeout_ms: int = 0,
+    ) -> NativeTransportProbeMetrics:
+        return await asyncio.to_thread(
+            self._probe,
+            endpoint,
+            security,
+            sample_count,
+            probe_payload_bytes,
+            max_packet_bytes,
+            timeout_ms,
+        )
+
+    def _probe(
+        self,
+        endpoint: str | NativeTransportEndpoint,
+        security: NativeTransportClientSecurity | None,
+        sample_count: int,
+        probe_payload_bytes: int,
+        max_packet_bytes: int,
+        timeout_ms: int,
+    ) -> NativeTransportProbeMetrics:
+        _require_bounded_integer("sample_count", sample_count, 0xFFFFFFFF)
+        _require_bounded_integer("probe_payload_bytes", probe_payload_bytes, 0xFFFFFFFF)
+        parsed = self._endpoint(endpoint)
+        config = self._client_security_config(security)
+        try:
+            request, _owner = self._open_request(parsed, config, max_packet_bytes, timeout_ms)
+            result = _NnrpTransportProbeResult()
+            status = self.entrypoints.probe(
+                _NnrpTransportProbeRequest(request, sample_count, probe_payload_bytes),
+                ctypes.byref(result),
+            )
+            _raise_for_native_ffi_status(status)
+            return NativeTransportProbeMetrics(
+                sample_count=int(result.sample_count),
+                success_count=int(result.success_count),
+                median_throughput_bytes_per_sec=int(result.median_throughput_bytes_per_second),
+                median_rtt_us=int(result.median_rtt_microseconds),
+            )
+        finally:
+            self._close_config(config)
+
+    async def connect(
+        self,
+        endpoint: str | NativeTransportEndpoint,
+        *,
+        security: NativeTransportClientSecurity | None = None,
+        max_packet_bytes: int = 0,
+        timeout_ms: int = 0,
+    ) -> NativeTransportConnection:
+        return await asyncio.to_thread(
+            self._connect,
+            endpoint,
+            security,
+            max_packet_bytes,
+            timeout_ms,
+        )
+
+    def _connect(
+        self,
+        endpoint: str | NativeTransportEndpoint,
+        security: NativeTransportClientSecurity | None,
+        max_packet_bytes: int,
+        timeout_ms: int,
+    ) -> NativeTransportConnection:
+        parsed = self._endpoint(endpoint)
+        config = self._client_security_config(security)
+        try:
+            request, _owner = self._open_request(parsed, config, max_packet_bytes, timeout_ms)
+            output = _NnrpHandle()
+            _raise_for_native_ffi_status(self.entrypoints.connect(request, ctypes.byref(output)))
+            return NativeTransportConnection(
+                self.entrypoints,
+                self.provider,
+                parsed,
+                NativeHandle.from_ffi(output),
+            )
+        finally:
+            self._close_config(config)
+
+    async def listen(
+        self,
+        endpoint: str | NativeTransportEndpoint,
+        *,
+        security: NativeTransportServerSecurity | None = None,
+        max_packet_bytes: int = 0,
+        timeout_ms: int = 0,
+    ) -> NativeTransportListener:
+        return await asyncio.to_thread(
+            self._listen,
+            endpoint,
+            security,
+            max_packet_bytes,
+            timeout_ms,
+        )
+
+    def _listen(
+        self,
+        endpoint: str | NativeTransportEndpoint,
+        security: NativeTransportServerSecurity | None,
+        max_packet_bytes: int,
+        timeout_ms: int,
+    ) -> NativeTransportListener:
+        parsed = self._endpoint(endpoint)
+        config = self._server_security_config(security)
+        try:
+            request, _owner = self._open_request(parsed, config, max_packet_bytes, timeout_ms)
+            output = _NnrpHandle()
+            _raise_for_native_ffi_status(self.entrypoints.listen(request, ctypes.byref(output)))
+            handle = NativeHandle.from_ffi(output)
+            try:
+                bound_endpoint = self._listener_endpoint(handle)
+            except BaseException:
+                _raise_for_native_ffi_status(self.entrypoints.close(handle.to_ffi()))
+                raise
+            return NativeTransportListener(self.entrypoints, self.provider, bound_endpoint, handle)
+        finally:
+            self._close_config(config)
+
+    def _endpoint(self, endpoint: str | NativeTransportEndpoint) -> NativeTransportEndpoint:
+        parsed = (
+            endpoint if isinstance(endpoint, NativeTransportEndpoint) else parse_native_transport_endpoint(endpoint)
+        )
+        if parsed.transport_name != self.provider.name:
+            raise NativeArtifactError(
+                f"native provider {self.provider.name!r} cannot open {parsed.transport_name!r} endpoint"
+            )
+        return parsed
+
+    def _open_request(
+        self,
+        endpoint: NativeTransportEndpoint,
+        config: NativeHandle,
+        max_packet_bytes: int,
+        timeout_ms: int,
+    ) -> tuple[_NnrpTransportOpenRequest, object | None]:
+        _require_bounded_integer("max_packet_bytes", max_packet_bytes, 0xFFFFFFFFFFFFFFFF)
+        _require_bounded_integer("timeout_ms", timeout_ms, 0xFFFFFFFF)
+        view, owner = _buffer_view_from_payload(endpoint.uri.encode("utf-8"))
+        return (
+            _NnrpTransportOpenRequest(
+                int(endpoint.transport_id),
+                0,
+                view,
+                config.to_ffi(),
+                max_packet_bytes,
+                timeout_ms,
+                0,
+            ),
+            owner,
+        )
+
+    def _listener_endpoint(self, listener: NativeHandle) -> NativeTransportEndpoint:
+        owner = _NnrpHandle()
+        view = _NnrpBufferView()
+        _raise_for_native_ffi_status(
+            self.entrypoints.listener_endpoint(listener.to_ffi(), ctypes.byref(owner), ctypes.byref(view))
+        )
+        owner_handle = NativeHandle.from_ffi(owner)
+        try:
+            return self._endpoint(_copy_buffer_view(view).decode("utf-8"))
+        finally:
+            if owner_handle.is_valid:
+                owner_handle.require_kind(HANDLE_KIND_BUFFER)
+                _raise_for_native_ffi_status(self.entrypoints.buffer_release(owner_handle.to_ffi()))
+
+    def _client_security_config(self, security: NativeTransportClientSecurity | None) -> NativeHandle:
+        if security is None:
+            return NativeHandle.invalid()
+        server_name, _server_owner = _buffer_view_from_payload(security.server_name.encode("utf-8"))
+        certificate, _certificate_owner = _buffer_view_from_payload(security.trusted_certificate_der)
+        output = _NnrpHandle()
+        _raise_for_native_ffi_status(
+            self.entrypoints.client_security_config_create(
+                _NnrpTransportClientSecurityConfigRequest(
+                    int(NATIVE_TRANSPORT_ID_BY_NAME[self.provider.name]),
+                    0,
+                    server_name,
+                    certificate,
+                ),
+                ctypes.byref(output),
+            )
+        )
+        return NativeHandle.from_ffi(output)
+
+    def _server_security_config(self, security: NativeTransportServerSecurity | None) -> NativeHandle:
+        if security is None:
+            return NativeHandle.invalid()
+        certificate, _certificate_owner = _buffer_view_from_payload(security.certificate_der)
+        private_key, _private_key_owner = _buffer_view_from_payload(security.private_key_pkcs8_der)
+        output = _NnrpHandle()
+        _raise_for_native_ffi_status(
+            self.entrypoints.server_security_config_create(
+                _NnrpTransportServerSecurityConfigRequest(
+                    int(NATIVE_TRANSPORT_ID_BY_NAME[self.provider.name]),
+                    0,
+                    certificate,
+                    private_key,
+                ),
+                ctypes.byref(output),
+            )
+        )
+        return NativeHandle.from_ffi(output)
+
+    def _close_config(self, config: NativeHandle) -> None:
+        if config.is_valid:
+            _raise_for_native_ffi_status(self.entrypoints.close(config.to_ffi()))
 
 
 @dataclass(frozen=True)
@@ -4718,6 +5303,7 @@ def select_native_transport_provider(
         for index, (_, candidate) in enumerate(candidates)
         if candidate.probe_state is NativeTransportProbeState.SUCCEEDED
     ]
+
     def compare_candidate_indices(left: int, right: int) -> int:
         return _compare_native_transport_candidates(
             candidates[left],
@@ -4777,8 +5363,7 @@ def _evaluate_native_transport_candidates(
         transport_name = provider.name
         peer_supported = transport_name in supported_transports
         within_limits = (
-            requested_max_frame_bytes is None
-            or requested_max_frame_bytes <= provider.metadata.limits.max_frame_bytes
+            requested_max_frame_bytes is None or requested_max_frame_bytes <= provider.metadata.limits.max_frame_bytes
         )
         if not _native_transport_policy_allows(policy, transport_name):
             rejection_reason = NativeTransportRejectionReason.POLICY_DISALLOWED
@@ -4826,9 +5411,7 @@ def _summarize_native_probe_samples(
         return None
     throughputs = [
         min(
-            min(sample.bytes_sent + sample.bytes_received, 0xFFFFFFFFFFFFFFFF)
-            * 1_000_000
-            // sample.elapsed_us,
+            min(sample.bytes_sent + sample.bytes_received, 0xFFFFFFFFFFFFFFFF) * 1_000_000 // sample.elapsed_us,
             0xFFFFFFFFFFFFFFFF,
         )
         for sample in successful
@@ -4945,8 +5528,7 @@ def _native_transport_selection_error(
         )
         if forced_candidate is not None and forced_candidate.rejection_reason is not None:
             return NativeArtifactError(
-                f"forced native transport {forced_transport} rejected: "
-                f"{forced_candidate.rejection_reason.value}",
+                f"forced native transport {forced_transport} rejected: {forced_candidate.rejection_reason.value}",
                 candidates=candidates,
             )
         return NativeArtifactError(
@@ -5071,6 +5653,29 @@ def load_native_runtime(
         loaded_library,
         artifact_path=resolved_path,
         cffi_submit_result_api=resolved_cffi_api,
+    )
+
+
+def load_native_transport_binding(
+    name: str,
+    *,
+    root: Path | str | None = None,
+    native_platform: NativePlatform | None = None,
+) -> NativeTransportBinding:
+    provider = resolve_native_transport_provider(
+        name,
+        root=root,
+        native_platform=native_platform,
+    )
+    loaded_library = load_native_library(provider.artifact_path)
+    capabilities = _call_runtime_capabilities(loaded_library)
+    _validate_runtime_capabilities(
+        capabilities,
+        required_transport_slots=NATIVE_TRANSPORT_SLOT_BY_NAME[provider.name],
+    )
+    return NativeTransportBinding(
+        _NativeTransportEntrypoints(loaded_library, artifact_path=provider.artifact_path),
+        provider,
     )
 
 
@@ -5359,13 +5964,9 @@ def _manifest_provider_metadata(manifest: Mapping[str, Any]) -> NativeTransportP
         try:
             limitation = NativeTransportProviderLimitation(raw_limitation)
         except ValueError as error:
-            raise NativeArtifactError(
-                f"unsupported native transport provider limitation: {raw_limitation}"
-            ) from error
+            raise NativeArtifactError(f"unsupported native transport provider limitation: {raw_limitation}") from error
         if limitation in limitations:
-            raise NativeArtifactError(
-                f"duplicate native transport provider limitation: {raw_limitation}"
-            )
+            raise NativeArtifactError(f"duplicate native transport provider limitation: {raw_limitation}")
         limitations.append(limitation)
     return NativeTransportProviderMetadata(
         id=provider_id,
@@ -5379,20 +5980,18 @@ def _manifest_provider_metadata(manifest: Mapping[str, Any]) -> NativeTransportP
 def _manifest_bounded_integer(manifest: Mapping[str, Any], field_name: str, maximum: int) -> int:
     value = manifest.get(field_name)
     if isinstance(value, bool) or not isinstance(value, int) or not 0 <= value <= maximum:
-        raise NativeArtifactError(
-            f"native artifact manifest {field_name} must be an integer in 0..{maximum}"
-        )
+        raise NativeArtifactError(f"native artifact manifest {field_name} must be an integer in 0..{maximum}")
     return value
 
 
 def _manifest_canonical_u64(manifest: Mapping[str, Any], field_name: str) -> int:
     value = manifest.get(field_name)
-    if not isinstance(value, str) or not value or (
-        value != "0" and (not value.isascii() or not value.isdecimal() or value[0] == "0")
+    if (
+        not isinstance(value, str)
+        or not value
+        or (value != "0" and (not value.isascii() or not value.isdecimal() or value[0] == "0"))
     ):
-        raise NativeArtifactError(
-            f"native artifact manifest {field_name} must be a canonical decimal u64 string"
-        )
+        raise NativeArtifactError(f"native artifact manifest {field_name} must be a canonical decimal u64 string")
     parsed = int(value)
     if parsed > 0xFFFFFFFFFFFFFFFF:
         raise NativeArtifactError(f"native artifact manifest {field_name} exceeds u64")
@@ -5535,6 +6134,45 @@ def _buffer_view_from_payload(payload: bytes | bytearray | memoryview) -> tuple[
     except TypeError:
         buffer = ctypes.c_char_p(view.tobytes())
     return _NnrpBufferView(ctypes.cast(buffer, ctypes.c_void_p), view.nbytes), buffer
+
+
+def _normalize_transport_packets(
+    packets: bytes | bytearray | memoryview | Iterable[bytes | bytearray | memoryview],
+) -> tuple[bytes | bytearray | memoryview, ...]:
+    normalized: tuple[bytes | bytearray | memoryview, ...]
+    if isinstance(packets, (bytes, bytearray, memoryview)):
+        normalized = (packets,)
+    else:
+        normalized = tuple(packets)
+    if not normalized:
+        raise ValueError("native transport send requires at least one complete NNRP packet")
+    for packet in normalized:
+        if not isinstance(packet, (bytes, bytearray, memoryview)):
+            raise TypeError("native transport packets must be bytes-like values")
+        if len(packet) == 0:
+            raise ValueError("native transport packets must be non-empty")
+    if len(normalized) > 0xFFFFFFFF:
+        raise ValueError("native transport packet batch exceeds uint32 frame count")
+    return normalized
+
+
+def _decode_transport_packet_batch(encoded: bytes, frame_count: int) -> tuple[bytes, ...]:
+    _require_bounded_integer("frame_count", frame_count, 0xFFFFFFFF)
+    packets: list[bytes] = []
+    offset = 0
+    while offset < len(encoded):
+        if len(encoded) - offset < 4:
+            raise NativeHandleError("native transport batch ends inside a packet length prefix")
+        packet_length = int.from_bytes(encoded[offset : offset + 4], "little")
+        offset += 4
+        packet_end = offset + packet_length
+        if packet_end > len(encoded):
+            raise NativeHandleError("native transport batch packet exceeds the owned payload")
+        packets.append(encoded[offset:packet_end])
+        offset = packet_end
+    if len(packets) != frame_count:
+        raise NativeHandleError(f"native transport batch declared {frame_count} packets but encoded {len(packets)}")
+    return tuple(packets)
 
 
 def _copy_buffer_view(view: _NnrpBufferView) -> bytes:

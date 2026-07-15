@@ -18,12 +18,12 @@ delegated to versioned native artifacts.
 
 ## Pinned Native Contract
 
-The current Python package consumes `nnrp-rs` native artifact version `1.0.0-preview.4.3`.
+The current Python package consumes `nnrp-rs` native artifact version `1.0.0-preview.4.4`.
 
 This artifact contract includes:
 
 1. `nnrp_runtime_capabilities`.
-2. ABI version `1.12.0`.
+2. ABI version `1.12.1`.
 3. Protocol version `1/0`.
 4. Runtime feature flags for protocol core, client/server APIs, event polling, callback dispatch, cache/schema,
    recovery, typed payloads, runtime control frames, runtime objects, cache references, and transport slots.

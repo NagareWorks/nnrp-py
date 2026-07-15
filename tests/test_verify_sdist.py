@@ -20,12 +20,12 @@ resolve_sdist = _MODULE.resolve_sdist
 verify_sdist = _MODULE.verify_sdist
 verify_sdist_main = _MODULE.main
 
-_ROOT = "nnrp_py-1.0.0rc4.post3"
+_ROOT = "nnrp_py-1.0.0rc4.post4"
 _REQUIRED = {
     "LICENSE": b"license",
     "README.md": b"readme",
     "pyproject.toml": b"[project]",
-    "src/nnrp/__init__.py": b'__version__ = "1.0.0rc4.post3"',
+    "src/nnrp/__init__.py": b'__version__ = "1.0.0rc4.post4"',
 }
 
 

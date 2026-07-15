@@ -31,13 +31,15 @@ benchmark documents and are not used as preview4 release criteria.
 ## Transport Providers
 
 - Rust preview4 artifacts are transport scoped and expose TCP, QUIC, IPC, and WebSocket capability slots.
-- Python `1.0.0rc4.post3` consumes Rust `1.0.0-preview.4.3` and exposes the frozen provider cost, preference,
+- Python `1.0.0rc4.post4` consumes Rust `1.0.0-preview.4.4` and exposes the frozen provider cost, preference,
   frame-limit, limitation, probe-metrics, and ordered candidate models without a Python-specific weighted score.
 - Multi-provider selection follows the cross-SDK deterministic comparator and reports every eligible or rejected
   candidate; probe samples bind to the stable provider id carried by the owning artifact.
 - Python provider selection keeps endpoint parsing separate from user-facing `nnrp://` naming so host code can stay
   stable while the selected provider resolves `tcp://`, `quic://`, `unix://`, `npipe://`, or `ws://` runtime endpoints.
 - Provider packages must own meaningful native transport behavior; they are not configuration-only switches.
+- `NativeTransportBinding` now performs real probe, connect, listen, accept, complete-packet batch I/O, and close calls
+  through each transport artifact. Release smoke tests exchange packets in both directions over IPC and WebSocket.
 
 ## Conformance
 
@@ -48,7 +50,7 @@ benchmark documents and are not used as preview4 release criteria.
 
 ## Release Gates
 
-- Python `1.0.0rc4.post3` pins Rust `1.0.0-preview.4.3` while retaining ABI `1.12.0`.
+- Python `1.0.0rc4.post4` pins Rust `1.0.0-preview.4.4` and requires ABI `1.12.1`.
 - Source distributions exclude release workspace artifacts and are validated for payload boundaries and size before
   publication.
 - Preview4 native wheels must embed preview4-shaped Rust artifact metadata.

@@ -1,4 +1,4 @@
-"""Preview3 cache host models.
+"""Preview4 cache host models.
 
 These types are Python value wrappers for Rust-backed cache results and
 diagnostics. They intentionally avoid local lease policy callbacks or dependency
@@ -33,24 +33,24 @@ class CacheInvalidationReason(StrEnum):
 
 @dataclass(frozen=True, slots=True)
 class CacheObjectIdentity:
-    namespace: int
+    cache_namespace: int
     object_kind: int | CacheObjectKind
-    key_hi: int
-    key_lo: int
+    cache_key_hi: int
+    cache_key_lo: int
 
     def __post_init__(self) -> None:
-        _validate_u32("namespace", self.namespace)
+        _validate_u32("cache_namespace", self.cache_namespace)
         _validate_u16("object_kind", int(self.object_kind))
-        _validate_u32("key_hi", self.key_hi)
-        _validate_u32("key_lo", self.key_lo)
+        _validate_u64("cache_key_hi", self.cache_key_hi)
+        _validate_u64("cache_key_lo", self.cache_key_lo)
 
     @property
     def key(self) -> tuple[int, int]:
-        return (self.key_hi, self.key_lo)
+        return (self.cache_key_hi, self.cache_key_lo)
 
     @property
-    def cache_key_u64(self) -> int:
-        return (self.key_hi << 32) | self.key_lo
+    def cache_key_u128(self) -> int:
+        return (self.cache_key_hi << 64) | self.cache_key_lo
 
 
 @dataclass(frozen=True, slots=True)

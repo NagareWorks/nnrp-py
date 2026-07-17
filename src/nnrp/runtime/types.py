@@ -699,8 +699,9 @@ class ObjectDeltaMetadata(_FixedRuntimeMetadata):
 
 @dataclass(frozen=True, slots=True)
 class CacheReferenceMetadata(_FixedRuntimeMetadata):
-    STRUCT: ClassVar[struct.Struct] = struct.Struct("<QQHHQQIII")
+    STRUCT: ClassVar[struct.Struct] = struct.Struct("<IHHQQQQIIII")
 
+    cache_namespace: int
     cache_key_hi: int
     cache_key_lo: int
     profile_id: int
@@ -714,27 +715,31 @@ class CacheReferenceMetadata(_FixedRuntimeMetadata):
     def pack(self) -> bytes:
         _validate_mask(self.flags, 0x00000003, "cache_reference.flags")
         return self.STRUCT.pack(
-            self.cache_key_hi,
-            self.cache_key_lo,
+            self.cache_namespace,
             self.profile_id,
             int(self.reuse_scope),
+            self.cache_key_hi,
+            self.cache_key_lo,
             self.lease_id,
             self.producer_trace_id,
             self.expiration_hint_ms,
             self.metadata_bytes,
             self.flags,
+            0,
         )
 
     @classmethod
     def _from_tuple(cls, values: tuple[int, ...]) -> CacheReferenceMetadata:
-        _validate_mask(values[8], 0x00000003, "cache_reference.flags")
-        return cls(*values[:3], CacheReuseScope(values[3]), *values[4:])
+        _validate_mask(values[9], 0x00000003, "cache_reference.flags")
+        _require_zero(values[10], "cache_reference.reserved")
+        return cls(values[0], values[3], values[4], values[1], CacheReuseScope(values[2]), *values[5:10])
 
 
 @dataclass(frozen=True, slots=True)
 class CacheMissMetadata(_FixedRuntimeMetadata):
-    STRUCT: ClassVar[struct.Struct] = struct.Struct("<QQHHIQ")
+    STRUCT: ClassVar[struct.Struct] = struct.Struct("<IHHQQII")
 
+    cache_namespace: int
     cache_key_hi: int
     cache_key_lo: int
     miss_reason: CacheMissReason | int
@@ -743,18 +748,19 @@ class CacheMissMetadata(_FixedRuntimeMetadata):
 
     def pack(self) -> bytes:
         return self.STRUCT.pack(
+            self.cache_namespace,
+            self.profile_id,
+            int(self.miss_reason),
             self.cache_key_hi,
             self.cache_key_lo,
-            int(self.miss_reason),
-            self.profile_id,
             self.diagnostic_bytes,
             0,
         )
 
     @classmethod
     def _from_tuple(cls, values: tuple[int, ...]) -> CacheMissMetadata:
-        _require_zero(values[5], "cache_miss.reserved")
-        return cls(values[0], values[1], CacheMissReason(values[2]), values[3], values[4])
+        _require_zero(values[6], "cache_miss.reserved")
+        return cls(values[0], values[3], values[4], CacheMissReason(values[2]), values[1], values[5])
 
 
 def _validate_mask(value: int, allowed: int, field: str) -> None:

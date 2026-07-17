@@ -790,7 +790,7 @@ class FakeRuntimeLibrary(FakeEntrypointLibrary):
                 result = _cache_result_target(out_result)
                 result.outcome_code = 3
                 result.lease_handle = lease_handle
-                result.object_id = _NnrpCacheObjectId(namespace, key_hi, key_lo, object_kind)
+                result.object_id = _NnrpCacheObjectId(namespace, object_kind, key_hi, key_lo)
                 result.object_version = 1
                 result.lease_id = lease_handle.id
                 result.expires_at_ms = 0
@@ -2849,7 +2849,7 @@ def test_native_cache_backend_routes_lease_ops_through_ffi(tmp_path: Path) -> No
         )
     )
     backend = session.cache_backend(now_ms=1000, ttl_ms=500, expected_version=9)
-    identity = CacheObjectIdentity(namespace=1, object_kind=2, key_hi=3, key_lo=4)
+    identity = CacheObjectIdentity(cache_namespace=1, object_kind=2, cache_key_hi=3, cache_key_lo=4)
 
     query = backend.query_cache(identity)
     touch = backend.touch_cache(identity, ttl_ms=750)
@@ -2870,6 +2870,10 @@ def test_native_cache_backend_routes_lease_ops_through_ffi(tmp_path: Path) -> No
     assert cache_request.owner.id == 41
     assert cache_request.object_id.cache_namespace == 1
     assert cache_request.object_id.object_kind == 2
+    assert ctypes.sizeof(_NnrpCacheObjectId) == 24
+    assert _NnrpCacheObjectId.object_kind.offset == 4
+    assert _NnrpCacheObjectId.cache_key_hi.offset == 8
+    assert _NnrpCacheObjectId.cache_key_lo.offset == 16
     assert library.nnrp_cache_touch.calls[0][0].ttl_ms == 750
 
 
@@ -2892,7 +2896,7 @@ def test_native_cache_backend_preserves_expired_lease_result_from_protocol_statu
         )
     )
     backend = session.cache_backend(now_ms=5000, expected_version=9)
-    identity = CacheObjectIdentity(namespace=1, object_kind=2, key_hi=3, key_lo=4)
+    identity = CacheObjectIdentity(cache_namespace=1, object_kind=2, cache_key_hi=3, cache_key_lo=4)
 
     result = backend.query_cache(identity)
 
@@ -3295,8 +3299,8 @@ def test_native_runtime_client_named_methods_share_one_coarse_frame_abi(tmp_path
     object_ref = ObjectReferenceMetadata(9, 10, 2, 0, 4096, 0, 2)
     release = ObjectReleaseMetadata(9, 10, ObjectReleaseReason.COMPLETED, RuntimeRole.CLIENT, 0, 2)
     delta = ObjectDeltaMetadata(9, 2, 128, 64, 4, 0x03, 2)
-    cache_ref = CacheReferenceMetadata(1, 2, 3, CacheReuseScope.SESSION, 4, 5, 1000, 2, 0)
-    cache_miss = CacheMissMetadata(1, 2, CacheMissReason.UNKNOWN, 3, 2)
+    cache_ref = CacheReferenceMetadata(7, 1, 2, 3, CacheReuseScope.SESSION, 4, 5, 1000, 2, 0)
+    cache_miss = CacheMissMetadata(7, 1, 2, CacheMissReason.UNKNOWN, 3, 2)
     invalidate = CacheInvalidateMetadata(CacheInvalidateScope.OBJECT_KEY, 3, 4, 5, 6)
 
     session.cancel_operation(control, b"no")
@@ -3392,8 +3396,8 @@ def test_native_runtime_server_named_methods_share_one_coarse_frame_abi(tmp_path
     object_ref = ObjectReferenceMetadata(9, 10, 2, 0, 4096, 0, 2)
     release = ObjectReleaseMetadata(9, 10, ObjectReleaseReason.COMPLETED, RuntimeRole.RUNTIME, 0, 2)
     delta = ObjectDeltaMetadata(9, 2, 128, 64, 4, 0x03, 2)
-    cache_ref = CacheReferenceMetadata(1, 2, 3, CacheReuseScope.SESSION, 4, 5, 1000, 2, 0)
-    cache_miss = CacheMissMetadata(1, 2, CacheMissReason.UNKNOWN, 3, 2)
+    cache_ref = CacheReferenceMetadata(7, 1, 2, 3, CacheReuseScope.SESSION, 4, 5, 1000, 2, 0)
+    cache_miss = CacheMissMetadata(7, 1, 2, CacheMissReason.UNKNOWN, 3, 2)
     invalidate = CacheInvalidateMetadata(CacheInvalidateScope.OBJECT_KEY, 3, 4, 5, 6)
 
     session.send_progress(progress, b"step")

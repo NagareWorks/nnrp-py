@@ -430,8 +430,8 @@ def test_session_patch_body_length_validation() -> None:
 def test_cache_messages_roundtrip() -> None:
     put_metadata = CachePutMetadata(
         cache_namespace=1,
-        cache_key_hi=0x01020304,
-        cache_key_lo=0x05060708,
+        cache_key_hi=0x0102030405060708,
+        cache_key_lo=0x1112131415161718,
         object_kind=CacheObjectKind.TILE_INDEX_BLOCK,
         ttl_ms=15000,
         object_bytes=2048,
@@ -440,8 +440,8 @@ def test_cache_messages_roundtrip() -> None:
     )
     ack_metadata = CacheAckMetadata(
         cache_namespace=1,
-        cache_key_hi=0x01020304,
-        cache_key_lo=0x05060708,
+        cache_key_hi=0x0102030405060708,
+        cache_key_lo=0x1112131415161718,
         status=CacheAckStatus.ACCEPTED,
         accepted_ttl_ms=15000,
         max_object_bytes=8192,
@@ -450,8 +450,8 @@ def test_cache_messages_roundtrip() -> None:
     invalidate_metadata = CacheInvalidateMetadata(
         invalidate_scope=CacheInvalidateScope.OBJECT_KEY,
         cache_namespace=1,
-        cache_key_hi=0x01020304,
-        cache_key_lo=0x05060708,
+        cache_key_hi=0x0102030405060708,
+        cache_key_lo=0x1112131415161718,
         reason_code=2,
     )
 
@@ -462,6 +462,12 @@ def test_cache_messages_roundtrip() -> None:
     assert len(put_payload) == CACHE_PUT_METADATA_LENGTH
     assert len(ack_payload) == CACHE_ACK_METADATA_LENGTH
     assert len(invalidate_payload) == CACHE_INVALIDATE_METADATA_LENGTH
+    assert (CACHE_PUT_METADATA_LENGTH, CACHE_ACK_METADATA_LENGTH, CACHE_INVALIDATE_METADATA_LENGTH) == (40, 40, 32)
+    assert struct.unpack_from("<I", put_payload, 4)[0] == int(CacheObjectKind.TILE_INDEX_BLOCK)
+    assert struct.unpack_from("<Q", put_payload, 8)[0] == 0x0102030405060708
+    assert struct.unpack_from("<Q", put_payload, 16)[0] == 0x1112131415161718
+    assert ack_payload[36:40] == b"\0" * 4
+    assert invalidate_payload[28:32] == b"\0" * 4
     assert CachePutMetadata.unpack(put_payload) == put_metadata
     assert CacheAckMetadata.unpack(ack_payload) == ack_metadata
     assert CacheInvalidateMetadata.unpack(invalidate_payload) == invalidate_metadata
@@ -489,6 +495,36 @@ def test_cache_invalidate_metadata_rejects_unknown_scope() -> None:
             cache_key_lo=0,
             reason_code=0,
         )
+
+
+@pytest.mark.parametrize(
+    ("scope", "namespace", "key_hi", "key_lo"),
+    [
+        (CacheInvalidateScope.WHOLE_SESSION, 1, 0, 0),
+        (CacheInvalidateScope.NAMESPACE, 1, 1, 0),
+        (CacheInvalidateScope.OBJECT_KIND, 1, 0x1_0000_0000, 0),
+        (CacheInvalidateScope.OBJECT_KIND, 1, 1, 1),
+    ],
+)
+def test_cache_invalidate_metadata_enforces_scope_identity_zeroing(
+    scope: CacheInvalidateScope,
+    namespace: int,
+    key_hi: int,
+    key_lo: int,
+) -> None:
+    with pytest.raises(ValueError, match="identity fields must match"):
+        CacheInvalidateMetadata(scope, namespace, key_hi, key_lo, 0)
+
+
+def test_cache_metadata_rejects_reserved_wire_fields_and_flag_bits() -> None:
+    ack = CacheAckMetadata(1, 2, 3, CacheAckStatus.ACCEPTED, 4, 5, 6).pack()
+    invalidate = CacheInvalidateMetadata(CacheInvalidateScope.OBJECT_KEY, 1, 2, 3, 4).pack()
+    with pytest.raises(ValueError, match="cache_ack.reserved"):
+        CacheAckMetadata.unpack(ack[:-1] + b"\x01")
+    with pytest.raises(ValueError, match="cache_invalidate.reserved"):
+        CacheInvalidateMetadata.unpack(invalidate[:-1] + b"\x01")
+    with pytest.raises(ValueError, match="reserved bits"):
+        CachePutMetadata(1, 2, 3, CacheObjectKind.CAMERA_BLOCK, 4, 5, 6, 0x04)
 
 
 def test_tensor_profile_cache_object_bitmap_stays_aligned() -> None:

@@ -1303,10 +1303,10 @@ def _run_runtime_object_metadata_encode_decode(scenario_id: str, workload: dict[
         (MessageType.OBJECT_DELTA, ObjectDeltaMetadata(33, 2, 0, 1024, 8, 0x03, 4), b"meta" + b"delta!!!"),
         (
             MessageType.CACHE_REFERENCE,
-            CacheReferenceMetadata(1, 2, 0x0100, CacheReuseScope.SESSION, 9, 19, 5000, 0, 0x03),
+            CacheReferenceMetadata(7, 1, 2, 0x0100, CacheReuseScope.SESSION, 9, 19, 5000, 0, 0x03),
             b"",
         ),
-        (MessageType.CACHE_MISS, CacheMissMetadata(1, 2, CacheMissReason.EXPIRED, 0x0100, 4), b"miss"),
+        (MessageType.CACHE_MISS, CacheMissMetadata(7, 1, 2, CacheMissReason.EXPIRED, 0x0100, 4), b"miss"),
     )
 
     def operation() -> None:

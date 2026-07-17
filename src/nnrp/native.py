@@ -1240,9 +1240,9 @@ class _NnrpSessionRecoveryOutcome(ctypes.Structure):
 class _NnrpCacheObjectId(ctypes.Structure):
     _fields_ = [
         ("cache_namespace", ctypes.c_uint32),
-        ("cache_key_hi", ctypes.c_uint32),
-        ("cache_key_lo", ctypes.c_uint32),
         ("object_kind", ctypes.c_uint32),
+        ("cache_key_hi", ctypes.c_uint64),
+        ("cache_key_lo", ctypes.c_uint64),
     ]
 
 
@@ -6302,25 +6302,30 @@ def _schema_registry_action_from_ffi(action_code: int) -> Any:
 
 def _cache_identity_to_ffi(identity: Any) -> _NnrpCacheObjectId:
     return _NnrpCacheObjectId(
-        int(identity.namespace),
-        int(identity.key_hi),
-        int(identity.key_lo),
+        int(identity.cache_namespace),
         int(identity.object_kind),
+        int(identity.cache_key_hi),
+        int(identity.cache_key_lo),
     )
 
 
 def _cache_identity_key(identity: Any) -> tuple[int, int, int, int]:
-    return (int(identity.namespace), int(identity.key_hi), int(identity.key_lo), int(identity.object_kind))
+    return (
+        int(identity.cache_namespace),
+        int(identity.cache_key_hi),
+        int(identity.cache_key_lo),
+        int(identity.object_kind),
+    )
 
 
 def _cache_identity_from_ffi(object_id: _NnrpCacheObjectId) -> Any:
     from nnrp.cache import CacheObjectIdentity
 
     return CacheObjectIdentity(
-        namespace=int(object_id.cache_namespace),
+        cache_namespace=int(object_id.cache_namespace),
         object_kind=int(object_id.object_kind),
-        key_hi=int(object_id.cache_key_hi),
-        key_lo=int(object_id.cache_key_lo),
+        cache_key_hi=int(object_id.cache_key_hi),
+        cache_key_lo=int(object_id.cache_key_lo),
     )
 
 

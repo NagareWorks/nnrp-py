@@ -397,8 +397,8 @@ class _AdapterCaseExecution:
 
     def _execute_runtime_cache_reference(self) -> dict[str, Any]:
         session = self._open_session(self._connect())
-        session.reference_cache(CacheReferenceMetadata(1, 2, 3, CacheReuseScope.SESSION, 4, 5, 1000, 0, 0))
-        session.report_cache_miss(CacheMissMetadata(1, 2, CacheMissReason.UNKNOWN, 3, 0))
+        session.reference_cache(CacheReferenceMetadata(7, 1, 2, 3, CacheReuseScope.SESSION, 4, 5, 1000, 0, 0))
+        session.report_cache_miss(CacheMissMetadata(7, 1, 2, CacheMissReason.UNKNOWN, 3, 0))
         return self._evidence("runtime-cache-reference", session_id=_runtime_id(session), cache_key_hi=1)
 
     def _execute_runtime_degrade_budget(self) -> dict[str, Any]:

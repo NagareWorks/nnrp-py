@@ -62,21 +62,23 @@ class FakeCacheBackend:
 
 def test_cache_identity_and_version_wrappers_are_stable_value_objects() -> None:
     identity = CacheObjectIdentity(
-        namespace=7,
+        cache_namespace=7,
         object_kind=CacheObjectKind.PROMPT_SEGMENT,
-        key_hi=0x11223344,
-        key_lo=0x55667788,
+        cache_key_hi=0x1122334455667788,
+        cache_key_lo=0x99AABBCCDDEEFF00,
     )
     version = CacheObjectVersion(identity=identity, object_version=3, schema_id=0x1001, schema_version=3)
 
-    assert identity.key == (0x11223344, 0x55667788)
-    assert identity.cache_key_u64 == 0x1122334455667788
+    assert identity.key == (0x1122334455667788, 0x99AABBCCDDEEFF00)
+    assert identity.cache_key_u128 == 0x112233445566778899AABBCCDDEEFF00
     assert version.matches_schema(schema_id=0x1001, schema_version=3) is True
     assert version.matches_schema(schema_id=0x1001, schema_version=4) is False
 
 
 def test_cache_lease_result_models_expiry_renewal_and_identity_matching() -> None:
-    identity = CacheObjectIdentity(namespace=1, object_kind=CacheObjectKind.TOOL_SCHEMA, key_hi=1, key_lo=2)
+    identity = CacheObjectIdentity(
+        cache_namespace=1, object_kind=CacheObjectKind.TOOL_SCHEMA, cache_key_hi=1, cache_key_lo=2
+    )
     lease = CacheLeaseDescriptor(identity=identity, owner_session_id=9, lease_epoch=1, expires_at_ms=1000, ttl_ms=250)
     renewed = lease.as_renewed(lease_epoch=2, expires_at_ms=1250)
     result = CacheLeaseResult(identity=identity, outcome=CacheLeaseOutcome.RENEWED, lease=renewed)
@@ -87,16 +89,22 @@ def test_cache_lease_result_models_expiry_renewal_and_identity_matching() -> Non
     assert renewed.ttl_ms == lease.ttl_ms
     assert result.succeeded is True
 
-    other = CacheObjectIdentity(namespace=2, object_kind=CacheObjectKind.TOOL_SCHEMA, key_hi=1, key_lo=2)
+    other = CacheObjectIdentity(
+        cache_namespace=2, object_kind=CacheObjectKind.TOOL_SCHEMA, cache_key_hi=1, cache_key_lo=2
+    )
     with pytest.raises(ValueError, match="lease identity"):
         CacheLeaseResult(identity=other, outcome=CacheLeaseOutcome.VALID, lease=lease)
 
 
 def test_cache_dependency_invalidation_freezes_affected_snapshot_without_policy_callbacks() -> None:
-    source = CacheObjectIdentity(namespace=1, object_kind=CacheObjectKind.STRUCTURED_EVENT_SCHEMA, key_hi=1, key_lo=1)
+    source = CacheObjectIdentity(
+        cache_namespace=1, object_kind=CacheObjectKind.STRUCTURED_EVENT_SCHEMA, cache_key_hi=1, cache_key_lo=1
+    )
     affected = [
-        CacheObjectIdentity(namespace=1, object_kind=CacheObjectKind.PROMPT_SEGMENT, key_hi=2, key_lo=2),
-        CacheObjectIdentity(namespace=1, object_kind=CacheObjectKind.TOOL_SCHEMA, key_hi=3, key_lo=3),
+        CacheObjectIdentity(
+            cache_namespace=1, object_kind=CacheObjectKind.PROMPT_SEGMENT, cache_key_hi=2, cache_key_lo=2
+        ),
+        CacheObjectIdentity(cache_namespace=1, object_kind=CacheObjectKind.TOOL_SCHEMA, cache_key_hi=3, cache_key_lo=3),
     ]
 
     invalidation = CacheDependencyInvalidation(
@@ -106,7 +114,9 @@ def test_cache_dependency_invalidation_freezes_affected_snapshot_without_policy_
         schema_id=0x1001,
         schema_version=3,
     )
-    affected.append(CacheObjectIdentity(namespace=9, object_kind=CacheObjectKind.CODEC_TABLE, key_hi=4, key_lo=4))
+    affected.append(
+        CacheObjectIdentity(cache_namespace=9, object_kind=CacheObjectKind.CODEC_TABLE, cache_key_hi=4, cache_key_lo=4)
+    )
 
     assert invalidation.affected_count == 2
     assert invalidation.affected[0].object_kind == CacheObjectKind.PROMPT_SEGMENT
@@ -114,7 +124,9 @@ def test_cache_dependency_invalidation_freezes_affected_snapshot_without_policy_
 
 
 def test_cache_policy_options_keep_cache_use_explicit_per_workload() -> None:
-    identity = CacheObjectIdentity(namespace=1, object_kind=CacheObjectKind.PROMPT_SEGMENT, key_hi=1, key_lo=2)
+    identity = CacheObjectIdentity(
+        cache_namespace=1, object_kind=CacheObjectKind.PROMPT_SEGMENT, cache_key_hi=1, cache_key_lo=2
+    )
     policy = CachePolicyOptions(
         enabled=True,
         reuse_scope=CacheReuseScope.SESSION,
@@ -144,14 +156,20 @@ def test_cache_policy_options_reject_implicit_disabled_cache_settings() -> None:
         CachePolicyOptions(expiration_hint_ms=1)
     with pytest.raises(ValueError, match="object_version"):
         CacheInvalidation(
-            identity=CacheObjectIdentity(namespace=1, object_kind=CacheObjectKind.PROMPT_SEGMENT, key_hi=1, key_lo=2),
+            identity=CacheObjectIdentity(
+                cache_namespace=1, object_kind=CacheObjectKind.PROMPT_SEGMENT, cache_key_hi=1, cache_key_lo=2
+            ),
             object_version=-1,
         )
 
 
 def test_cache_runtime_helpers_delegate_without_local_policy() -> None:
-    identity = CacheObjectIdentity(namespace=1, object_kind=CacheObjectKind.PROMPT_SEGMENT, key_hi=1, key_lo=2)
-    other = CacheObjectIdentity(namespace=1, object_kind=CacheObjectKind.TOOL_SCHEMA, key_hi=3, key_lo=4)
+    identity = CacheObjectIdentity(
+        cache_namespace=1, object_kind=CacheObjectKind.PROMPT_SEGMENT, cache_key_hi=1, cache_key_lo=2
+    )
+    other = CacheObjectIdentity(
+        cache_namespace=1, object_kind=CacheObjectKind.TOOL_SCHEMA, cache_key_hi=3, cache_key_lo=4
+    )
     backend: CacheRuntimeBackend = FakeCacheBackend()
 
     assert cache_query(backend, identity).outcome is CacheLeaseOutcome.VALID
@@ -168,7 +186,9 @@ def test_cache_runtime_helpers_delegate_without_local_policy() -> None:
 
 
 def test_cache_runtime_helpers_preserve_native_cache_diagnostics() -> None:
-    identity = CacheObjectIdentity(namespace=1, object_kind=CacheObjectKind.PROMPT_SEGMENT, key_hi=1, key_lo=2)
+    identity = CacheObjectIdentity(
+        cache_namespace=1, object_kind=CacheObjectKind.PROMPT_SEGMENT, cache_key_hi=1, cache_key_lo=2
+    )
     backend = FakeCacheBackend()
     backend.fail_query = NativeProtocolError(
         NativeStatus(status_code=4, error_family=2, protocol_error_code=0x2001, detail_code=0),

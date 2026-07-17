@@ -58,9 +58,6 @@ class CacheInvalidateScope(IntEnum):
     OBJECT_KIND = 2
     OBJECT_KEY = 3
 
-    ENTRY = OBJECT_KEY
-    SESSION = WHOLE_SESSION
-
 
 class CachePutFlags(IntFlag):
     NONE = 0
@@ -416,9 +413,9 @@ SESSION_PATCH_ACK_STRUCT = struct.Struct("<HHIIIHHIHHQIII")
 TENSOR_PROFILE_PATCH_BLOCK_STRUCT = struct.Struct("<IIII")
 TENSOR_PROFILE_PATCH_ACK_BLOCK_STRUCT = struct.Struct("<IIII")
 ERROR_STRUCT = struct.Struct("<8I")
-CACHE_PUT_STRUCT = struct.Struct("<8I")
-CACHE_ACK_STRUCT = struct.Struct("<7I")
-CACHE_INVALIDATE_STRUCT = struct.Struct("<5I")
+CACHE_PUT_STRUCT = struct.Struct("<IIQQIIII")
+CACHE_ACK_STRUCT = struct.Struct("<IIQQIIII")
+CACHE_INVALIDATE_STRUCT = struct.Struct("<IIQQII")
 CONTROL_EXTENSION_HEADER_STRUCT = struct.Struct("<HHI")
 
 CLIENT_HELLO_METADATA_LENGTH = CLIENT_HELLO_STRUCT.size
@@ -1365,13 +1362,15 @@ class CachePutMetadata(_FixedWidthMetadata):
     def __post_init__(self) -> None:
         self.object_kind = CacheObjectKind(self.object_kind)
         self.flags = CachePutFlags(self.flags)
+        if int(self.flags) & ~int(CachePutFlags.PINNED | CachePutFlags.REUSABLE):
+            raise ValueError("cache_put.flags has reserved bits set")
 
     def pack(self) -> bytes:
         return self.STRUCT.pack(
             self.cache_namespace,
+            int(self.object_kind),
             self.cache_key_hi,
             self.cache_key_lo,
-            int(self.object_kind),
             self.ttl_ms,
             self.object_bytes,
             self.codec_bitmap,
@@ -1382,9 +1381,9 @@ class CachePutMetadata(_FixedWidthMetadata):
     def _from_tuple(cls, values: tuple[int, ...]) -> CachePutMetadata:
         (
             cache_namespace,
+            object_kind,
             cache_key_hi,
             cache_key_lo,
-            object_kind,
             ttl_ms,
             object_bytes,
             codec_bitmap,
@@ -1416,28 +1415,35 @@ class CacheAckMetadata(_FixedWidthMetadata):
     max_object_bytes: int
     detail_code: int
 
+    def __post_init__(self) -> None:
+        self.status = CacheAckStatus(self.status)
+
     def pack(self) -> bytes:
         return self.STRUCT.pack(
             self.cache_namespace,
+            int(self.status),
             self.cache_key_hi,
             self.cache_key_lo,
-            int(self.status),
             self.accepted_ttl_ms,
             self.max_object_bytes,
             self.detail_code,
+            0,
         )
 
     @classmethod
     def _from_tuple(cls, values: tuple[int, ...]) -> CacheAckMetadata:
         (
             cache_namespace,
+            status,
             cache_key_hi,
             cache_key_lo,
-            status,
             accepted_ttl_ms,
             max_object_bytes,
             detail_code,
+            reserved,
         ) = values
+        if reserved != 0:
+            raise ValueError("cache_ack.reserved must be zero")
         return cls(
             cache_namespace=cache_namespace,
             cache_key_hi=cache_key_hi,
@@ -1463,6 +1469,16 @@ class CacheInvalidateMetadata(_FixedWidthMetadata):
 
     def __post_init__(self) -> None:
         self.invalidate_scope = CacheInvalidateScope(self.invalidate_scope)
+        if self.invalidate_scope == CacheInvalidateScope.WHOLE_SESSION:
+            valid = self.cache_namespace == 0 and self.cache_key_hi == 0 and self.cache_key_lo == 0
+        elif self.invalidate_scope == CacheInvalidateScope.NAMESPACE:
+            valid = self.cache_key_hi == 0 and self.cache_key_lo == 0
+        elif self.invalidate_scope == CacheInvalidateScope.OBJECT_KIND:
+            valid = self.cache_key_hi <= 0xFFFFFFFF and self.cache_key_lo == 0
+        else:
+            valid = True
+        if not valid:
+            raise ValueError("cache invalidate identity fields must match invalidate_scope")
 
     def pack(self) -> bytes:
         return self.STRUCT.pack(
@@ -1471,11 +1487,14 @@ class CacheInvalidateMetadata(_FixedWidthMetadata):
             self.cache_key_hi,
             self.cache_key_lo,
             self.reason_code,
+            0,
         )
 
     @classmethod
     def _from_tuple(cls, values: tuple[int, ...]) -> CacheInvalidateMetadata:
-        invalidate_scope, cache_namespace, cache_key_hi, cache_key_lo, reason_code = values
+        invalidate_scope, cache_namespace, cache_key_hi, cache_key_lo, reason_code, reserved = values
+        if reserved != 0:
+            raise ValueError("cache_invalidate.reserved must be zero")
         return cls(
             invalidate_scope=CacheInvalidateScope(invalidate_scope),
             cache_namespace=cache_namespace,

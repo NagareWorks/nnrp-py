@@ -106,14 +106,15 @@ def test_object_reference_block_roundtrip() -> None:
         object_kind=CacheObjectKind.TILE_INDEX_BLOCK,
         ref_flags=0,
         cache_namespace=7,
-        cache_key_hi=11,
-        cache_key_lo=13,
+        cache_key_hi=0x1122334455667788,
+        cache_key_lo=0x99AABBCCDDEEFF00,
     )
 
     payload = block.pack()
 
     assert len(payload) == OBJECT_REFERENCE_BLOCK_LENGTH
-    assert OBJECT_REFERENCE_BLOCK_LENGTH == 16
+    assert OBJECT_REFERENCE_BLOCK_LENGTH == 24
+    assert payload == bytes.fromhex("0200000007000000887766554433221100ffeeddccbbaa99")
     assert ObjectReferenceBlock.unpack(payload) == block
 
 

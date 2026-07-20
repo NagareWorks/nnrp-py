@@ -214,7 +214,7 @@ def test_adapter_result_state_validation_failure_is_reported() -> None:
             timeout_ms: int = 0,
         ) -> StatefulResult:
             del max_events, timeout_ms
-            return StatefulResult(operation.operation_id, operation.frame_id, operation.payload)
+            return StatefulResult(operation.operation_id, operation.frame_id, operation.body)
 
     class StatefulConnection(adapter_conformance._AdapterSmokeConnection):
         def open_session(
@@ -265,10 +265,10 @@ def test_adapter_result_state_validation_failure_is_reported() -> None:
 
 def test_adapter_result_terminal_uses_submit_then_role_event_poll() -> None:
     class NativeLikeResult:
-        def __init__(self, operation_id: int, frame_id: int, payload: bytes) -> None:
+        def __init__(self, operation_id: int, frame_id: int, body: bytes) -> None:
             self.operation_id = operation_id
             self.frame_id = frame_id
-            self.payload = payload
+            self.body = body
             self.state = "completed"
 
     class NativeLikeSession:
@@ -284,10 +284,12 @@ def test_adapter_result_terminal_uses_submit_then_role_event_poll() -> None:
             *,
             operation_id: int,
             frame_id: int,
-            payload: bytes,
+            metadata=None,
+            body: bytes,
         ) -> adapter_conformance._AdapterSmokeOperation:
-            self.submitted.append((operation_id, frame_id, bytes(payload)))
-            return adapter_conformance._AdapterSmokeOperation(operation_id, frame_id, bytes(payload))
+            del metadata
+            self.submitted.append((operation_id, frame_id, bytes(body)))
+            return adapter_conformance._AdapterSmokeOperation(operation_id, frame_id, bytes(body))
 
         def poll_result(
             self,
@@ -297,7 +299,7 @@ def test_adapter_result_terminal_uses_submit_then_role_event_poll() -> None:
             timeout_ms: int = 0,
         ) -> NativeLikeResult:
             self.polls.append((max_events, timeout_ms))
-            return NativeLikeResult(operation.operation_id, operation.frame_id, operation.payload)
+            return NativeLikeResult(operation.operation_id, operation.frame_id, operation.body)
 
         def close(self) -> None:
             self.closed = True
@@ -427,7 +429,7 @@ def test_adapter_smoke_backend_bootstrap_and_closed_session_guards() -> None:
     operation = session.submit_operation(
         operation_id=9,
         frame_id=10,
-        payload=memoryview(b"payload"),
+        body=memoryview(b"payload"),
         parent_operation_id=1,
         operation_group_id=2,
     )
@@ -436,7 +438,7 @@ def test_adapter_smoke_backend_bootstrap_and_closed_session_guards() -> None:
     session.cancel(frame_id=10)
     session.close()
 
-    assert result.payload == b"payload"
+    assert result.body == b"payload"
     assert session.controls == [
         (
             int(adapter_conformance.MessageType.ROUTE_HINT),

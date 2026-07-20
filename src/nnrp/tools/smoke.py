@@ -671,6 +671,7 @@ def build_smoke_submit_packet(
     return build_frame_submit_packet(
         session_id=session_id,
         frame_id=frame_id,
+        operation_id=frame_id,
         src_width=640,
         src_height=360,
         tile_width=32,

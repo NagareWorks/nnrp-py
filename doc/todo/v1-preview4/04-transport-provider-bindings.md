@@ -84,7 +84,7 @@
   - [x] Do not complete submit/result locally when no peer is connected.
   - [x] Keep packet-level `connect`/`listen` limited to diagnostics, conformance, and custom carriers.
   - [x] Reject artifacts that expose standalone transport calls without role adoption symbols.
-- [ ] Add carrier-backed E2E tests for TCP, QUIC, IPC, and WebSocket.
-  - [ ] Cover client/server handshake and submit/result exchange.
-  - [ ] Cover runtime control and object/cache events.
-  - [ ] Cover ownership transfer failure and idempotent role close.
+- [x] Add carrier-backed E2E tests for TCP, QUIC, IPC, and WebSocket.
+  - [x] Cover client/server handshake and submit/result exchange.
+  - [x] Cover runtime control and object/cache events.
+  - [x] Cover ownership transfer failure and idempotent role close.

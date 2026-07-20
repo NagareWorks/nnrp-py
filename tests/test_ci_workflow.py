@@ -1,6 +1,7 @@
 from pathlib import Path
 
 CI_WORKFLOW = Path(__file__).resolve().parents[1] / ".github" / "workflows" / "ci.yml"
+WIRE_E2E_SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "run_wire_e2e.ps1"
 
 
 def _read_ci_workflow() -> str:
@@ -55,31 +56,33 @@ def test_adapter_conformance_manifest_claims_preview4_runtime_capabilities() -> 
         assert f'"{capability}"' in manifest
 
 
-def test_ci_runs_wire_conformance_plan_and_result_validation() -> None:
+def test_ci_runs_independent_process_wire_conformance() -> None:
     workflow = _read_ci_workflow()
 
     assert "wire-conformance:" in workflow
-    assert "nnrp-conformance-runner/wire-conformance/nnrp-1-preview4/manifest.json" in workflow
-    assert "wire-plan" in workflow
-    assert "python-path }} -m nnrp.tools.wire_conformance" in workflow
-    assert "run-plan" in workflow
-    assert "validate-wire-results" in workflow
+    assert "NNRP_RS_NATIVE_VERSION: 1.0.0-preview.4.7" in workflow
+    for transport in ("tcp", "quic", "ipc", "websocket"):
+        assert f'nnrp-ffi-transport-{transport}-native-linux-x86_64-${{NNRP_RS_NATIVE_VERSION}}.zip' in workflow
+    assert "prepare_native_artifacts.py --clean artifacts/native-downloads/*.zip" in workflow
+    assert "./scripts/run_wire_e2e.ps1" in workflow
+    assert "Run independent-process Preview4 wire E2E" in workflow
+    assert "run-plan" not in workflow
     assert "- wire-conformance" in workflow
 
 
 def test_ci_wire_conformance_declares_preview4_modes_transports_and_capabilities() -> None:
-    workflow = _read_ci_workflow()
+    script = WIRE_E2E_SCRIPT.read_text(encoding="utf-8")
 
     for mode in ("suite_as_client", "suite_as_server", "suite_as_proxy"):
-        assert f"for mode in {mode}" in workflow or mode in workflow
+        assert f'"{mode}"' in script
 
     for transport in (
-        "tcp=127.0.0.1:19091",
-        "quic=quic+tls://127.0.0.1:19092",
-        "ipc=unix:///tmp/nnrp.sock",
-        "websocket=wss://127.0.0.1:19093/nnrp",
+        "tcp=127.0.0.1:$tcpPort",
+        "quic=127.0.0.1:$quicPort",
+        "ipc=$ipcEndpoint",
+        "websocket=wss://localhost:$webSocketPort/nnrp",
     ):
-        assert f"--transport {transport}" in workflow
+        assert f'"--transport", "{transport}"' in script
 
     for capability in (
         "control.cancel_abort",
@@ -96,4 +99,10 @@ def test_ci_wire_conformance_declares_preview4_modes_transports_and_capabilities
         "control.degrade_profile",
         "control.budget_update",
     ):
-        assert f"--capability {capability}" in workflow
+        assert f'"{capability}"' in script
+
+    assert '"wire-plan"' in script
+    assert '"wire-run"' in script
+    assert '"validate-wire-results"' in script
+    assert 'outcome -ne "passed"' in script
+    assert "Expected six Preview4 wire scenarios" in script

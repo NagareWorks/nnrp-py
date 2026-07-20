@@ -623,6 +623,7 @@ def _build_frame_submit_packet() -> NnrpPacket:
     return build_frame_submit_packet(
         session_id=7,
         frame_id=101,
+        operation_id=1001,
         src_width=640,
         src_height=360,
         tile_width=32,

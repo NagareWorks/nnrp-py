@@ -104,7 +104,7 @@ class _FixedWidthMetadata:
         raise NotImplementedError
 
 
-FRAME_SUBMIT_STRUCT = struct.Struct("<HHHHHHBBBBHHIIIIQQBBBBIIIHH")
+FRAME_SUBMIT_STRUCT = struct.Struct("<HHHHHHBBBBHHIIIIIQIBBBBIIIHH")
 RESULT_PUSH_STRUCT = struct.Struct("<HHHHHHHHHHIIQQBBHIHHIHH")
 BODY_REGION_PRELUDE_STRUCT = struct.Struct("<IIIIIIII")
 INLINE_OBJECT_BLOCK_HEADER_STRUCT = struct.Struct("<HHHHII")
@@ -482,6 +482,7 @@ class FrameSubmitMetadata(_FixedWidthMetadata):
     tile_base_id: int
     camera_bytes: int
     tile_index_bytes: int
+    operation_id: int
     submit_mode: SubmitMode = SubmitMode.INLINE
     budget_policy: BudgetPolicy = BudgetPolicy.NONE
     reserved1: int = 0
@@ -499,6 +500,8 @@ class FrameSubmitMetadata(_FixedWidthMetadata):
         self.budget_policy = _coerce_budget_policy(self.budget_policy)
         self.loss_tolerance_policy = _coerce_loss_tolerance_policy(self.loss_tolerance_policy)
         self.payload_kind_bitmap = _coerce_payload_kind_bitmap(self.payload_kind_bitmap)
+        if self.operation_id == 0:
+            raise ValueError("frame_submit.operation_id must be non-zero")
         _validate_non_tensor_submit_fields(self)
 
     def pack(self) -> bytes:
@@ -520,6 +523,7 @@ class FrameSubmitMetadata(_FixedWidthMetadata):
             self.camera_bytes,
             self.tile_index_bytes,
             self.reserved1,
+            self.operation_id,
             self.reserved2,
             int(self.submit_mode),
             int(self.budget_policy),
@@ -552,6 +556,7 @@ class FrameSubmitMetadata(_FixedWidthMetadata):
             camera_bytes,
             tile_index_bytes,
             reserved1,
+            operation_id,
             reserved2,
             submit_mode,
             budget_policy,
@@ -581,6 +586,7 @@ class FrameSubmitMetadata(_FixedWidthMetadata):
             camera_bytes=camera_bytes,
             tile_index_bytes=tile_index_bytes,
             reserved1=reserved1,
+            operation_id=operation_id,
             reserved2=reserved2,
             submit_mode=SubmitMode(submit_mode),
             budget_policy=_coerce_budget_policy(budget_policy),

@@ -245,10 +245,12 @@ def run_wire_harness_plan(
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = list(argv) if argv is not None else sys.argv[1:]
-    if args and args[0] in {"manifest", "run-plan"}:
+    if args and args[0] in {"manifest", "run-plan", "serve-target"}:
         command = args.pop(0)
         if command == "run-plan":
             return _run_wire_plan_cli(args)
+        if command == "serve-target":
+            return _serve_wire_target_cli(args)
         return _target_manifest_cli(args)
     return _target_manifest_cli(args)
 
@@ -323,6 +325,27 @@ def _run_wire_plan_cli(argv: Sequence[str] | None = None) -> int:
         mode=args.mode,
         evidence_dir=Path(args.evidence_dir) if args.evidence_dir is not None else None,
         skip_message=args.skip_message,
+    )
+    return 0
+
+
+def _serve_wire_target_cli(argv: Sequence[str] | None = None) -> int:
+    from nnrp.tools.wire_target import run_live_wire_target
+
+    parser = argparse.ArgumentParser(prog="nnrp-wire-conformance serve-target")
+    parser.add_argument("--plan", required=True)
+    parser.add_argument("--target", required=True)
+    parser.add_argument("--mode", required=True, choices=sorted(_VALID_MODES))
+    parser.add_argument("--ready-file")
+    parser.add_argument("--timeout-seconds", type=float, default=10.0)
+    args = parser.parse_args(list(argv) if argv is not None else None)
+
+    run_live_wire_target(
+        Path(args.plan),
+        Path(args.target),
+        mode=args.mode,
+        ready_path=Path(args.ready_file) if args.ready_file is not None else None,
+        timeout_seconds=args.timeout_seconds,
     )
     return 0
 
@@ -491,7 +514,7 @@ def _endpoint_uses_tls(name: str, endpoint: str) -> bool:
     if name == "websocket":
         return endpoint.lower().startswith("wss://")
     if name == "quic":
-        return endpoint.lower().startswith("quic+tls://")
+        return True
     return False
 
 

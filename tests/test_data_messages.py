@@ -192,6 +192,7 @@ def test_current_frame_submit_metadata_roundtrip() -> None:
         tile_base_id=0,
         camera_bytes=192,
         tile_index_bytes=0,
+        operation_id=0x1122334455667788,
         submit_mode=SubmitMode.MIXED,
         budget_policy=BudgetPolicy.ALLOW_PARTIAL | BudgetPolicy.ALLOW_DEGRADED,
         loss_tolerance_policy=0xFF,
@@ -205,7 +206,40 @@ def test_current_frame_submit_metadata_roundtrip() -> None:
 
     assert len(payload) == FRAME_SUBMIT_METADATA_LENGTH
     assert FRAME_SUBMIT_METADATA_LENGTH == 72
+    assert payload[36:40] == bytes(4)
+    assert payload[40:48] == bytes.fromhex("8877665544332211")
+    assert payload[48:52] == bytes(4)
     assert FrameSubmitMetadata.unpack(payload) == metadata
+
+
+def test_current_frame_submit_metadata_rejects_zero_operation_id() -> None:
+    with pytest.raises(ValueError, match="frame_submit.operation_id must be non-zero"):
+        FrameSubmitMetadata(
+            src_width=1,
+            src_height=1,
+            tile_width=1,
+            tile_height=1,
+            tile_count=1,
+            section_count=0,
+            frame_class=0,
+            input_profile=InputProfile.DENSE_LUMA_FRAME,
+            tile_index_mode=TileIndexMode.DENSE_RANGE,
+            reserved0=0,
+            latency_budget_ms=1,
+            target_fps_x100=1,
+            retry_of_frame=0,
+            tile_base_id=0,
+            camera_bytes=0,
+            tile_index_bytes=0,
+            operation_id=0,
+            submit_mode=SubmitMode.INLINE,
+            budget_policy=BudgetPolicy.NONE,
+            loss_tolerance_policy=0,
+            object_ref_mask=0,
+            dependency_frame_id=0,
+            payload_kind_bitmap=PayloadKind.TENSOR,
+            payload_frame_count=0,
+        )
 
 
 def test_current_frame_submit_metadata_rejects_unknown_budget_policy_bits() -> None:
@@ -227,6 +261,7 @@ def test_current_frame_submit_metadata_rejects_unknown_budget_policy_bits() -> N
             tile_base_id=0,
             camera_bytes=0,
             tile_index_bytes=0,
+            operation_id=1,
             submit_mode=SubmitMode.INLINE,
             budget_policy=0x80,
         )
@@ -250,6 +285,7 @@ def test_current_frame_submit_metadata_allows_non_tensor_payload_without_tile_fi
         tile_base_id=0,
         camera_bytes=0,
         tile_index_bytes=0,
+        operation_id=1,
         payload_kind_bitmap=PayloadKind.STRUCTURED_EVENT,
         payload_frame_count=1,
     )
@@ -279,6 +315,7 @@ def test_current_frame_submit_metadata_rejects_tensor_fields_for_non_tensor_payl
             tile_base_id=0,
             camera_bytes=0,
             tile_index_bytes=0,
+            operation_id=1,
             payload_kind_bitmap=PayloadKind.STRUCTURED_EVENT,
             payload_frame_count=1,
         )

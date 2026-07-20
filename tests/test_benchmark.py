@@ -485,13 +485,13 @@ def test_build_benchmark_results_report_can_override_implementation_name() -> No
 
 def test_benchmark_environment_records_release_candidate_identity(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("NNRP_BENCHMARK_SDK_COMMIT", "0123456789abcdef")
-    monkeypatch.setenv("NNRP_BENCHMARK_RUST_ARTIFACT_VERSION", "1.0.0-preview.4.6")
+    monkeypatch.setenv("NNRP_BENCHMARK_RUST_ARTIFACT_VERSION", "1.0.0-preview.4.7")
     monkeypatch.setenv("NNRP_BENCHMARK_CANDIDATE_WHEEL", "nnrp_py-1.0.0rc4.post5-py3-none-linux.whl")
 
     environment = benchmark._build_environment()
 
     assert environment["sdk_commit"] == "0123456789abcdef"
-    assert environment["nnrp_rs_artifact"] == "1.0.0-preview.4.6"
+    assert environment["nnrp_rs_artifact"] == "1.0.0-preview.4.7"
     assert environment["notes"].startswith(
         "candidate_wheel=nnrp_py-1.0.0rc4.post5-py3-none-linux.whl; sdk_version="
     )
@@ -856,16 +856,6 @@ class FakeNativeConnection:
         self.runtime_events: list[SimpleNamespace] = []
         self.results: list[SimpleNamespace] = []
 
-    def poll_events(self):
-        return self.poll_events_batch(max_events=8)
-
-    def poll_events_batch(self, *, max_events: int):
-        self.entrypoints.client_await_events(max_events)
-        self.polled_batches.append(max_events)
-        events = tuple(self.runtime_events[:max_events])
-        del self.runtime_events[:max_events]
-        return events
-
     def acquire_object_metadata_copy(self, payload: bytes | bytearray | memoryview):
         copied_payload = bytes(payload)
         self.object_metadata_payloads.append(copied_payload)
@@ -877,16 +867,28 @@ class FakeNativeSession:
         self.connection = connection
         self.entrypoints = connection.entrypoints
 
+    def poll_events(self):
+        return self.poll_events_batch(max_events=8)
+
+    def poll_events_batch(self, *, max_events: int):
+        self.entrypoints.client_await_events(max_events)
+        self.connection.polled_batches.append(max_events)
+        events = tuple(self.connection.runtime_events[:max_events])
+        del self.connection.runtime_events[:max_events]
+        return events
+
     def submit_operation(
         self,
         *,
         operation_id: int,
         frame_id: int,
-        payload: bytes | bytearray | memoryview = b"",
+        metadata=None,
+        body: bytes | bytearray | memoryview = b"",
     ) -> "FakeNativeOperation":
-        self.entrypoints.client_submit(operation_id, frame_id, payload)
-        operation = FakeNativeOperation(self, operation_id, frame_id, bytes(payload))
-        self.connection.submitted_payloads.append(bytes(payload))
+        del metadata
+        self.entrypoints.client_submit(operation_id, frame_id, body)
+        operation = FakeNativeOperation(self, operation_id, frame_id, bytes(body))
+        self.connection.submitted_payloads.append(bytes(body))
         assert self.connection.server_session is not None
         self.connection.server_session.pending_submits.append(operation)
         return operation
@@ -925,13 +927,14 @@ class FakeNativeServerOperation:
         self.operation_id = operation.operation_id
         self.frame_id = operation.frame_id
 
-    def send_result(self, payload: bytes | bytearray | memoryview = b"") -> None:
-        self.server_session.entrypoints.server_send_result(self.operation_id, payload)
+    def send_result(self, metadata, body: bytes | bytearray | memoryview = b"") -> None:
+        del metadata
+        self.server_session.entrypoints.server_send_result(self.operation_id, body)
         self.server_session.connection.results.append(
             SimpleNamespace(
                 operation_id=self.operation_id,
                 frame_id=self.frame_id,
-                payload=bytes(payload),
+                body=bytes(body),
             )
         )
 

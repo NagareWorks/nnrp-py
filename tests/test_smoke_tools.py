@@ -1303,6 +1303,7 @@ async def _run_connect_client_session_typed_current_tcp() -> None:
         submit_stream_id = await session.send_submit(
             SubmitRequest(
                 frame_id=814,
+                operation_id=814,
                 src_width=640,
                 src_height=360,
                 tile_width=32,
@@ -1387,6 +1388,7 @@ async def _run_connect_client_session_non_tensor_current_tcp() -> None:
         submit_stream_id = await session.send_submit(
             SubmitRequest(
                 frame_id=815,
+                operation_id=815,
                 payload_kind_bitmap=(PayloadKind.STRUCTURED_EVENT | PayloadKind.TOOL_DELTA),
                 payload_frame_count=0,
             )
@@ -1956,6 +1958,7 @@ async def _run_tcp_current_invalid_coverage_server_once(
 def _build_submit_request(frame_id: int) -> SubmitRequest:
     return SubmitRequest(
         frame_id=frame_id,
+        operation_id=frame_id,
         src_width=640,
         src_height=360,
         tile_width=32,

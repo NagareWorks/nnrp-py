@@ -9,17 +9,13 @@ from pathlib import Path
 from types import TracebackType
 from typing import Any
 
-from nnrp.core import MessageType, TransportPolicy
+from nnrp.core import FrameSubmitMetadata, MessageType, TransportPolicy
 from nnrp.native import (
     FFI_STATUS_WOULD_BLOCK,
     NativeArtifactError,
-    NativeCreditUpdateCallback,
-    NativePayloadFamilyCallback,
     NativePlatform,
-    NativeResultHintCallback,
     NativeRuntimeBackend,
     NativeRuntimeConnection,
-    NativeRuntimeEventCallback,
     NativeRuntimeOperation,
     NativeRuntimeResult,
     NativeRuntimeSession,
@@ -49,6 +45,7 @@ from nnrp.runtime import (
     SupersedeMetadata,
 )
 from nnrp.runtime.types import _FixedRuntimeMetadata
+from nnrp.schema import TOKEN_DELTA_SCHEMA_ID, TOKEN_DELTA_SCHEMA_VERSION, StandardProfile
 
 NativeControlTarget = NativeRuntimeSession
 
@@ -61,9 +58,9 @@ class NativeClientSessionOptions:
     connection_generation: int = 1
     requested_session_id: int = 1
     session_generation: int = 1
-    profile_id: int = 0
-    schema_id: int = 0
-    schema_version: int = 0
+    profile_id: int = int(StandardProfile.TOKEN)
+    schema_id: int = TOKEN_DELTA_SCHEMA_ID
+    schema_version: int = TOKEN_DELTA_SCHEMA_VERSION
 
 
 @dataclass(frozen=True, slots=True)
@@ -76,9 +73,9 @@ class NativeClientConnectionOptions:
 class NativeClientSessionOpenOptions:
     requested_session_id: int = 1
     session_generation: int = 1
-    profile_id: int = 0
-    schema_id: int = 0
-    schema_version: int = 0
+    profile_id: int = int(StandardProfile.TOKEN)
+    schema_id: int = TOKEN_DELTA_SCHEMA_ID
+    schema_version: int = TOKEN_DELTA_SCHEMA_VERSION
 
 
 @dataclass(slots=True)
@@ -144,90 +141,14 @@ class NativeClientConnection:
             raise NativeWouldBlockError(NativeStatus(FFI_STATUS_WOULD_BLOCK))
         return result
 
-    def dispatch_events(
-        self,
-        callback: NativeRuntimeEventCallback,
-        *,
-        max_events: int | None = None,
-        event_kind: int | None = None,
-    ) -> int:
-        self._ensure_open()
-        return self.connection.dispatch_events(callback, max_events=max_events, event_kind=event_kind)
-
-    def dispatch_credit_updates(
-        self,
-        callback: NativeCreditUpdateCallback,
-        *,
-        max_events: int | None = None,
-    ) -> int:
-        self._ensure_open()
-        return self.connection.dispatch_credit_updates(callback, max_events=max_events)
-
-    def dispatch_result_hints(
-        self,
-        callback: NativeResultHintCallback,
-        *,
-        max_events: int | None = None,
-    ) -> int:
-        self._ensure_open()
-        return self.connection.dispatch_result_hints(callback, max_events=max_events)
-
-    def dispatch_payload_family_events(
-        self,
-        payload_family: str,
-        callback: NativePayloadFamilyCallback,
-        *,
-        max_events: int | None = None,
-        event_kind: int | None = None,
-    ) -> int:
-        self._ensure_open()
-        if event_kind is None:
-            return self.connection.dispatch_payload_family_events(
-                payload_family,
-                callback,
-                max_events=max_events,
-            )
-        return self.connection.dispatch_payload_family_events(
-            payload_family,
-            callback,
-            max_events=max_events,
-            event_kind=event_kind,
-        )
-
-    def dispatch_structured_events(
-        self,
-        callback: NativePayloadFamilyCallback,
-        *,
-        max_events: int | None = None,
-    ) -> int:
-        self._ensure_open()
-        return self.connection.dispatch_structured_events(callback, max_events=max_events)
-
-    def dispatch_tool_deltas(
-        self,
-        callback: NativePayloadFamilyCallback,
-        *,
-        max_events: int | None = None,
-    ) -> int:
-        self._ensure_open()
-        return self.connection.dispatch_tool_deltas(callback, max_events=max_events)
-
-    def dispatch_workflow_states(
-        self,
-        callback: NativePayloadFamilyCallback,
-        *,
-        max_events: int | None = None,
-    ) -> int:
-        self._ensure_open()
-        return self.connection.dispatch_workflow_states(callback, max_events=max_events)
-
     def submit_and_poll_result(
         self,
         session: NativeRuntimeSession,
         *,
         operation_id: int,
         frame_id: int,
-        payload: bytes | bytearray | memoryview = b"",
+        metadata: FrameSubmitMetadata | None = None,
+        body: bytes | bytearray | memoryview = b"",
         parent_operation_id: int | None = None,
         operation_group_id: int | None = None,
         max_events: int | None = None,
@@ -237,7 +158,8 @@ class NativeClientConnection:
         operation = session.submit_operation(
             operation_id=operation_id,
             frame_id=frame_id,
-            payload=payload,
+            metadata=metadata,
+            body=body,
             parent_operation_id=parent_operation_id,
             operation_group_id=operation_group_id,
         )
@@ -521,12 +443,17 @@ class NativeClientConnection:
         if self._closed:
             return
         try:
-            self.connection.close()
+            try:
+                for session in reversed(self._sessions):
+                    if not getattr(session, "_closed", False):
+                        session.close()
+            finally:
+                self.connection.close()
         finally:
             self._cancelled_frames.clear()
             self._cancelled_operations.clear()
-        self._sessions.clear()
-        self._closed = True
+            self._sessions.clear()
+            self._closed = True
 
     def _ensure_open(self) -> None:
         if self._closed:

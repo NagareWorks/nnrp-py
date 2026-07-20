@@ -26,9 +26,19 @@ from nnrp.core.enums import HeaderFlags, MessageType, WireFormat
 from nnrp.core.header import HEADER_LENGTH, NnrpHeader
 from nnrp.core.messages.control import (
     ClientHelloMetadata,
+    PayloadKind,
     ServerHelloAckMetadata,
 )
-from nnrp.core.messages.data import InputProfile, TensorDType, TensorLayout, TileIndexMode
+from nnrp.core.messages.data import (
+    BudgetPolicy,
+    InputProfile,
+    ResultClass,
+    ResultFlags,
+    ResultPushMetadata,
+    TensorDType,
+    TensorLayout,
+    TileIndexMode,
+)
 from nnrp.core.packet import (
     NnrpPacket,
     TensorSectionData,
@@ -72,6 +82,7 @@ from nnrp.runtime import (
     encode_runtime_object_metadata,
 )
 from nnrp.schema import (
+    StandardProfile,
     pack_schema_descriptor,
     pack_typed_payload_descriptor,
     token_delta_payload_descriptor,
@@ -80,7 +91,7 @@ from nnrp.schema import (
     unpack_typed_payload_descriptor,
     validate_typed_payload_binding,
 )
-from nnrp.server import NativeServerAcceptOptions, listen_native_server
+from nnrp.server import NativeServerAcceptOptions, NativeServerOptions, listen_native_server
 
 _RESULTS_SCHEMA_URL = (
     "https://raw.githubusercontent.com/NagareWorks/nnrp-conformance/main/schemas/benchmark-results.schema.json"
@@ -95,6 +106,27 @@ _NATIVE_ROLE_ENTRYPOINTS = (
     "server_send_result",
     "runtime_frame_send",
 )
+
+
+def _native_token_result_metadata() -> ResultPushMetadata:
+    return ResultPushMetadata(
+        status_code=200,
+        result_flags=ResultFlags.NONE,
+        section_count=0,
+        tile_count=0,
+        active_profile_id=int(StandardProfile.TOKEN),
+        reserved0=0,
+        inference_ms=1,
+        queue_ms=0,
+        server_total_ms=1,
+        reserved1=0,
+        tile_base_id=0,
+        tile_index_bytes=0,
+        result_class=ResultClass.COMPLETE,
+        applied_budget_policy=BudgetPolicy.NONE,
+        payload_kind_bitmap=PayloadKind.TOKEN_CHUNK,
+        payload_frame_count=1,
+    )
 
 
 def build_benchmark_results_report(
@@ -403,12 +435,13 @@ def _open_native_role_loopback(transport: str = "ipc") -> Any:
             provider_endpoint=provider_endpoint,
             transport=transport,
             require_native=True,
+            options=NativeServerOptions(server_id=2),
         ) as server:
             with ThreadPoolExecutor(max_workers=1, thread_name_prefix="nnrp-benchmark-accept") as executor:
                 accepted = executor.submit(
                     server.accept,
                     NativeServerAcceptOptions(
-                        session_handle_id=3,
+                        session_handle_id=4,
                         session_generation=1,
                         timeout_ms=5_000,
                     ),
@@ -437,12 +470,11 @@ def _run_native_event_polling(scenario_id: str, workload: dict[str, Any]) -> dic
     warmup_iterations = _non_negative_int(workload.get("warmup_iterations"), default=min(10_000, iterations))
     max_events = _positive_int(workload.get("max_events"), default=8)
     try:
-        with _open_native_role_loopback() as (client, _client_session, _server_session):
-            connection = client.connection
-            _drain_native_setup_events(connection)
+        with _open_native_role_loopback() as (_client, client_session, _server_session):
+            _drain_native_setup_events(client_session)
 
             def operation() -> None:
-                connection.poll_events_batch(max_events=max_events)
+                client_session.poll_events_batch(max_events=max_events)
 
             for _ in range(warmup_iterations):
                 operation()
@@ -459,12 +491,11 @@ def _run_native_batch_event_polling_throughput(scenario_id: str, workload: dict[
     max_events = _positive_int(workload.get("max_events"), default=8)
     profile = _bool(workload.get("profile"), default=False)
     try:
-        with _open_native_role_loopback() as (client, _client_session, _server_session):
-            connection = client.connection
-            _drain_native_setup_events(connection)
+        with _open_native_role_loopback() as (_client, client_session, _server_session):
+            _drain_native_setup_events(client_session)
 
             def operation() -> None:
-                connection.poll_events_batch(max_events=max_events)
+                client_session.poll_events_batch(max_events=max_events)
 
             for _ in range(warmup_iterations):
                 operation()
@@ -484,7 +515,7 @@ def _run_native_role_submit_result_loop(scenario_id: str, workload: dict[str, An
     counter = 0
     try:
         with _open_native_role_loopback() as (client, session, server_session):
-            _drain_native_setup_events(client.connection)
+            _drain_native_setup_events(session)
             counters = _install_native_role_counters(session, server_session)
 
             def operation() -> None:
@@ -493,14 +524,14 @@ def _run_native_role_submit_result_loop(scenario_id: str, workload: dict[str, An
                 submitted = session.submit_operation(
                     operation_id=counter,
                     frame_id=counter,
-                    payload=payload,
+                    body=payload,
                 )
                 received = server_session.receive_submit(timeout_ms=5_000)
                 if received.frame_id != counter:
                     raise RuntimeError("native role loopback received the wrong frame")
-                received.send_result(payload)
+                received.send_result(_native_token_result_metadata(), payload)
                 result = session.poll_result(submitted, max_events=4, timeout_ms=5_000)
-                if result.frame_id != counter or result.payload != payload:
+                if result.frame_id != counter or result.body != payload:
                     raise RuntimeError("native role loopback returned the wrong result")
 
             try:
@@ -530,13 +561,13 @@ def _run_native_submit_cancel_loop(scenario_id: str, workload: dict[str, Any]) -
     counter = 0
     try:
         with _open_native_role_loopback() as (client, session, server_session):
-            _drain_native_setup_events(client.connection)
+            _drain_native_setup_events(session)
             counters = _install_native_role_counters(session, server_session)
 
             def operation() -> None:
                 nonlocal counter
                 counter += 1
-                submitted = session.submit_operation(operation_id=counter, frame_id=counter, payload=payload)
+                submitted = session.submit_operation(operation_id=counter, frame_id=counter, body=payload)
                 received = server_session.receive_submit(timeout_ms=5_000)
                 if received.frame_id != counter:
                     raise RuntimeError("native role loopback received the wrong frame")
@@ -568,35 +599,36 @@ def _run_native_progress_partial_polling_loop(scenario_id: str, workload: dict[s
     max_events = _positive_int(workload.get("max_events"), default=2)
     profile = _bool(workload.get("profile"), default=False)
     payload = b"x" * payload_bytes
+    progress_body = b"progress"
     counter = 0
     try:
         with _open_native_role_loopback() as (client, session, server_session):
-            _drain_native_setup_events(client.connection)
+            _drain_native_setup_events(session)
             counters = _install_native_role_counters(session, server_session)
 
             def operation() -> None:
                 nonlocal counter
                 counter += 1
-                submitted = session.submit_operation(operation_id=counter, frame_id=counter, payload=payload)
+                submitted = session.submit_operation(operation_id=counter, frame_id=counter, body=payload)
                 received = server_session.receive_submit(timeout_ms=5_000)
                 server_session.send_progress(
-                    ProgressMetadata(counter, 1, 1, 5_000, payload_bytes, payload_bytes * 2),
-                    b"progress",
+                    ProgressMetadata(counter, 1, 1, 5_000, payload_bytes, len(progress_body)),
+                    progress_body,
                 )
                 server_session.send_partial_result(
                     PartialResultMetadata(counter, 2, payload_bytes, 1, payload_bytes, 0),
                     payload,
                 )
-                events = client.connection.poll_events_batch(max_events=max_events)
+                events = session.poll_events_batch(max_events=max_events)
                 message_types = {event.message_type for event in events}
                 if (
                     int(MessageType.PROGRESS) not in message_types
                     or int(MessageType.PARTIAL_RESULT) not in message_types
                 ):
                     raise RuntimeError("native role loopback did not deliver progress and partial-result events")
-                received.send_result(payload)
+                received.send_result(_native_token_result_metadata(), payload)
                 result = session.poll_result(submitted, max_events=max_events, timeout_ms=5_000)
-                if result.payload != payload:
+                if result.body != payload:
                     raise RuntimeError("native role loopback returned the wrong terminal result")
 
             try:
@@ -629,9 +661,9 @@ def _run_native_role_submit_result_allocation_smoke(scenario_id: str, workload: 
             def operation() -> None:
                 nonlocal counter
                 counter += 1
-                submitted = session.submit_operation(operation_id=counter, frame_id=counter, payload=payload)
+                submitted = session.submit_operation(operation_id=counter, frame_id=counter, body=payload)
                 received = server_session.receive_submit(timeout_ms=5_000)
-                received.send_result(payload)
+                received.send_result(_native_token_result_metadata(), payload)
                 session.poll_result(submitted, max_events=4, timeout_ms=5_000)
 
             for _ in range(warmup_iterations):
@@ -645,8 +677,8 @@ def _run_native_role_submit_result_allocation_smoke(scenario_id: str, workload: 
         return _skip_result(scenario_id, f"native IPC role loopback unavailable: {error}")
 
 
-def _drain_native_setup_events(connection: Any) -> None:
-    poll_events = getattr(connection, "poll_events", None)
+def _drain_native_setup_events(session: Any) -> None:
+    poll_events = getattr(session, "poll_events", None)
     if callable(poll_events):
         try:
             poll_events()
@@ -654,7 +686,7 @@ def _drain_native_setup_events(connection: Any) -> None:
             pass
         return
 
-    poll_events_batch = getattr(connection, "poll_events_batch", None)
+    poll_events_batch = getattr(session, "poll_events_batch", None)
     if not callable(poll_events_batch):
         return
     try:
@@ -941,7 +973,7 @@ def _run_transport_loopback(scenario_id: str, workload: dict[str, Any]) -> dict[
     counter = 0
     try:
         with _open_native_role_loopback(transport) as (client, session, server_session):
-            _drain_native_setup_events(client.connection)
+            _drain_native_setup_events(session)
             counters = _install_native_role_counters(session, server_session)
 
             def operation() -> None:
@@ -950,14 +982,14 @@ def _run_transport_loopback(scenario_id: str, workload: dict[str, Any]) -> dict[
                 submitted = session.submit_operation(
                     operation_id=counter,
                     frame_id=counter,
-                    payload=payload,
+                    body=payload,
                 )
                 received = server_session.receive_submit(timeout_ms=5_000)
                 if received.frame_id != counter:
                     raise RuntimeError("native transport loopback received the wrong frame")
-                received.send_result(payload)
+                received.send_result(_native_token_result_metadata(), payload)
                 result = session.poll_result(submitted, max_events=4, timeout_ms=5_000)
-                if result.frame_id != counter or result.payload != payload:
+                if result.frame_id != counter or result.body != payload:
                     raise RuntimeError("native transport loopback returned the wrong result")
 
             try:
@@ -989,6 +1021,7 @@ def _build_submit_result_packet_views() -> tuple[NnrpPacket, NnrpPacket]:
     submit = build_frame_submit_packet(
         session_id=41,
         frame_id=303,
+        operation_id=303,
         src_width=64,
         src_height=64,
         tile_width=32,

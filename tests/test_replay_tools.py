@@ -71,6 +71,7 @@ class FakeCacheReference:
 class FakeFrameFeatures:
     session_id: str
     frame_id: int
+    operation_id: int
     src_width: int
     src_height: int
     tile_size: int
@@ -133,6 +134,7 @@ def test_frame_features_export_to_current_packet() -> None:
     frame = FakeFrameFeatures(
         session_id="session-alpha",
         frame_id=7,
+        operation_id=107,
         src_width=96,
         src_height=64,
         tile_size=32,
@@ -198,6 +200,7 @@ def test_frame_features_export_can_emit_mixed_object_reference_packet() -> None:
     frame = FakeFrameFeatures(
         session_id="session-alpha",
         frame_id=12,
+        operation_id=112,
         src_width=96,
         src_height=64,
         tile_size=32,
@@ -432,6 +435,7 @@ def test_frame_features_wire_summary_and_comparison_are_stable() -> None:
     frame = FakeFrameFeatures(
         session_id="session-alpha",
         frame_id=7,
+        operation_id=107,
         src_width=96,
         src_height=64,
         tile_size=32,

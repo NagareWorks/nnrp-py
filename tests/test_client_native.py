@@ -42,6 +42,7 @@ from nnrp.runtime import (
     decode_runtime_control_metadata,
     encode_runtime_control_metadata,
 )
+from nnrp.schema import TOKEN_DELTA_SCHEMA_ID, TOKEN_DELTA_SCHEMA_VERSION, StandardProfile
 
 
 class FakeTransportEntrypoints:
@@ -130,7 +131,6 @@ class FakeConnection:
         self.transport_connection = transport_connection
         self.sessions: list[FakeSession] = []
         self.control_calls: list[tuple[int, bytes | bytearray | memoryview]] = []
-        self.dispatch_calls: list[tuple[str, int | None, int | None]] = []
         self.closed = False
 
     def open_session(
@@ -151,6 +151,89 @@ class FakeConnection:
         )
         self.sessions.append(session)
         return session
+
+    def _send_runtime_frame(self, message_type, metadata, tail=b"") -> None:
+        self.control_calls.append(
+            (int(message_type), encode_runtime_control_metadata(message_type, metadata, tail=bytes(tail)))
+        )
+
+    def close(self) -> None:
+        self.closed = True
+        self.transport_connection._close()
+        for session in self.sessions:
+            session.closed = True
+
+
+class FakeSession:
+    def __init__(
+        self,
+        *,
+        requested_session_id: int,
+        generation: int,
+        profile_id: int,
+        schema_id: int,
+        schema_version: int,
+    ) -> None:
+        self.requested_session_id = requested_session_id
+        self.generation = generation
+        self.profile_id = profile_id
+        self.schema_id = schema_id
+        self.schema_version = schema_version
+        self.closed = False
+        self.operations: list[FakeOperation] = []
+        self.cancelled_frames: list[int] = []
+        self.control_calls: list[tuple[int, bytes | bytearray | memoryview]] = []
+        self.flow_updates: list[int] = []
+        self.result_hints: list[bytes | bytearray | memoryview] = []
+        self.dispatch_calls: list[tuple[str, int | None, int | None]] = []
+        self.submit_operation_calls = 0
+        self.submit_result_calls = 0
+        self.poll_result_calls = 0
+
+    def close(self) -> None:
+        self.closed = True
+
+    def submit_operation(
+        self,
+        *,
+        operation_id: int,
+        frame_id: int,
+        metadata=None,
+        body: bytes = b"",
+        parent_operation_id: int | None = None,
+        operation_group_id: int | None = None,
+    ) -> FakeOperation:
+        self.submit_operation_calls += 1
+        operation = FakeOperation(
+            session_id=self.requested_session_id,
+            operation_id=operation_id,
+            frame_id=frame_id,
+            body=body,
+        )
+        operation.parent_operation_id = parent_operation_id
+        operation.operation_group_id = operation_group_id
+        self.operations.append(operation)
+        return operation
+
+    def poll_result(
+        self,
+        operation: FakeOperation,
+        *,
+        max_events: int | None = None,
+        timeout_ms: int = 0,
+    ) -> FakeResult:
+        self.poll_result_calls += 1
+        return FakeResult(
+            session_id=self.requested_session_id,
+            operation_id=operation.operation_id,
+            frame_id=operation.frame_id,
+            body=operation.body,
+            max_events=max_events,
+            timeout_ms=timeout_ms,
+        )
+
+    def cancel(self, *, frame_id: int) -> None:
+        self.cancelled_frames.append(frame_id)
 
     def _send_runtime_frame(self, message_type, metadata, tail=b"") -> None:
         self.control_calls.append(
@@ -193,94 +276,13 @@ class FakeConnection:
     def dispatch_workflow_states(self, callback, *, max_events: int | None = None) -> int:
         return self.dispatch_payload_family_events("workflow_state", callback, max_events=max_events)
 
-    def close(self) -> None:
-        self.closed = True
-        self.transport_connection._close()
-        for session in self.sessions:
-            session.closed = True
-
-
-class FakeSession:
-    def __init__(
-        self,
-        *,
-        requested_session_id: int,
-        generation: int,
-        profile_id: int,
-        schema_id: int,
-        schema_version: int,
-    ) -> None:
-        self.requested_session_id = requested_session_id
-        self.generation = generation
-        self.profile_id = profile_id
-        self.schema_id = schema_id
-        self.schema_version = schema_version
-        self.closed = False
-        self.operations: list[FakeOperation] = []
-        self.cancelled_frames: list[int] = []
-        self.control_calls: list[tuple[int, bytes | bytearray | memoryview]] = []
-        self.flow_updates: list[int] = []
-        self.result_hints: list[bytes | bytearray | memoryview] = []
-        self.submit_operation_calls = 0
-        self.submit_result_calls = 0
-        self.poll_result_calls = 0
-
-    def close(self) -> None:
-        self.closed = True
-
-    def submit_operation(
-        self,
-        *,
-        operation_id: int,
-        frame_id: int,
-        payload: bytes = b"",
-        parent_operation_id: int | None = None,
-        operation_group_id: int | None = None,
-    ) -> FakeOperation:
-        self.submit_operation_calls += 1
-        operation = FakeOperation(
-            session_id=self.requested_session_id,
-            operation_id=operation_id,
-            frame_id=frame_id,
-            payload=payload,
-        )
-        operation.parent_operation_id = parent_operation_id
-        operation.operation_group_id = operation_group_id
-        self.operations.append(operation)
-        return operation
-
-    def poll_result(
-        self,
-        operation: FakeOperation,
-        *,
-        max_events: int | None = None,
-        timeout_ms: int = 0,
-    ) -> FakeResult:
-        self.poll_result_calls += 1
-        return FakeResult(
-            session_id=self.requested_session_id,
-            operation_id=operation.operation_id,
-            frame_id=operation.frame_id,
-            payload=operation.payload,
-            max_events=max_events,
-            timeout_ms=timeout_ms,
-        )
-
-    def cancel(self, *, frame_id: int) -> None:
-        self.cancelled_frames.append(frame_id)
-
-    def _send_runtime_frame(self, message_type, metadata, tail=b"") -> None:
-        self.control_calls.append(
-            (int(message_type), encode_runtime_control_metadata(message_type, metadata, tail=bytes(tail)))
-        )
-
 
 class FakeOperation:
-    def __init__(self, *, session_id: int, operation_id: int, frame_id: int, payload: bytes) -> None:
+    def __init__(self, *, session_id: int, operation_id: int, frame_id: int, body: bytes) -> None:
         self.session_id = session_id
         self.operation_id = operation_id
         self.frame_id = frame_id
-        self.payload = payload
+        self.body = body
         self.cancelled = False
         self.completed_payloads: list[bytes | bytearray | memoryview] = []
         self.dropped = False
@@ -304,14 +306,14 @@ class FakeResult:
         session_id: int,
         operation_id: int,
         frame_id: int,
-        payload: bytes,
+        body: bytes,
         max_events: int | None,
         timeout_ms: int = 0,
     ) -> None:
         self.session_id = session_id
         self.operation_id = operation_id
         self.frame_id = frame_id
-        self.payload = payload
+        self.body = body
         self.max_events = max_events
         self.timeout_ms = timeout_ms
 
@@ -367,7 +369,7 @@ class FakeAnonymousSession:
             session_id=0,
             operation_id=operation.operation_id,
             frame_id=operation.frame_id,
-            payload=operation.payload,
+            body=operation.body,
             max_events=max_events,
             timeout_ms=timeout_ms,
         )
@@ -395,19 +397,19 @@ def test_connect_native_client_session_opens_and_closes_host_session() -> None:
     assert backend.connections[0].sessions[0].closed is True
 
 
-def test_native_session_open_defaults_keep_profile_unspecified() -> None:
+def test_native_session_open_defaults_match_rust_token_profile() -> None:
     backend = FakeBackend()
 
     with connect_native_client_session(backend=backend) as session:
-        assert session.profile_id == 0
-        assert session.schema_id == 0
-        assert session.schema_version == 0
+        assert session.profile_id == StandardProfile.TOKEN
+        assert session.schema_id == TOKEN_DELTA_SCHEMA_ID
+        assert session.schema_version == TOKEN_DELTA_SCHEMA_VERSION
 
     with connect_native_client_connection(backend=backend) as connection:
         session = connection.open_session()
-        assert session.profile_id == 0
-        assert session.schema_id == 0
-        assert session.schema_version == 0
+        assert session.profile_id == StandardProfile.TOKEN
+        assert session.schema_id == TOKEN_DELTA_SCHEMA_ID
+        assert session.schema_version == TOKEN_DELTA_SCHEMA_VERSION
 
 
 def test_connect_native_client_connection_routes_results_for_multiple_sessions() -> None:
@@ -418,17 +420,17 @@ def test_connect_native_client_connection_routes_results_for_multiple_sessions()
     ) as connection:
         first = connection.open_session(NativeClientSessionOpenOptions(requested_session_id=10))
         second = connection.open_session(NativeClientSessionOpenOptions(requested_session_id=11))
-        first_operation = first.submit_operation(operation_id=100, frame_id=1, payload=b"first")
-        second_operation = second.submit_operation(operation_id=101, frame_id=2, payload=b"second")
+        first_operation = first.submit_operation(operation_id=100, frame_id=1, body=b"first")
+        second_operation = second.submit_operation(operation_id=101, frame_id=2, body=b"second")
 
         first_result = connection.poll_result(first, first_operation, max_events=4)
         second_result = connection.poll_result(second, second_operation, max_events=4)
 
         assert first_result.session_id == 10
-        assert first_result.payload == b"first"
+        assert first_result.body == b"first"
         assert first_result.max_events == 4
         assert second_result.session_id == 11
-        assert second_result.payload == b"second"
+        assert second_result.body == b"second"
 
     assert backend.connections[0].connection_id == 7
     assert backend.connections[0].closed is True
@@ -455,19 +457,21 @@ def test_native_client_connection_rejects_use_after_close() -> None:
         connection.open_session()
 
 
-def test_native_client_connection_delegates_callback_dispatch() -> None:
+def test_native_client_session_owns_callback_dispatch() -> None:
     backend = FakeBackend()
     callbacks: list[object] = []
 
     with connect_native_client_connection(backend=backend) as connection:
-        assert connection.dispatch_events(callbacks.append, max_events=2, event_kind=6) == 1
-        assert connection.dispatch_credit_updates(callbacks.append, max_events=3) == 1
-        assert connection.dispatch_result_hints(callbacks.append, max_events=8) == 1
-        assert connection.dispatch_structured_events(callbacks.append, max_events=4) == 1
-        assert connection.dispatch_tool_deltas(callbacks.append, max_events=5) == 1
-        assert connection.dispatch_workflow_states(callbacks.append, max_events=6) == 1
+        session = connection.open_session()
+        assert not hasattr(connection, "dispatch_events")
+        assert session.dispatch_events(callbacks.append, max_events=2, event_kind=6) == 1
+        assert session.dispatch_credit_updates(callbacks.append, max_events=3) == 1
+        assert session.dispatch_result_hints(callbacks.append, max_events=8) == 1
+        assert session.dispatch_structured_events(callbacks.append, max_events=4) == 1
+        assert session.dispatch_tool_deltas(callbacks.append, max_events=5) == 1
+        assert session.dispatch_workflow_states(callbacks.append, max_events=6) == 1
         assert (
-            connection.dispatch_payload_family_events(
+            session.dispatch_payload_family_events(
                 "structured_event",
                 callbacks.append,
                 max_events=7,
@@ -485,7 +489,7 @@ def test_native_client_connection_delegates_callback_dispatch() -> None:
         "workflow_state",
         "structured_event",
     ]
-    assert backend.connections[0].dispatch_calls == [
+    assert backend.connections[0].sessions[0].dispatch_calls == [
         ("events", 2, 6),
         ("credit_updates", 3, None),
         ("result_hints", 8, None),
@@ -500,7 +504,7 @@ def test_native_client_connection_supports_operation_cancellation() -> None:
     backend = FakeBackend()
     with connect_native_client_connection(backend=backend) as connection:
         session = connection.open_session()
-        operation = session.submit_operation(operation_id=100, frame_id=7, payload=b"payload")
+        operation = session.submit_operation(operation_id=100, frame_id=7, body=b"payload")
 
         connection.cancel_operation(operation)
         connection.cancel_frame(session, frame_id=7)
@@ -513,7 +517,7 @@ def test_native_client_connection_suppresses_cancelled_operation_results() -> No
     backend = FakeBackend()
     with connect_native_client_connection(backend=backend) as connection:
         session = connection.open_session()
-        operation = session.submit_operation(operation_id=100, frame_id=7, payload=b"payload")
+        operation = session.submit_operation(operation_id=100, frame_id=7, body=b"payload")
 
         connection.cancel_operation(operation)
 
@@ -528,7 +532,7 @@ def test_native_client_connection_suppresses_runtime_cancelled_operation_results
     backend = FakeBackend()
     with connect_native_client_connection(backend=backend) as connection:
         session = connection.open_session()
-        operation = session.submit_operation(operation_id=201, frame_id=9, payload=b"payload")
+        operation = session.submit_operation(operation_id=201, frame_id=9, body=b"payload")
 
         connection.cancel_runtime_operation(session, operation_id=201, control_sequence=1)
 
@@ -543,7 +547,7 @@ def test_native_client_connection_suppresses_cancelled_frame_results() -> None:
     backend = FakeBackend()
     with connect_native_client_connection(backend=backend) as connection:
         session = connection.open_session()
-        operation = session.submit_operation(operation_id=100, frame_id=7, payload=b"payload")
+        operation = session.submit_operation(operation_id=100, frame_id=7, body=b"payload")
 
         connection.cancel_frame(session, frame_id=7)
 
@@ -586,11 +590,24 @@ def test_native_client_connection_clears_cancelled_result_suppressions_on_close(
         assert connection._cancelled_operations == {}
 
 
+def test_native_client_connection_closes_sessions_before_connection() -> None:
+    backend = FakeBackend()
+    with connect_native_client_connection(backend=backend) as connection:
+        session = connection.open_session()
+        close_connection = connection.connection.close
+
+        def assert_session_closed_before_connection() -> None:
+            assert session.closed
+            close_connection()
+
+        connection.connection.close = assert_session_closed_before_connection
+
+
 def test_native_client_connection_suppresses_late_result_after_poll() -> None:
     backend = FakeBackend()
     with connect_native_client_connection(backend=backend) as connection:
         session = connection.open_session()
-        operation = session.submit_operation(operation_id=100, frame_id=7, payload=b"payload")
+        operation = session.submit_operation(operation_id=100, frame_id=7, body=b"payload")
 
         def poll_late_result(
             _operation: FakeOperation,
@@ -603,7 +620,7 @@ def test_native_client_connection_suppresses_late_result_after_poll() -> None:
                 session_id=session.requested_session_id,
                 operation_id=101,
                 frame_id=8,
-                payload=b"late",
+                body=b"late",
                 max_events=max_events,
                 timeout_ms=timeout_ms,
             )
@@ -644,11 +661,11 @@ def test_native_client_connection_allows_unknown_session_identity_results() -> N
     backend = FakeBackend()
     with connect_native_client_connection(backend=backend) as connection:
         session = FakeAnonymousSession()
-        operation = FakeOperation(session_id=0, operation_id=100, frame_id=7, payload=b"payload")
+        operation = FakeOperation(session_id=0, operation_id=100, frame_id=7, body=b"payload")
 
         result = connection.poll_result(session, operation)
 
-        assert result.payload == b"payload"
+        assert result.body == b"payload"
         assert session.poll_result_calls == 1
 
 
@@ -656,7 +673,7 @@ def test_native_client_connection_operation_scope_cancels_on_error() -> None:
     backend = FakeBackend()
     with connect_native_client_connection(backend=backend) as connection:
         session = connection.open_session()
-        operation = session.submit_operation(operation_id=100, frame_id=7, payload=b"payload")
+        operation = session.submit_operation(operation_id=100, frame_id=7, body=b"payload")
         scope = connection.operation_scope(operation)
 
         assert isinstance(scope, NativeClientOperationScope)
@@ -678,7 +695,7 @@ def test_native_client_connection_submits_and_polls_result() -> None:
             session,
             operation_id=100,
             frame_id=7,
-            payload=b"payload",
+            body=b"payload",
             parent_operation_id=99,
             operation_group_id=1234,
             max_events=4,
@@ -687,7 +704,7 @@ def test_native_client_connection_submits_and_polls_result() -> None:
         assert result.session_id == 1
         assert result.operation_id == 100
         assert result.frame_id == 7
-        assert result.payload == b"payload"
+        assert result.body == b"payload"
         assert result.max_events == 4
         assert session.operations[0].parent_operation_id == 99
         assert session.operations[0].operation_group_id == 1234
@@ -894,10 +911,10 @@ def test_native_client_connection_keeps_hot_paths_on_coarse_runtime_calls() -> N
             session,
             operation_id=200,
             frame_id=1,
-            payload=b"submit",
+            body=b"submit",
             timeout_ms=25,
         )
-        operation = session.submit_operation(operation_id=201, frame_id=2, payload=b"submit")
+        operation = session.submit_operation(operation_id=201, frame_id=2, body=b"submit")
         client_connection.poll_result(session, operation)
         client_connection.cancel_runtime_operation(session, operation_id=201, control_sequence=1)
 

@@ -246,6 +246,8 @@ jobs:
 
   wire-conformance:
     runs-on: ubuntu-latest
+    env:
+      NNRP_RS_NATIVE_VERSION: 1.0.0-preview.4.7
 
     steps:
       - name: Checkout
@@ -279,74 +281,32 @@ jobs:
           ${{ steps.setup-python.outputs.python-path }} -m pip install --upgrade pip
           ${{ steps.setup-python.outputs.python-path }} -m pip install -e .[dev] build
 
-      - name: Run wire conformance dry-run
+      - name: Download Rust native transport artifacts
+        env:
+          GH_TOKEN: ${{ github.token }}
         shell: bash
         run: |
           set -euo pipefail
+          mkdir -p artifacts/native-downloads
+          gh release download "v${NNRP_RS_NATIVE_VERSION}" \
+            --repo "${{ github.repository_owner }}/nnrp-rs" \
+            --pattern "nnrp-ffi-transport-tcp-native-linux-x86_64-${NNRP_RS_NATIVE_VERSION}.zip" \
+            --pattern "nnrp-ffi-transport-quic-native-linux-x86_64-${NNRP_RS_NATIVE_VERSION}.zip" \
+            --pattern "nnrp-ffi-transport-ipc-native-linux-x86_64-${NNRP_RS_NATIVE_VERSION}.zip" \
+            --pattern "nnrp-ffi-transport-websocket-native-linux-x86_64-${NNRP_RS_NATIVE_VERSION}.zip" \
+            --dir artifacts/native-downloads
 
-          mkdir -p artifacts/wire-conformance
+      - name: Prepare Rust native transport artifacts
+        shell: bash
+        run: python scripts/prepare_native_artifacts.py --clean artifacts/native-downloads/*.zip
 
-          transports=(
-            --transport tcp=127.0.0.1:19091
-            --transport quic=quic+tls://127.0.0.1:19092
-            --transport ipc=unix:///tmp/nnrp.sock
-            --transport websocket=wss://127.0.0.1:19093/nnrp
-          )
-          capabilities=(
-            --capability control.cancel_abort
-            --capability control.result_drop_reason
-            --capability control.trace_context
-            --capability control.priority_update
-            --capability control.deadline_expire
-            --capability control.progress_partial
-            --capability control.credit_backpressure
-            --capability object.lifecycle
-            --capability control.capability_costs
-            --capability control.route_execution_hint
-            --capability cache.reference
-            --capability control.degrade_profile
-            --capability control.budget_update
-          )
-          tls_security=(
-            --transport-security '{"transport":"quic","server_name":"localhost","trusted_certificate_der_path":"certs/server.der","certificate_der_path":"certs/server.der","private_key_pkcs8_der_path":"certs/server-key.der"}'
-            --transport-security '{"transport":"websocket","server_name":"localhost","trusted_certificate_der_path":"certs/server.der","certificate_der_path":"certs/server.der","private_key_pkcs8_der_path":"certs/server-key.der"}'
-          )
-
-          for mode in suite_as_client suite_as_server suite_as_proxy; do
-            target="artifacts/wire-conformance/target-${mode}.json"
-            plan="artifacts/wire-conformance/plan-${mode}.json"
-            results="artifacts/wire-conformance/results-${mode}.json"
-            evidence_dir="artifacts/wire-conformance/evidence-${mode}"
-
-            ${{ steps.setup-python.outputs.python-path }} -m nnrp.tools.wire_conformance \
-              manifest \
-              --target-name "nnrp-py-ci-${mode}" \
-              --mode "$mode" \
-              "${transports[@]}" \
-              "${tls_security[@]}" \
-              "${capabilities[@]}" \
-              --output "$target"
-
-            cargo run --manifest-path nnrp-conformance-runner/Cargo.toml -p nnrp-conformance-runner -- \
-              wire-plan \
-              --suite nnrp-conformance-runner/wire-conformance/nnrp-1-preview4/manifest.json \
-              --target "$target" \
-              --output "$plan" \
-              --results-path "$results" \
-              --evidence-dir "$evidence_dir"
-
-            ${{ steps.setup-python.outputs.python-path }} -m nnrp.tools.wire_conformance \
-              run-plan \
-              --plan "$plan" \
-              --mode "$mode" \
-              --output "$results" \
-              --evidence-dir "$evidence_dir"
-
-            cargo run --manifest-path nnrp-conformance-runner/Cargo.toml -p nnrp-conformance-runner -- \
-              validate-wire-results \
-              --plan "$plan" \
-              --results "$results"
-          done
+      - name: Run independent-process Preview4 wire E2E
+        shell: pwsh
+        run: >-
+          ./scripts/run_wire_e2e.ps1
+          -ConformanceRoot nnrp-conformance-runner
+          -ArtifactDirectory artifacts/wire-conformance
+          -PythonExecutable '${{ steps.setup-python.outputs.python-path }}'
 
   required-checks:
     needs:

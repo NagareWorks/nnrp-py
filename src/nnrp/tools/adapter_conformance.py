@@ -10,7 +10,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from nnrp.core import MessageType
+from nnrp.core import FrameSubmitMetadata, MessageType
 from nnrp.native import (
     NativeRuntimeBackend,
     NativeRuntimeError,
@@ -45,6 +45,7 @@ from nnrp.runtime import (
     encode_runtime_control_metadata,
     encode_runtime_object_metadata,
 )
+from nnrp.schema import TOKEN_DELTA_SCHEMA_ID, TOKEN_DELTA_SCHEMA_VERSION, StandardProfile
 
 _RESULTS_SCHEMA_URL = "https://raw.githubusercontent.com/NagareWorks/nnrp-conformance/main/schemas/adapter-case-results.schema.json"
 _DEFAULT_IMPLEMENTATION_NAME = "nnrp-py"
@@ -231,16 +232,16 @@ class _AdapterCaseExecution:
         return connection.open_session(
             requested_session_id=self._int_parameter("session_id", 1),
             generation=self._int_parameter("session_generation", 1),
-            profile_id=self._int_parameter("profile_id", 0),
-            schema_id=self._int_parameter("schema_id", 0),
-            schema_version=self._int_parameter("schema_version", 0),
+            profile_id=self._int_parameter("profile_id", int(StandardProfile.TOKEN)),
+            schema_id=self._int_parameter("schema_id", TOKEN_DELTA_SCHEMA_ID),
+            schema_version=self._int_parameter("schema_version", TOKEN_DELTA_SCHEMA_VERSION),
         )
 
     def _submit_operation(self, session):
         return session.submit_operation(
             operation_id=self._int_parameter("operation_id", 1),
             frame_id=self._int_parameter("frame_id", 1),
-            payload=self._payload_parameter("payload", b"tensor"),
+            body=self._payload_parameter("payload", b"tensor"),
         )
 
     def _execute_handshake_basic(self) -> dict[str, Any]:
@@ -294,7 +295,7 @@ class _AdapterCaseExecution:
         operation = session.submit_operation(
             operation_id=operation_id,
             frame_id=frame_id,
-            payload=payload,
+            body=payload,
         )
         result = session.poll_result(
             operation,
@@ -309,7 +310,7 @@ class _AdapterCaseExecution:
             session_id=_runtime_id(session),
             operation_id=_runtime_id(operation),
             frame_id=operation.frame_id,
-            result_payload_bytes=len(getattr(result, "payload", b"")),
+            result_payload_bytes=len(getattr(result, "body", b"")),
         )
 
     def _execute_runtime_cancel_abort(self) -> dict[str, Any]:
@@ -555,14 +556,14 @@ class _AdapterSmokeConnection:
 class _AdapterSmokeOperation:
     operation_id: int
     frame_id: int
-    payload: bytes
+    body: bytes
 
 
 @dataclass
 class _AdapterSmokeResult:
     operation_id: int
     frame_id: int
-    payload: bytes
+    body: bytes
 
 
 @dataclass
@@ -612,13 +613,14 @@ class _AdapterSmokeSession:
         *,
         operation_id: int,
         frame_id: int,
-        payload: bytes | bytearray | memoryview = b"",
+        metadata: FrameSubmitMetadata | None = None,
+        body: bytes | bytearray | memoryview = b"",
         parent_operation_id: int | None = None,
         operation_group_id: int | None = None,
     ) -> _AdapterSmokeOperation:
-        del parent_operation_id, operation_group_id
+        del metadata, parent_operation_id, operation_group_id
         self._ensure_open()
-        operation = _AdapterSmokeOperation(operation_id, frame_id, bytes(payload))
+        operation = _AdapterSmokeOperation(operation_id, frame_id, bytes(body))
         self.operations.append(operation)
         return operation
 
@@ -631,7 +633,7 @@ class _AdapterSmokeSession:
     ) -> _AdapterSmokeResult:
         del max_events, timeout_ms
         self._ensure_open()
-        return _AdapterSmokeResult(operation.operation_id, operation.frame_id, operation.payload)
+        return _AdapterSmokeResult(operation.operation_id, operation.frame_id, operation.body)
 
     def cancel(self, *, frame_id: int) -> None:
         self._ensure_open()

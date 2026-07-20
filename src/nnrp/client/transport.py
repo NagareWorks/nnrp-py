@@ -416,6 +416,7 @@ class TypedPayload:
 @dataclass(frozen=True, slots=True)
 class SubmitRequest:
     frame_id: int
+    operation_id: int
     src_width: int = 0
     src_height: int = 0
     tile_width: int = 0
@@ -835,6 +836,7 @@ class ClientSession:
                 packet = build_frame_submit_mixed_packet(
                     session_id=self.session_id,
                     frame_id=frame_id,
+                    operation_id=request.operation_id,
                     src_width=request.src_width,
                     src_height=request.src_height,
                     tile_width=request.tile_width,
@@ -863,6 +865,7 @@ class ClientSession:
                 packet = build_frame_submit_typed_payload_packet(
                     session_id=self.session_id,
                     frame_id=frame_id,
+                    operation_id=request.operation_id,
                     frames=typed_frames,
                     frame_class=request.frame_class,
                     latency_budget_ms=request.latency_budget_ms,
@@ -881,6 +884,7 @@ class ClientSession:
             packet = build_frame_submit_packet(
                 session_id=self.session_id,
                 frame_id=frame_id,
+                operation_id=request.operation_id,
                 src_width=request.src_width,
                 src_height=request.src_height,
                 tile_width=request.tile_width,

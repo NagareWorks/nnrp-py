@@ -14,6 +14,7 @@ from nnrp import (
     token_delta_payload_descriptor,
     token_delta_schema_descriptor,
 )
+from nnrp.core import MessageType
 from nnrp.tools.benchmark import build_benchmark_results_report, main, write_benchmark_results
 
 
@@ -72,7 +73,7 @@ def _plan_document() -> dict[str, object]:
                 "category": "throughput",
                 "feature": "benchmark.transport.quic",
                 "required_capabilities": ["transport.quic"],
-                "description": "Transport loopback throughput.",
+                "description": "Native QUIC role loopback throughput.",
                 "workload": {
                     "operation": "transport_loopback",
                     "payload": "request_result_stream",
@@ -87,7 +88,7 @@ def _plan_document() -> dict[str, object]:
                 "category": "throughput",
                 "feature": "benchmark.transport.ipc",
                 "required_capabilities": ["transport.ipc"],
-                "description": "IPC transport loopback throughput.",
+                "description": "Native IPC role loopback throughput.",
                 "workload": {
                     "operation": "transport_loopback",
                     "payload": "request_result_stream",
@@ -102,7 +103,7 @@ def _plan_document() -> dict[str, object]:
                 "category": "throughput",
                 "feature": "benchmark.transport.websocket",
                 "required_capabilities": ["transport.websocket"],
-                "description": "WebSocket transport loopback throughput.",
+                "description": "Native WebSocket role loopback throughput.",
                 "workload": {
                     "operation": "transport_loopback",
                     "payload": "request_result_stream",
@@ -257,13 +258,13 @@ def _plan_document() -> dict[str, object]:
                 },
             },
             {
-                "id": "l4.native.submit_result.throughput",
+                "id": "l4.native.role_submit_result.throughput",
                 "category": "throughput",
                 "feature": "benchmark.native.submit_result.throughput",
                 "required_capabilities": ["session.open_close", "operation.submit", "event.polling.batch"],
                 "description": "Native submit/result runtime throughput.",
                 "workload": {
-                    "operation": "native_submit_result_loop",
+                    "operation": "native_role_submit_result_loop",
                     "payload": "inline_payload",
                     "duration_seconds": 0.01,
                     "warmup_iterations": 1,
@@ -305,13 +306,13 @@ def _plan_document() -> dict[str, object]:
                 },
             },
             {
-                "id": "l4.native.submit_result.allocations",
+                "id": "l4.native.role_submit_result.allocations",
                 "category": "memory",
                 "feature": "benchmark.native.submit_result.allocations",
                 "required_capabilities": ["session.open_close", "operation.submit", "event.polling.batch"],
                 "description": "Native submit/result Python allocation smoke.",
                 "workload": {
-                    "operation": "native_submit_result_allocation_smoke",
+                    "operation": "native_role_submit_result_allocation_smoke",
                     "payload": "inline_payload",
                     "iterations": 3,
                     "warmup_iterations": 1,
@@ -349,7 +350,7 @@ def _plan_document() -> dict[str, object]:
                 "category": "throughput",
                 "feature": "benchmark.transport.tcp",
                 "required_capabilities": ["transport.tcp"],
-                "description": "TCP transport loopback throughput.",
+                "description": "Native TCP role loopback throughput.",
                 "workload": {
                     "operation": "transport_loopback",
                     "payload": "request_result_stream",
@@ -365,7 +366,7 @@ def _plan_document() -> dict[str, object]:
 
 def test_build_benchmark_results_report_measures_configured_scenarios(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(benchmark, "load_native_schema_codec", _missing_native_schema_codec)
-    monkeypatch.setattr(benchmark, "load_native_client", _missing_native_client)
+    monkeypatch.setattr(benchmark, "_open_native_role_loopback", _missing_native_role_loopback)
     monkeypatch.setattr(benchmark, "probe_native_artifact", _missing_native_probe)
 
     report = build_benchmark_results_report(_plan_document())
@@ -373,6 +374,7 @@ def test_build_benchmark_results_report_measures_configured_scenarios(monkeypatc
     assert report["implementation_name"] == "nnrp-py"
     assert report["protocol_version"] == "nnrp-1"
     assert report["environment"]["os"]
+    assert report["environment"]["notes"].startswith("candidate_wheel=source-tree; sdk_version=")
 
     results = {result["id"]: result for result in report["results"]}
     header_result = results["l4.header.encode_decode.latency"]
@@ -391,13 +393,9 @@ def test_build_benchmark_results_report_measures_configured_scenarios(monkeypatc
     assert metadata_result["outcome"] == "measured"
     assert metadata_result["metrics"]["p50_us"] >= 0
 
-    transport_result = results["l4.transport.quic.loopback.throughput"]
-    assert transport_result["outcome"] == "measured"
-    assert transport_result["metrics"]["throughput_ops_per_sec"] > 0
-    assert "cpu_percent" not in transport_result["metrics"]
-    assert "peak_memory_bytes" not in transport_result["metrics"]
-    assert results["l4.transport.ipc.loopback.throughput"]["outcome"] == "measured"
-    assert results["l4.transport.websocket.loopback.throughput"]["outcome"] == "measured"
+    assert results["l4.transport.quic.loopback.throughput"]["outcome"] == "skip"
+    assert results["l4.transport.ipc.loopback.throughput"]["outcome"] == "skip"
+    assert results["l4.transport.websocket.loopback.throughput"]["outcome"] == "skip"
 
     assert results["l4.metadata.submit_result.latency"]["outcome"] == "measured"
     assert results["l4.typed_payload.tensor_pack_unpack.latency"]["outcome"] == "measured"
@@ -409,20 +407,21 @@ def test_build_benchmark_results_report_measures_configured_scenarios(monkeypatc
     assert results["l4.runtime.object_metadata.latency"]["outcome"] == "measured"
     assert results["l4.native.object_metadata.copy.latency"]["outcome"] == "skip"
     assert results["l4.native.object_metadata.borrow.latency"]["outcome"] == "skip"
-    assert results["l4.native.submit_result.throughput"]["outcome"] == "skip"
+    assert results["l4.native.role_submit_result.throughput"]["outcome"] == "skip"
     assert results["l4.native.submit_cancel.throughput"]["outcome"] == "skip"
     assert results["l4.native.progress_partial.polling.throughput"]["outcome"] == "skip"
-    assert results["l4.native.submit_result.allocations"]["outcome"] == "skip"
+    assert results["l4.native.role_submit_result.allocations"]["outcome"] == "skip"
     assert results["l4.native.artifact_probe.latency"]["outcome"] == "skip"
     assert results["l4.session.lifecycle.latency"]["outcome"] == "measured"
-    assert results["l4.transport.tcp.loopback.throughput"]["outcome"] == "measured"
+    assert results["l4.transport.tcp.loopback.throughput"]["outcome"] == "skip"
 
 
 def test_build_benchmark_results_report_can_profile_throughput_metrics(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(benchmark, "load_native_schema_codec", _missing_native_schema_codec)
-    monkeypatch.setattr(benchmark, "load_native_client", _missing_native_client)
+    role_loopbacks = FakeNativeRoleLoopbacks()
+    monkeypatch.setattr(benchmark, "_open_native_role_loopback", role_loopbacks.open)
     monkeypatch.setattr(benchmark, "probe_native_artifact", _missing_native_probe)
     plan = _plan_document()
     scenarios = plan["scenarios"]
@@ -435,7 +434,7 @@ def test_build_benchmark_results_report_can_profile_throughput_metrics(
             "submit_result_loop",
             "transport_loopback",
             "native_batch_event_polling_throughput",
-            "native_submit_result_loop",
+            "native_role_submit_result_loop",
         }:
             workload["profile"] = True
 
@@ -454,6 +453,8 @@ def test_build_benchmark_results_report_can_profile_throughput_metrics(
         assert result["metrics"]["throughput_ops_per_sec"] > 0
         assert result["metrics"]["cpu_percent"] >= 0
         assert result["metrics"]["peak_memory_bytes"] >= 0
+        if scenario_id.startswith("l4.transport."):
+            assert result["metrics"]["native_ffi_calls_per_op"] == 4
 
 
 def test_build_benchmark_results_report_skips_unknown_operations() -> None:
@@ -482,14 +483,28 @@ def test_build_benchmark_results_report_can_override_implementation_name() -> No
     assert report["implementation_name"] == "custom-runner"
 
 
+def test_benchmark_environment_records_release_candidate_identity(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("NNRP_BENCHMARK_SDK_COMMIT", "0123456789abcdef")
+    monkeypatch.setenv("NNRP_BENCHMARK_RUST_ARTIFACT_VERSION", "1.0.0-preview.4.7")
+    monkeypatch.setenv("NNRP_BENCHMARK_CANDIDATE_WHEEL", "nnrp_py-1.0.0rc4.post5-py3-none-linux.whl")
+
+    environment = benchmark._build_environment()
+
+    assert environment["sdk_commit"] == "0123456789abcdef"
+    assert environment["nnrp_rs_artifact"] == "1.0.0-preview.4.7"
+    assert environment["notes"].startswith(
+        "candidate_wheel=nnrp_py-1.0.0rc4.post5-py3-none-linux.whl; sdk_version="
+    )
+
+
 def test_build_benchmark_results_report_measures_native_scenarios_when_artifacts_are_available(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     schema_codec = FakeNativeSchemaCodec()
-    native_client = FakeNativeClient()
+    role_loopbacks = FakeNativeRoleLoopbacks()
     native_probe = FakeNativeProbe()
     monkeypatch.setattr(benchmark, "load_native_schema_codec", lambda: schema_codec)
-    monkeypatch.setattr(benchmark, "load_native_client", lambda: native_client)
+    monkeypatch.setattr(benchmark, "_open_native_role_loopback", role_loopbacks.open)
     monkeypatch.setattr(benchmark, "probe_native_artifact", native_probe)
 
     report = build_benchmark_results_report(_plan_document())
@@ -506,315 +521,54 @@ def test_build_benchmark_results_report_measures_native_scenarios_when_artifacts
     native_object_borrow = results["l4.native.object_metadata.borrow.latency"]
     assert native_object_borrow["outcome"] == "measured"
     assert native_object_borrow["metrics"]["p50_us"] >= 0
-    native_submit_result = results["l4.native.submit_result.throughput"]
+    native_submit_result = results["l4.native.role_submit_result.throughput"]
     assert native_submit_result["outcome"] == "measured"
     assert native_submit_result["metrics"]["throughput_ops_per_sec"] > 0
     assert native_submit_result["metrics"]["completed_operations"] > 0
-    assert native_submit_result["metrics"]["native_ffi_calls_per_op"] == 1
-    assert native_submit_result["metrics"]["native_ffi_client_submit_result_compact_calls_per_op"] == 1
-    assert native_submit_result["metrics"]["native_ffi_client_submit_result_calls_per_op"] == 0
-    assert native_submit_result["metrics"]["native_ffi_client_submit_calls_per_op"] == 0
-    assert native_submit_result["metrics"]["native_ffi_client_complete_operation_calls_per_op"] == 0
-    assert native_submit_result["metrics"]["native_ffi_client_await_events_calls_per_op"] == 0
-    assert native_submit_result["metrics"]["native_binding_mode"] == "ctypes"
+    assert native_submit_result["metrics"]["native_ffi_calls_per_op"] == 4
+    assert native_submit_result["metrics"]["native_ffi_client_submit_calls_per_op"] == 1
+    assert native_submit_result["metrics"]["native_ffi_server_await_events_calls_per_op"] == 1
+    assert native_submit_result["metrics"]["native_ffi_server_send_result_calls_per_op"] == 1
+    assert native_submit_result["metrics"]["native_ffi_client_await_events_calls_per_op"] == 1
     native_submit_cancel = results["l4.native.submit_cancel.throughput"]
     assert native_submit_cancel["outcome"] == "measured"
     assert native_submit_cancel["metrics"]["throughput_ops_per_sec"] > 0
     assert native_submit_cancel["metrics"]["completed_operations"] > 0
-    assert native_submit_cancel["metrics"]["native_ffi_calls_per_op"] == 2
+    assert native_submit_cancel["metrics"]["native_ffi_calls_per_op"] == 4
     assert native_submit_cancel["metrics"]["native_ffi_client_submit_calls_per_op"] == 1
     assert native_submit_cancel["metrics"]["native_ffi_client_cancel_calls_per_op"] == 1
-    assert native_submit_cancel["metrics"]["native_ffi_client_submit_result_compact_calls_per_op"] == 0
-    assert native_submit_cancel["metrics"]["native_ffi_client_submit_result_calls_per_op"] == 0
-    assert native_submit_cancel["metrics"]["native_ffi_client_complete_operation_calls_per_op"] == 0
-    assert native_submit_cancel["metrics"]["native_binding_mode"] == "ctypes"
+    assert native_submit_cancel["metrics"]["native_ffi_server_await_events_calls_per_op"] == 2
     native_progress_partial = results["l4.native.progress_partial.polling.throughput"]
     assert native_progress_partial["outcome"] == "measured"
     assert native_progress_partial["metrics"]["throughput_ops_per_sec"] > 0
     assert native_progress_partial["metrics"]["completed_operations"] > 0
-    assert native_progress_partial["metrics"]["native_ffi_calls_per_op"] == 3
+    assert native_progress_partial["metrics"]["native_ffi_calls_per_op"] == 7
     assert native_progress_partial["metrics"]["native_ffi_client_submit_calls_per_op"] == 1
-    assert native_progress_partial["metrics"]["native_ffi_client_send_result_hint_calls_per_op"] == 1
-    assert native_progress_partial["metrics"]["native_ffi_client_await_events_calls_per_op"] == 1
-    assert native_progress_partial["metrics"]["native_ffi_client_submit_result_compact_calls_per_op"] == 0
-    assert native_progress_partial["metrics"]["native_ffi_client_submit_result_calls_per_op"] == 0
-    assert native_progress_partial["metrics"]["native_ffi_client_complete_operation_calls_per_op"] == 0
-    assert native_progress_partial["metrics"]["native_binding_mode"] == "ctypes"
-    allocation_result = results["l4.native.submit_result.allocations"]
+    assert native_progress_partial["metrics"]["native_ffi_server_await_events_calls_per_op"] == 1
+    assert native_progress_partial["metrics"]["native_ffi_runtime_frame_send_calls_per_op"] == 2
+    assert native_progress_partial["metrics"]["native_ffi_server_send_result_calls_per_op"] == 1
+    assert native_progress_partial["metrics"]["native_ffi_client_await_events_calls_per_op"] == 2
+    for transport in ("tcp", "quic", "ipc", "websocket"):
+        transport_result = results[f"l4.transport.{transport}.loopback.throughput"]
+        assert transport_result["outcome"] == "measured"
+        assert transport_result["metrics"]["throughput_ops_per_sec"] > 0
+        assert transport_result["metrics"]["native_ffi_calls_per_op"] == 4
+    allocation_result = results["l4.native.role_submit_result.allocations"]
     assert allocation_result["outcome"] == "measured"
     assert allocation_result["metrics"]["allocated_blocks_delta_per_op"] >= 0
     assert allocation_result["metrics"]["peak_traced_bytes_per_op"] >= 0
     assert results["l4.native.artifact_probe.latency"]["outcome"] == "measured"
     assert schema_codec.validations == 4
     assert schema_codec.descriptor.profile_id == token_delta_schema_descriptor().profile_id
-    assert len(native_client.connection.polled_batches) >= 4
-    assert set(native_client.connection.polled_batches) == {2}
-    assert len(native_client.connection.submitted_payloads) >= 4
-    assert set(native_client.connection.submitted_payloads) == {b"x" * 8}
-    assert len(native_client.connection.cancelled_frames) >= 1
-    assert len(native_client.connection.result_hints) >= 1
-    assert native_client.connection.object_metadata_payloads == [b"x" * 8] * 8
-    assert native_client.connection.closed is True
+    assert role_loopbacks.contexts
+    assert all(context.closed for context in role_loopbacks.contexts)
+    assert any(context.client_connection.submitted_payloads for context in role_loopbacks.contexts)
+    assert any(context.client_connection.cancelled_frames for context in role_loopbacks.contexts)
+    assert any(context.client_connection.object_metadata_payloads for context in role_loopbacks.contexts)
     assert native_probe.calls == [(None, None)] * 5
-
-
-def test_native_progress_partial_loop_skips_when_result_hint_poll_would_block(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    native_client = FakeNativeClient()
-
-    def poll_no_result_hints(*, max_events: int):
-        native_client.connection.polled_batches.append(max_events)
-        return ()
-
-    native_client.connection.poll_result_hints = poll_no_result_hints
-    monkeypatch.setattr(benchmark, "load_native_client", lambda: native_client)
-
-    result = benchmark._run_native_progress_partial_polling_loop(
-        "native.progress",
-        {"duration_seconds": 0.001, "warmup_iterations": 1, "payload_bytes": 8, "max_events": 2},
-    )
-
-    assert result["outcome"] == "skip"
-    assert "result hint was not available" in result["message"]
-    assert native_client.connection.closed is True
-
-
-def test_native_progress_partial_loop_rejects_operation_mismatch(monkeypatch: pytest.MonkeyPatch) -> None:
-    class MismatchedNativeSession(FakeNativeSession):
-        def submit_operation(
-            self,
-            *,
-            operation_id: int,
-            frame_id: int,
-            payload: bytes | bytearray | memoryview = b"",
-        ):
-            super().submit_operation(operation_id=operation_id, frame_id=frame_id, payload=payload)
-            return FakeNativeOperation(self.entrypoints, operation_id + 1, frame_id)
-
-    class MismatchedNativeConnection(FakeNativeConnection):
-        def open_session(
-            self,
-            *,
-            requested_session_id: int,
-            generation: int,
-            profile_id: int,
-            schema_id: int,
-            schema_version: int,
-        ):
-            assert (requested_session_id, generation, profile_id, schema_id, schema_version) == (1, 1, 0, 0, 0)
-            self.opened_session = MismatchedNativeSession(self)
-            return self.opened_session
-
-    class MismatchedNativeClient(FakeNativeClient):
-        def __init__(self) -> None:
-            self.connection = MismatchedNativeConnection()
-
-    native_client = MismatchedNativeClient()
-    monkeypatch.setattr(benchmark, "load_native_client", lambda: native_client)
-
-    with pytest.raises(RuntimeError, match="operation mismatch"):
-        benchmark._run_native_progress_partial_polling_loop(
-            "native.progress",
-            {"duration_seconds": 0.001, "warmup_iterations": 1, "payload_bytes": 8, "max_events": 2},
-        )
-
-    assert native_client.connection.closed is True
-
-
-def test_native_submit_result_cffi_api_loop_measures_when_wrapper_is_available(monkeypatch: pytest.MonkeyPatch) -> None:
-    class FakeFFI:
-        def from_buffer(self, payload: bytes):
-            return payload
-
-        def new(self, type_name: str):
-            if type_name == "size_t *":
-                return [0]
-            return SimpleNamespace(status_code=0, has_result=0)
-
-    class FakeCffiApi:
-        def __init__(self) -> None:
-            self.calls = 0
-            self.batch_calls = 0
-
-        def nnrp_py_client_submit_result_compact(self, *_args):
-            self.calls += 1
-            out_result = _args[-1]
-            out_result.status_code = 0
-            out_result.has_result = 1
-            return 0
-
-        def nnrp_py_client_submit_result_compact_batch(self, *_args):
-            self.batch_calls += 1
-            iterations = _args[-3]
-            out_result = _args[-2]
-            out_completed = _args[-1]
-            out_result.status_code = 0
-            out_result.has_result = 1
-            out_completed[0] = iterations
-            return 0
-
-    native_client = FakeNativeClient()
-    cffi_api = FakeCffiApi()
-    monkeypatch.setattr(benchmark, "default_artifact_root", lambda: Path("native-root"))
-    monkeypatch.setattr(benchmark, "resolve_native_artifact", lambda _root: Path("nnrp_ffi.dll"))
-    monkeypatch.setattr(benchmark, "load_native_client", lambda _artifact_path=None: native_client)
-    monkeypatch.setattr(benchmark, "_load_cffi_api_submit_result_module", lambda: (FakeFFI(), cffi_api))
-
-    result = benchmark._run_native_submit_result_cffi_api_loop(
-        "l4.native.submit_result.cffi_api.throughput",
-        {"duration_seconds": 0.01, "warmup_iterations": 1, "payload_bytes": 8, "batch_size": 8},
-    )
-
-    assert result["outcome"] == "measured"
-    assert result["metrics"]["native_binding_mode"] == "cffi_api"
-    assert result["metrics"]["native_ffi_client_submit_result_compact_calls_per_op"] == 0
-    assert result["metrics"]["native_ffi_client_submit_result_compact_batch_calls_per_op"] == 0.125
-    assert result["metrics"]["native_batch_size"] == 8
-    assert cffi_api.calls == 0
-    assert cffi_api.batch_calls > 0
-    assert native_client.connection.closed is True
-
-
-def test_native_submit_result_cffi_api_loop_uses_single_wrapper_without_batch(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    class FakeFFI:
-        def from_buffer(self, payload: bytes):
-            return payload
-
-        def new(self, _type_name: str):
-            return SimpleNamespace(status_code=0, has_result=0)
-
-    class FakeCffiApi:
-        def __init__(self) -> None:
-            self.calls = 0
-
-        def nnrp_py_client_submit_result_compact(self, *_args):
-            self.calls += 1
-            out_result = _args[-1]
-            out_result.status_code = 0
-            out_result.has_result = 1
-            return 0
-
-    native_client = FakeNativeClient()
-    cffi_api = FakeCffiApi()
-    monkeypatch.setattr(benchmark, "default_artifact_root", lambda: Path("native-root"))
-    monkeypatch.setattr(benchmark, "resolve_native_artifact", lambda _root: Path("nnrp_ffi.dll"))
-    monkeypatch.setattr(benchmark, "load_native_client", lambda _artifact_path=None: native_client)
-    monkeypatch.setattr(benchmark, "_load_cffi_api_submit_result_module", lambda: (FakeFFI(), cffi_api))
-
-    result = benchmark._run_native_submit_result_cffi_api_loop(
-        "l4.native.submit_result.cffi_api.throughput",
-        {"duration_seconds": 0.01, "warmup_iterations": 1, "payload_bytes": 8},
-    )
-
-    assert result["outcome"] == "measured"
-    assert result["metrics"]["native_ffi_calls_per_op"] == 1
-    assert result["metrics"]["native_ffi_client_submit_result_compact_calls_per_op"] == 1
-    assert result["metrics"]["native_ffi_client_submit_result_compact_batch_calls_per_op"] == 0
-    assert cffi_api.calls > 0
-    assert native_client.connection.closed is True
-
-
-def test_native_submit_result_cffi_api_loop_skips_failed_batch(monkeypatch: pytest.MonkeyPatch) -> None:
-    class FakeFFI:
-        def from_buffer(self, payload: bytes):
-            return payload
-
-        def new(self, type_name: str):
-            if type_name == "size_t *":
-                return [0]
-            return SimpleNamespace(status_code=0, has_result=0)
-
-    class FakeCffiApi:
-        def nnrp_py_client_submit_result_compact_batch(self, *_args):
-            out_result = _args[-2]
-            out_completed = _args[-1]
-            out_result.status_code = 0
-            out_result.has_result = 1
-            out_completed[0] = 1
-            return 0
-
-    native_client = FakeNativeClient()
-    monkeypatch.setattr(benchmark, "default_artifact_root", lambda: Path("native-root"))
-    monkeypatch.setattr(benchmark, "resolve_native_artifact", lambda _root: Path("nnrp_ffi.dll"))
-    monkeypatch.setattr(benchmark, "load_native_client", lambda _artifact_path=None: native_client)
-    monkeypatch.setattr(benchmark, "_load_cffi_api_submit_result_module", lambda: (FakeFFI(), FakeCffiApi()))
-
-    result = benchmark._run_native_submit_result_cffi_api_loop(
-        "l4.native.submit_result.cffi_api.throughput",
-        {"duration_seconds": 0.01, "warmup_iterations": 1, "payload_bytes": 8, "batch_size": 8},
-    )
-
-    assert result["outcome"] == "skip"
-    assert "batch failed" in result["message"]
-    assert native_client.connection.closed is True
-
-
-def test_native_submit_result_cffi_api_loop_skips_wrapper_failures(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(benchmark, "resolve_native_artifact", lambda _root: Path("nnrp_ffi.dll"))
-    monkeypatch.setattr(
-        benchmark,
-        "_load_cffi_api_submit_result_module",
-        lambda: (_ for _ in ()).throw(OSError("no compiler")),
-    )
-
-    result = benchmark._run_native_submit_result_cffi_api_loop(
-        "l4.native.submit_result.cffi_api.throughput",
-        {"duration_seconds": 0.01, "warmup_iterations": 1, "payload_bytes": 8},
-    )
-
-    assert result["outcome"] == "skip"
-    assert "no compiler" in result["message"]
-
-
-def test_cffi_api_submit_result_module_builds_and_loads_helpers(tmp_path: Path) -> None:
-    class FakeBuilder:
-        def __init__(self) -> None:
-            self.cdef_source = ""
-            self.set_source_args: tuple[str, str] | None = None
-
-        def cdef(self, source: str) -> None:
-            self.cdef_source = source
-
-        def set_source(self, module_name: str, source: str) -> None:
-            self.set_source_args = (module_name, source)
-
-        def compile(self, *, tmpdir: str, verbose: bool) -> str:
-            assert Path(tmpdir) == tmp_path
-            assert verbose is False
-            output = tmp_path / "compiled.py"
-            output.write_text("value = 42\n", encoding="utf-8")
-            return str(output)
-
-    builder = FakeBuilder()
-    built = benchmark._build_cffi_api_submit_result_module(lambda: builder, "compiled", tmp_path)
-
-    assert built == tmp_path / "compiled.py"
-    assert "nnrp_py_client_submit_result_compact_batch" in builder.cdef_source
-    assert builder.set_source_args is not None
-    assert builder.set_source_args[0] == "compiled"
-
-    module = benchmark._load_compiled_cffi_api_module("compiled", built)
-    assert module.value == 42
-
-
-def test_measure_counted_throughput_metrics_profiles_completed_operations() -> None:
-    calls = 0
-
-    def operation() -> int:
-        nonlocal calls
-        calls += 1
-        return 3
-
-    metrics = benchmark._measure_counted_throughput_metrics(operation, 0.001, profile=True)
-
-    assert metrics["completed_operations"] >= 3
-    assert metrics["throughput_ops_per_sec"] > 0
-    assert metrics["cpu_percent"] >= 0
-    assert metrics["peak_memory_bytes"] >= 0
-    assert calls > 0
+    for result in results.values():
+        if result["outcome"] == "measured":
+            assert all(isinstance(value, int | float) for value in result["metrics"].values())
 
 
 def test_drain_native_setup_events_ignores_single_poll_would_block() -> None:
@@ -875,7 +629,7 @@ def test_build_benchmark_results_report_skips_native_scenarios_without_artifacts
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(benchmark, "load_native_schema_codec", _missing_native_schema_codec)
-    monkeypatch.setattr(benchmark, "load_native_client", _missing_native_client)
+    monkeypatch.setattr(benchmark, "_open_native_role_loopback", _missing_native_role_loopback)
     monkeypatch.setattr(benchmark, "probe_native_artifact", _missing_native_probe)
 
     report = build_benchmark_results_report(_plan_document())
@@ -884,40 +638,23 @@ def test_build_benchmark_results_report_skips_native_scenarios_without_artifacts
     assert results["l4.native.schema_descriptor.latency"]["outcome"] == "skip"
     assert "missing schema artifact" in results["l4.native.schema_descriptor.latency"]["message"]
     assert results["l4.native.event_polling.latency"]["outcome"] == "skip"
-    assert "missing client artifact" in results["l4.native.event_polling.latency"]["message"]
+    assert "missing role artifact" in results["l4.native.event_polling.latency"]["message"]
     assert results["l4.native.event_polling.throughput"]["outcome"] == "skip"
-    assert "missing client artifact" in results["l4.native.event_polling.throughput"]["message"]
+    assert "missing role artifact" in results["l4.native.event_polling.throughput"]["message"]
     assert results["l4.native.object_metadata.copy.latency"]["outcome"] == "skip"
-    assert "missing client artifact" in results["l4.native.object_metadata.copy.latency"]["message"]
+    assert "missing role artifact" in results["l4.native.object_metadata.copy.latency"]["message"]
     assert results["l4.native.object_metadata.borrow.latency"]["outcome"] == "skip"
-    assert "missing client artifact" in results["l4.native.object_metadata.borrow.latency"]["message"]
-    assert results["l4.native.submit_result.throughput"]["outcome"] == "skip"
-    assert "missing client artifact" in results["l4.native.submit_result.throughput"]["message"]
+    assert "missing role artifact" in results["l4.native.object_metadata.borrow.latency"]["message"]
+    assert results["l4.native.role_submit_result.throughput"]["outcome"] == "skip"
+    assert "missing role artifact" in results["l4.native.role_submit_result.throughput"]["message"]
     assert results["l4.native.submit_cancel.throughput"]["outcome"] == "skip"
-    assert "missing client artifact" in results["l4.native.submit_cancel.throughput"]["message"]
+    assert "missing role artifact" in results["l4.native.submit_cancel.throughput"]["message"]
     assert results["l4.native.progress_partial.polling.throughput"]["outcome"] == "skip"
-    assert "missing client artifact" in results["l4.native.progress_partial.polling.throughput"]["message"]
-    assert results["l4.native.submit_result.allocations"]["outcome"] == "skip"
-    assert "missing client artifact" in results["l4.native.submit_result.allocations"]["message"]
+    assert "missing role artifact" in results["l4.native.progress_partial.polling.throughput"]["message"]
+    assert results["l4.native.role_submit_result.allocations"]["outcome"] == "skip"
+    assert "missing role artifact" in results["l4.native.role_submit_result.allocations"]["message"]
     assert results["l4.native.artifact_probe.latency"]["outcome"] == "skip"
     assert "missing probe artifact" in results["l4.native.artifact_probe.latency"]["message"]
-
-
-def test_build_benchmark_results_report_skips_native_allocation_when_result_is_not_ready(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    native_client = WouldBlockNativeClient()
-    monkeypatch.setattr(benchmark, "load_native_schema_codec", _missing_native_schema_codec)
-    monkeypatch.setattr(benchmark, "load_native_client", lambda: native_client)
-    monkeypatch.setattr(benchmark, "probe_native_artifact", _missing_native_probe)
-
-    report = build_benchmark_results_report(_plan_document())
-
-    results = {result["id"]: result for result in report["results"]}
-    allocation_result = results["l4.native.submit_result.allocations"]
-    assert allocation_result["outcome"] == "skip"
-    assert "allocation smoke unavailable" in allocation_result["message"]
-    assert native_client.connection.closed is True
 
 
 def test_build_benchmark_results_report_supports_single_sample_header_measurement() -> None:
@@ -1060,62 +797,174 @@ class FakeNativeSchemaCodec:
         self.validations += 1
 
 
-class FakeNativeClient:
+class FakeNativeRoleLoopbacks:
     def __init__(self) -> None:
-        self.connection = FakeNativeConnection()
+        self.contexts: list[FakeNativeRoleContext] = []
 
-    def connect(self, *, connection_id: int, generation: int, transport_id: int):
-        assert (connection_id, generation, transport_id) == (1, 1, 2)
-        return self.connection
+    def open(self, _transport: str = "ipc") -> "FakeNativeRoleContext":
+        context = FakeNativeRoleContext()
+        self.contexts.append(context)
+        return context
 
-    def bootstrap_connection(self, *, connection_id: int, generation: int, transport_id: int):
-        assert (connection_id, generation, transport_id) == (1, 1, 2)
-        return self.connection
+
+class FakeNativeRoleContext:
+    def __init__(self) -> None:
+        self.client_connection = FakeNativeConnection()
+        self.server_session = FakeNativeServerSession(self.client_connection)
+        self.client_connection.server_session = self.server_session
+        self.client_session = FakeNativeSession(self.client_connection)
+        self.client = SimpleNamespace(connection=self.client_connection)
+        self.closed = False
+
+    def __enter__(self):
+        return self.client, self.client_session, self.server_session
+
+    def __exit__(self, exc_type, exc, traceback) -> None:
+        self.closed = True
+
+
+class FakeNativeEntrypoints:
+    binding_mode = "ctypes"
+
+    def client_submit(self, *_args) -> None:
+        return None
+
+    def client_await_events(self, *_args) -> None:
+        return None
+
+    def client_cancel(self, *_args) -> None:
+        return None
+
+    def server_await_events(self, *_args) -> None:
+        return None
+
+    def server_send_result(self, *_args) -> None:
+        return None
+
+    def runtime_frame_send(self, *_args) -> None:
+        return None
 
 
 class FakeNativeConnection:
     def __init__(self) -> None:
+        self.entrypoints = FakeNativeEntrypoints()
+        self.server_session: FakeNativeServerSession | None = None
         self.polled_batches: list[int] = []
         self.submitted_payloads: list[bytes] = []
-        self.completed_payloads: list[bytes] = []
-        self.polled_results: list[int | None] = []
         self.cancelled_frames: list[int] = []
-        self.result_hints: list[bytes] = []
         self.object_metadata_payloads: list[bytes] = []
-        self.opened_session: FakeNativeSession | None = None
-        self.closed = False
-
-    def open_session(
-        self,
-        *,
-        requested_session_id: int,
-        generation: int,
-        profile_id: int,
-        schema_id: int,
-        schema_version: int,
-    ):
-        assert (requested_session_id, generation, profile_id, schema_id, schema_version) == (1, 1, 0, 0, 0)
-        self.opened_session = FakeNativeSession(self)
-        return self.opened_session
-
-    def poll_events_batch(self, *, max_events: int):
-        self.polled_batches.append(max_events)
-        return ()
-
-    def poll_events(self):
-        return ()
-
-    def poll_result_hints(self, *, max_events: int):
-        self.polled_batches.append(max_events)
-        return (object(),)
+        self.runtime_events: list[SimpleNamespace] = []
+        self.results: list[SimpleNamespace] = []
 
     def acquire_object_metadata_copy(self, payload: bytes | bytearray | memoryview):
         copied_payload = bytes(payload)
         self.object_metadata_payloads.append(copied_payload)
         return FakeNativeObjectMetadataBuffer(copied_payload)
 
-    def close(self) -> None:
-        self.closed = True
+
+class FakeNativeSession:
+    def __init__(self, connection: FakeNativeConnection) -> None:
+        self.connection = connection
+        self.entrypoints = connection.entrypoints
+
+    def poll_events(self):
+        return self.poll_events_batch(max_events=8)
+
+    def poll_events_batch(self, *, max_events: int):
+        self.entrypoints.client_await_events(max_events)
+        self.connection.polled_batches.append(max_events)
+        events = tuple(self.connection.runtime_events[:max_events])
+        del self.connection.runtime_events[:max_events]
+        return events
+
+    def submit_operation(
+        self,
+        *,
+        operation_id: int,
+        frame_id: int,
+        metadata=None,
+        body: bytes | bytearray | memoryview = b"",
+    ) -> "FakeNativeOperation":
+        del metadata
+        self.entrypoints.client_submit(operation_id, frame_id, body)
+        operation = FakeNativeOperation(self, operation_id, frame_id, bytes(body))
+        self.connection.submitted_payloads.append(bytes(body))
+        assert self.connection.server_session is not None
+        self.connection.server_session.pending_submits.append(operation)
+        return operation
+
+    def poll_result(
+        self,
+        operation: "FakeNativeOperation",
+        *,
+        max_events: int | None = None,
+        timeout_ms: int = 0,
+    ) -> SimpleNamespace:
+        self.entrypoints.client_await_events(max_events, timeout_ms)
+        for index, result in enumerate(self.connection.results):
+            if result.frame_id == operation.frame_id:
+                return self.connection.results.pop(index)
+        raise AssertionError("fake role loopback result was not queued")
+
+
+class FakeNativeOperation:
+    def __init__(self, session: FakeNativeSession, operation_id: int, frame_id: int, payload: bytes) -> None:
+        self.session = session
+        self.operation_id = operation_id
+        self.frame_id = frame_id
+        self.payload = payload
+
+    def cancel(self) -> None:
+        self.session.entrypoints.client_cancel(self.frame_id)
+        self.session.connection.cancelled_frames.append(self.frame_id)
+        assert self.session.connection.server_session is not None
+        self.session.connection.server_session.control_events.append(self.frame_id)
+
+
+class FakeNativeServerOperation:
+    def __init__(self, server_session: "FakeNativeServerSession", operation: FakeNativeOperation) -> None:
+        self.server_session = server_session
+        self.operation_id = operation.operation_id
+        self.frame_id = operation.frame_id
+
+    def send_result(self, metadata, body: bytes | bytearray | memoryview = b"") -> None:
+        del metadata
+        self.server_session.entrypoints.server_send_result(self.operation_id, body)
+        self.server_session.connection.results.append(
+            SimpleNamespace(
+                operation_id=self.operation_id,
+                frame_id=self.frame_id,
+                body=bytes(body),
+            )
+        )
+
+
+class FakeNativeServerSession:
+    def __init__(self, connection: FakeNativeConnection) -> None:
+        self.connection = connection
+        self.entrypoints = FakeNativeEntrypoints()
+        self.pending_submits: list[FakeNativeOperation] = []
+        self.control_events: list[int] = []
+
+    def receive_submit(self, *, timeout_ms: int = 0, max_events: int = 1) -> FakeNativeServerOperation:
+        self.entrypoints.server_await_events(timeout_ms, max_events)
+        if not self.pending_submits:
+            raise AssertionError("fake role loopback submit was not queued")
+        return FakeNativeServerOperation(self, self.pending_submits.pop(0))
+
+    def poll_events(self, *, max_events: int = 1, timeout_ms: int = 0):
+        self.entrypoints.server_await_events(max_events, timeout_ms)
+        events = tuple(self.control_events[:max_events])
+        del self.control_events[:max_events]
+        return events
+
+    def send_progress(self, metadata, body=b"") -> None:
+        self.entrypoints.runtime_frame_send(MessageType.PROGRESS, metadata, body)
+        self.connection.runtime_events.append(SimpleNamespace(message_type=int(MessageType.PROGRESS)))
+
+    def send_partial_result(self, metadata, body=b"") -> None:
+        self.entrypoints.runtime_frame_send(MessageType.PARTIAL_RESULT, metadata, body)
+        self.connection.runtime_events.append(SimpleNamespace(message_type=int(MessageType.PARTIAL_RESULT)))
 
 
 class FakeNativeObjectMetadataBuffer:
@@ -1132,7 +981,7 @@ class FakeNativeObjectMetadataBuffer:
     def borrow_view(self) -> "FakeNativeBorrowedBufferView":
         if self.closed:
             raise RuntimeError("fake native object metadata buffer is closed")
-        return FakeNativeCtypesBorrowedBufferView(self)
+        return FakeNativeBorrowedBufferView(self)
 
     def close(self) -> None:
         if self.borrow_count != 0:
@@ -1146,188 +995,12 @@ class FakeNativeBorrowedBufferView:
 
     def __enter__(self):
         self.buffer.borrow_count += 1
-        return memoryview(self.buffer.payload)
-
-    def __exit__(self, exc_type, exc, traceback) -> None:
-        self.buffer.borrow_count -= 1
-
-
-class FakeNativeCtypesObjectMetadataBuffer(FakeNativeObjectMetadataBuffer):
-    def borrow_view(self) -> "FakeNativeCtypesBorrowedBufferView":
-        if self.closed:
-            raise RuntimeError("fake native object metadata buffer is closed")
-        return FakeNativeCtypesBorrowedBufferView(self)
-
-
-class FakeNativeCtypesBorrowedBufferView(FakeNativeBorrowedBufferView):
-    def __enter__(self):
-        self.buffer.borrow_count += 1
         array_type = ctypes.c_ubyte * len(self.buffer.payload)
         self._owner = array_type.from_buffer_copy(self.buffer.payload)
         return memoryview(self._owner).toreadonly()
 
-
-class FakeNativeSession:
-    def __init__(self, connection: FakeNativeConnection) -> None:
-        self.connection = connection
-        self.entrypoints = FakeNativeEntrypoints(self)
-        self.handle = SimpleNamespace(handle=SimpleNamespace(kind=2, id=1, generation=1, flags=0))
-
-    def submit_operation(
-        self,
-        *,
-        operation_id: int,
-        frame_id: int,
-        payload: bytes | bytearray | memoryview = b"",
-    ):
-        assert operation_id == frame_id
-        self.entrypoints.client_submit(payload)
-        return FakeNativeOperation(self.entrypoints, operation_id, frame_id)
-
-    def complete_operation(
-        self,
-        operation: "FakeNativeOperation",
-        payload: bytes | bytearray | memoryview = b"",
-    ) -> None:
-        self.entrypoints.client_complete_operation(payload)
-
-    def poll_result(self, operation: "FakeNativeOperation", *, state=None, max_events: int | None = None):
-        self.entrypoints.client_await_events(max_events)
-        assert operation.operation_id == operation.frame_id
-        assert max_events == 2
-        assert state is not None
-        return object()
-
-    def send_result_hint(self, payload: bytes | bytearray | memoryview = b"") -> None:
-        self.entrypoints.client_send_result_hint(payload)
-
-    def submit_result(
-        self,
-        *,
-        operation_id: int,
-        frame_id: int,
-        payload: bytes | bytearray | memoryview = b"",
-        result_payload: bytes | bytearray | memoryview | None = None,
-        max_events: int | None = None,
-    ):
-        assert operation_id == frame_id
-        assert max_events == 2
-        self.entrypoints.client_submit_result(
-            payload,
-            payload if result_payload is None else result_payload,
-            max_events,
-        )
-        return object()
-
-
-class FakeNativeEntrypoints:
-    def __init__(self, session: FakeNativeSession) -> None:
-        self.session = session
-        self.binding_mode = "ctypes"
-
-    def client_submit(self, payload: bytes | bytearray | memoryview) -> None:
-        self.session.connection.submitted_payloads.append(bytes(payload))
-
-    def client_complete_operation(self, payload: bytes | bytearray | memoryview) -> None:
-        self.session.connection.completed_payloads.append(bytes(payload))
-
-    def client_submit_result(
-        self,
-        payload: bytes | bytearray | memoryview,
-        result_payload: bytes | bytearray | memoryview,
-        max_events: int | None,
-    ) -> None:
-        self.session.connection.submitted_payloads.append(bytes(payload))
-        self.session.connection.completed_payloads.append(bytes(result_payload))
-        self.session.connection.polled_results.append(max_events)
-
-    def client_await_event(self, max_events: int | None) -> None:
-        self.session.connection.polled_results.append(max_events)
-
-    def client_await_events(self, max_events: int | None) -> None:
-        self.session.connection.polled_results.append(max_events)
-
-    def client_cancel(self, frame_id: int) -> None:
-        self.session.connection.cancelled_frames.append(frame_id)
-
-    def client_send_result_hint(self, payload: bytes | bytearray | memoryview) -> None:
-        self.session.connection.result_hints.append(bytes(payload))
-
-
-class FakeNativeOperation:
-    def __init__(self, entrypoints: FakeNativeEntrypoints | None, operation_id: int, frame_id: int) -> None:
-        self.entrypoints = entrypoints
-        self.operation_id = operation_id
-        self.frame_id = frame_id
-
-    def cancel(self) -> None:
-        assert self.entrypoints is not None
-        self.entrypoints.client_cancel(self.frame_id)
-
-
-class WouldBlockNativeOperation:
-    def __init__(self, operation_id: int, frame_id: int) -> None:
-        self.operation_id = operation_id
-        self.frame_id = frame_id
-
-    def cancel(self) -> None:
-        raise NativeWouldBlockError(NativeStatus(FFI_STATUS_WOULD_BLOCK))
-
-
-class WouldBlockNativeClient(FakeNativeClient):
-    def __init__(self) -> None:
-        self.connection = WouldBlockNativeConnection()
-
-
-class WouldBlockNativeConnection(FakeNativeConnection):
-    def open_session(
-        self,
-        *,
-        requested_session_id: int,
-        generation: int,
-        profile_id: int,
-        schema_id: int,
-        schema_version: int,
-    ):
-        assert (requested_session_id, generation, profile_id, schema_id, schema_version) == (1, 1, 0, 0, 0)
-        return WouldBlockNativeSession()
-
-
-class WouldBlockNativeSession:
-    entrypoints = None
-
-    def submit_operation(
-        self,
-        *,
-        operation_id: int,
-        frame_id: int,
-        payload: bytes | bytearray | memoryview = b"",
-    ):
-        return WouldBlockNativeOperation(operation_id, frame_id)
-
-    def complete_operation(
-        self,
-        operation: FakeNativeOperation,
-        payload: bytes | bytearray | memoryview = b"",
-    ) -> None:
-        return None
-
-    def poll_result(self, operation: FakeNativeOperation, *, state=None, max_events: int | None = None):
-        raise NativeWouldBlockError(NativeStatus(FFI_STATUS_WOULD_BLOCK))
-
-    def send_result_hint(self, payload: bytes | bytearray | memoryview = b"") -> None:
-        return None
-
-    def submit_result(
-        self,
-        *,
-        operation_id: int,
-        frame_id: int,
-        payload: bytes | bytearray | memoryview = b"",
-        result_payload: bytes | bytearray | memoryview | None = None,
-        max_events: int | None = None,
-    ):
-        raise NativeWouldBlockError(NativeStatus(FFI_STATUS_WOULD_BLOCK))
+    def __exit__(self, exc_type, exc, traceback) -> None:
+        self.buffer.borrow_count -= 1
 
 
 class FakeNativeProbe:
@@ -1343,8 +1016,8 @@ def _missing_native_schema_codec() -> object:
     raise NativeArtifactError("missing schema artifact")
 
 
-def _missing_native_client() -> object:
-    raise NativeArtifactError("missing client artifact")
+def _missing_native_role_loopback(_transport: str = "ipc") -> object:
+    raise NativeArtifactError("missing role artifact")
 
 
 def _missing_native_probe(*_args: object, **_kwargs: object) -> object:

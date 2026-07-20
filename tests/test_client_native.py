@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+from contextlib import contextmanager
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
 
 import pytest
 
@@ -10,12 +13,23 @@ from nnrp.client import (
     NativeClientOperationScope,
     NativeClientSessionOpenOptions,
     NativeClientSessionOptions,
-    connect_native_client_connection,
-    connect_native_client_session,
     select_client_native_backend,
 )
-from nnrp.core import MessageType, TransportId
-from nnrp.native import NativeArtifactError, NativeWouldBlockError
+from nnrp.client import (
+    connect_native_client_connection as _connect_native_client_connection,
+)
+from nnrp.client import (
+    connect_native_client_session as _connect_native_client_session,
+)
+from nnrp.core import MessageType
+from nnrp.native import (
+    HANDLE_KIND_TRANSPORT_CONNECTION,
+    NativeArtifactError,
+    NativeHandle,
+    NativeStatus,
+    NativeTransportConnection,
+    NativeWouldBlockError,
+)
 from nnrp.runtime import (
     BudgetMetadata,
     CapabilityMetadata,
@@ -28,36 +42,95 @@ from nnrp.runtime import (
     decode_runtime_control_metadata,
     encode_runtime_control_metadata,
 )
+from nnrp.schema import TOKEN_DELTA_SCHEMA_ID, TOKEN_DELTA_SCHEMA_VERSION, StandardProfile
+
+
+class FakeTransportEntrypoints:
+    def __init__(self) -> None:
+        self.closed_handles: list[int] = []
+
+    def close(self, handle) -> object:
+        self.closed_handles.append(int(handle.id))
+        return NativeStatus.ok().to_ffi()
+
+
+class FakeTransportBinding:
+    def __init__(self) -> None:
+        self.entrypoints = FakeTransportEntrypoints()
+        self.connections: list[NativeTransportConnection] = []
+
+    def _connect(self, endpoint, security, connect_timeout_ms: int, io_timeout_ms: int) -> NativeTransportConnection:
+        assert security is None
+        assert (connect_timeout_ms, io_timeout_ms) == (0, 0)
+        connection = NativeTransportConnection(
+            self.entrypoints,
+            SimpleNamespace(name="tcp"),
+            endpoint,
+            NativeHandle(HANDLE_KIND_TRANSPORT_CONNECTION, len(self.connections) + 1, 1, 0),
+        )
+        self.connections.append(connection)
+        return connection
+
+
+@contextmanager
+def connect_native_client_connection(*, backend: FakeBackend, options=None):
+    binding = FakeTransportBinding()
+    with (
+        patch.object(client_native_module, "_select_client_transport", return_value="tcp"),
+        patch.object(client_native_module, "load_native_transport_binding", return_value=binding),
+        _connect_native_client_connection(
+            "nnrp://localhost",
+            transport="tcp",
+            fallback=backend,
+            options=options,
+        ) as connection,
+    ):
+        yield connection
+
+
+@contextmanager
+def connect_native_client_session(*, backend: FakeBackend, options=None):
+    binding = FakeTransportBinding()
+    with (
+        patch.object(client_native_module, "_select_client_transport", return_value="tcp"),
+        patch.object(client_native_module, "load_native_transport_binding", return_value=binding),
+        _connect_native_client_session(
+            "nnrp://localhost",
+            transport="tcp",
+            fallback=backend,
+            options=options,
+        ) as session,
+    ):
+        yield session
 
 
 class FakeBackend:
     def __init__(self) -> None:
         self.connections: list[FakeConnection] = []
 
-    def connect(self, *, connection_id: int, generation: int, transport_id: int) -> FakeConnection:
-        connection = FakeConnection(connection_id, generation, transport_id)
+    def connect(
+        self,
+        *,
+        connection_id: int,
+        generation: int,
+        transport_connection: NativeTransportConnection,
+    ) -> FakeConnection:
+        connection = FakeConnection(connection_id, generation, transport_connection)
         self.connections.append(connection)
         return connection
-
-    def bootstrap_connection(self, *, connection_id: int, generation: int, transport_id: int) -> FakeConnection:
-        return self.connect(connection_id=connection_id, generation=generation, transport_id=transport_id)
-
-
-class LegacyFakeBackend(FakeBackend):
-    def connect(self, *, connection_id: int, generation: int, transport_id: int) -> LegacyFakeConnection:
-        connection = LegacyFakeConnection(connection_id, generation, transport_id)
-        self.connections.append(connection)
-        return connection
-
 
 class FakeConnection:
-    def __init__(self, connection_id: int, generation: int, transport_id: int) -> None:
+    def __init__(
+        self,
+        connection_id: int,
+        generation: int,
+        transport_connection: NativeTransportConnection,
+    ) -> None:
         self.connection_id = connection_id
         self.generation = generation
-        self.transport_id = transport_id
+        self.transport_connection = transport_connection
         self.sessions: list[FakeSession] = []
         self.control_calls: list[tuple[int, bytes | bytearray | memoryview]] = []
-        self.dispatch_calls: list[tuple[str, int | None, int | None]] = []
         self.closed = False
 
     def open_session(
@@ -78,6 +151,89 @@ class FakeConnection:
         )
         self.sessions.append(session)
         return session
+
+    def _send_runtime_frame(self, message_type, metadata, tail=b"") -> None:
+        self.control_calls.append(
+            (int(message_type), encode_runtime_control_metadata(message_type, metadata, tail=bytes(tail)))
+        )
+
+    def close(self) -> None:
+        self.closed = True
+        self.transport_connection._close()
+        for session in self.sessions:
+            session.closed = True
+
+
+class FakeSession:
+    def __init__(
+        self,
+        *,
+        requested_session_id: int,
+        generation: int,
+        profile_id: int,
+        schema_id: int,
+        schema_version: int,
+    ) -> None:
+        self.requested_session_id = requested_session_id
+        self.generation = generation
+        self.profile_id = profile_id
+        self.schema_id = schema_id
+        self.schema_version = schema_version
+        self.closed = False
+        self.operations: list[FakeOperation] = []
+        self.cancelled_frames: list[int] = []
+        self.control_calls: list[tuple[int, bytes | bytearray | memoryview]] = []
+        self.flow_updates: list[int] = []
+        self.result_hints: list[bytes | bytearray | memoryview] = []
+        self.dispatch_calls: list[tuple[str, int | None, int | None]] = []
+        self.submit_operation_calls = 0
+        self.submit_result_calls = 0
+        self.poll_result_calls = 0
+
+    def close(self) -> None:
+        self.closed = True
+
+    def submit_operation(
+        self,
+        *,
+        operation_id: int,
+        frame_id: int,
+        metadata=None,
+        body: bytes = b"",
+        parent_operation_id: int | None = None,
+        operation_group_id: int | None = None,
+    ) -> FakeOperation:
+        self.submit_operation_calls += 1
+        operation = FakeOperation(
+            session_id=self.requested_session_id,
+            operation_id=operation_id,
+            frame_id=frame_id,
+            body=body,
+        )
+        operation.parent_operation_id = parent_operation_id
+        operation.operation_group_id = operation_group_id
+        self.operations.append(operation)
+        return operation
+
+    def poll_result(
+        self,
+        operation: FakeOperation,
+        *,
+        max_events: int | None = None,
+        timeout_ms: int = 0,
+    ) -> FakeResult:
+        self.poll_result_calls += 1
+        return FakeResult(
+            session_id=self.requested_session_id,
+            operation_id=operation.operation_id,
+            frame_id=operation.frame_id,
+            body=operation.body,
+            max_events=max_events,
+            timeout_ms=timeout_ms,
+        )
+
+    def cancel(self, *, frame_id: int) -> None:
+        self.cancelled_frames.append(frame_id)
 
     def _send_runtime_frame(self, message_type, metadata, tail=b"") -> None:
         self.control_calls.append(
@@ -120,139 +276,13 @@ class FakeConnection:
     def dispatch_workflow_states(self, callback, *, max_events: int | None = None) -> int:
         return self.dispatch_payload_family_events("workflow_state", callback, max_events=max_events)
 
-    def close(self) -> None:
-        self.closed = True
-        for session in self.sessions:
-            session.closed = True
-
-
-class LegacyFakeConnection:
-    def __init__(self, connection_id: int, generation: int, transport_id: int) -> None:
-        self.connection_id = connection_id
-        self.generation = generation
-        self.transport_id = transport_id
-        self.sessions: list[FakeSession] = []
-
-    def open_session(
-        self,
-        *,
-        requested_session_id: int,
-        generation: int,
-        profile_id: int,
-        schema_id: int,
-        schema_version: int,
-    ) -> FakeSession:
-        session = FakeSession(
-            requested_session_id=requested_session_id,
-            generation=generation,
-            profile_id=profile_id,
-            schema_id=schema_id,
-            schema_version=schema_version,
-        )
-        self.sessions.append(session)
-        return session
-
-
-class FakeSession:
-    def __init__(
-        self,
-        *,
-        requested_session_id: int,
-        generation: int,
-        profile_id: int,
-        schema_id: int,
-        schema_version: int,
-    ) -> None:
-        self.requested_session_id = requested_session_id
-        self.generation = generation
-        self.profile_id = profile_id
-        self.schema_id = schema_id
-        self.schema_version = schema_version
-        self.closed = False
-        self.operations: list[FakeOperation] = []
-        self.cancelled_frames: list[int] = []
-        self.control_calls: list[tuple[int, bytes | bytearray | memoryview]] = []
-        self.flow_updates: list[int] = []
-        self.result_hints: list[bytes | bytearray | memoryview] = []
-        self.submit_operation_calls = 0
-        self.submit_result_calls = 0
-        self.poll_result_calls = 0
-
-    def close(self) -> None:
-        self.closed = True
-
-    def submit_operation(
-        self,
-        *,
-        operation_id: int,
-        frame_id: int,
-        payload: bytes = b"",
-        parent_operation_id: int | None = None,
-        operation_group_id: int | None = None,
-    ) -> FakeOperation:
-        self.submit_operation_calls += 1
-        operation = FakeOperation(
-            session_id=self.requested_session_id,
-            operation_id=operation_id,
-            frame_id=frame_id,
-            payload=payload,
-        )
-        operation.parent_operation_id = parent_operation_id
-        operation.operation_group_id = operation_group_id
-        self.operations.append(operation)
-        return operation
-
-    def poll_result(self, operation: FakeOperation, *, max_events: int | None = None) -> FakeResult:
-        self.poll_result_calls += 1
-        return FakeResult(
-            session_id=self.requested_session_id,
-            operation_id=operation.operation_id,
-            frame_id=operation.frame_id,
-            payload=operation.payload,
-            max_events=max_events,
-        )
-
-    def submit_result(
-        self,
-        *,
-        operation_id: int,
-        frame_id: int,
-        payload: bytes | bytearray | memoryview = b"",
-        result_payload: bytes | bytearray | memoryview | None = None,
-        max_events: int | None = None,
-    ) -> FakeResult:
-        self.submit_result_calls += 1
-        operation = self.submit_operation(operation_id=operation_id, frame_id=frame_id, payload=bytes(payload))
-        selected_payload = payload if result_payload is None else result_payload
-        return FakeResult(
-            session_id=self.requested_session_id,
-            operation_id=operation.operation_id,
-            frame_id=operation.frame_id,
-            payload=bytes(selected_payload),
-            max_events=max_events,
-        )
-
-    def cancel(self, *, frame_id: int) -> None:
-        self.cancelled_frames.append(frame_id)
-
-    def send_flow_update(self, *, frame_id: int) -> None:
-        self.flow_updates.append(frame_id)
-
-    def send_result_hint(self, payload: bytes | bytearray | memoryview = b"") -> None:
-        self.result_hints.append(payload)
-
-    def _send_runtime_frame(self, message_type, metadata, tail=b"") -> None:
-        self.control_calls.append(
-            (int(message_type), encode_runtime_control_metadata(message_type, metadata, tail=bytes(tail)))
-        )
-
 
 class FakeOperation:
-    def __init__(self, *, session_id: int, operation_id: int, frame_id: int, payload: bytes) -> None:
+    def __init__(self, *, session_id: int, operation_id: int, frame_id: int, body: bytes) -> None:
         self.session_id = session_id
         self.operation_id = operation_id
         self.frame_id = frame_id
-        self.payload = payload
+        self.body = body
         self.cancelled = False
         self.completed_payloads: list[bytes | bytearray | memoryview] = []
         self.dropped = False
@@ -276,14 +306,16 @@ class FakeResult:
         session_id: int,
         operation_id: int,
         frame_id: int,
-        payload: bytes,
+        body: bytes,
         max_events: int | None,
+        timeout_ms: int = 0,
     ) -> None:
         self.session_id = session_id
         self.operation_id = operation_id
         self.frame_id = frame_id
-        self.payload = payload
+        self.body = body
         self.max_events = max_events
+        self.timeout_ms = timeout_ms
 
 
 class FakeNativeHandle:
@@ -325,14 +357,21 @@ class FakeAnonymousSession:
     def __init__(self) -> None:
         self.poll_result_calls = 0
 
-    def poll_result(self, operation: FakeOperation, *, max_events: int | None = None) -> FakeResult:
+    def poll_result(
+        self,
+        operation: FakeOperation,
+        *,
+        max_events: int | None = None,
+        timeout_ms: int = 0,
+    ) -> FakeResult:
         self.poll_result_calls += 1
         return FakeResult(
             session_id=0,
             operation_id=operation.operation_id,
             frame_id=operation.frame_id,
-            payload=operation.payload,
+            body=operation.body,
             max_events=max_events,
+            timeout_ms=timeout_ms,
         )
 
 
@@ -341,7 +380,6 @@ def test_connect_native_client_session_opens_and_closes_host_session() -> None:
     options = NativeClientSessionOptions(
         connection_id=7,
         connection_generation=2,
-        transport_id=1,
         requested_session_id=8,
         session_generation=3,
         profile_id=4,
@@ -359,19 +397,19 @@ def test_connect_native_client_session_opens_and_closes_host_session() -> None:
     assert backend.connections[0].sessions[0].closed is True
 
 
-def test_native_session_open_defaults_keep_profile_unspecified() -> None:
+def test_native_session_open_defaults_match_rust_token_profile() -> None:
     backend = FakeBackend()
 
     with connect_native_client_session(backend=backend) as session:
-        assert session.profile_id == 0
-        assert session.schema_id == 0
-        assert session.schema_version == 0
+        assert session.profile_id == StandardProfile.TOKEN
+        assert session.schema_id == TOKEN_DELTA_SCHEMA_ID
+        assert session.schema_version == TOKEN_DELTA_SCHEMA_VERSION
 
     with connect_native_client_connection(backend=backend) as connection:
         session = connection.open_session()
-        assert session.profile_id == 0
-        assert session.schema_id == 0
-        assert session.schema_version == 0
+        assert session.profile_id == StandardProfile.TOKEN
+        assert session.schema_id == TOKEN_DELTA_SCHEMA_ID
+        assert session.schema_version == TOKEN_DELTA_SCHEMA_VERSION
 
 
 def test_connect_native_client_connection_routes_results_for_multiple_sessions() -> None:
@@ -382,17 +420,17 @@ def test_connect_native_client_connection_routes_results_for_multiple_sessions()
     ) as connection:
         first = connection.open_session(NativeClientSessionOpenOptions(requested_session_id=10))
         second = connection.open_session(NativeClientSessionOpenOptions(requested_session_id=11))
-        first_operation = first.submit_operation(operation_id=100, frame_id=1, payload=b"first")
-        second_operation = second.submit_operation(operation_id=101, frame_id=2, payload=b"second")
+        first_operation = first.submit_operation(operation_id=100, frame_id=1, body=b"first")
+        second_operation = second.submit_operation(operation_id=101, frame_id=2, body=b"second")
 
         first_result = connection.poll_result(first, first_operation, max_events=4)
         second_result = connection.poll_result(second, second_operation, max_events=4)
 
         assert first_result.session_id == 10
-        assert first_result.payload == b"first"
+        assert first_result.body == b"first"
         assert first_result.max_events == 4
         assert second_result.session_id == 11
-        assert second_result.payload == b"second"
+        assert second_result.body == b"second"
 
     assert backend.connections[0].connection_id == 7
     assert backend.connections[0].closed is True
@@ -400,24 +438,14 @@ def test_connect_native_client_connection_routes_results_for_multiple_sessions()
     assert second.closed is True
 
 
-@pytest.mark.parametrize(
-    ("transport_id", "expected_transport_id"),
-    [
-        (TransportId.IPC, int(TransportId.IPC)),
-        (TransportId.WEBSOCKET, int(TransportId.WEBSOCKET)),
-    ],
-)
-def test_connect_native_client_connection_passes_preview4_provider_transport_ids(
-    transport_id: TransportId,
-    expected_transport_id: int,
-) -> None:
+def test_connect_native_client_connection_passes_carrier_ownership_to_backend() -> None:
     backend = FakeBackend()
-    options = NativeClientConnectionOptions(transport_id=transport_id)
 
-    with connect_native_client_connection(backend=backend, options=options):
-        pass
+    with connect_native_client_connection(backend=backend):
+        carrier = backend.connections[0].transport_connection
+        assert carrier.connected is True
 
-    assert backend.connections[0].transport_id == expected_transport_id
+    assert carrier.connected is False
 
 
 def test_native_client_connection_rejects_use_after_close() -> None:
@@ -429,29 +457,21 @@ def test_native_client_connection_rejects_use_after_close() -> None:
         connection.open_session()
 
 
-def test_native_client_connection_falls_back_to_session_close_without_connection_close() -> None:
-    backend = LegacyFakeBackend()
-    with connect_native_client_connection(backend=backend) as connection:
-        first = connection.open_session(NativeClientSessionOpenOptions(requested_session_id=10))
-        second = connection.open_session(NativeClientSessionOpenOptions(requested_session_id=11))
-
-    assert first.closed is True
-    assert second.closed is True
-
-
-def test_native_client_connection_delegates_callback_dispatch() -> None:
+def test_native_client_session_owns_callback_dispatch() -> None:
     backend = FakeBackend()
     callbacks: list[object] = []
 
     with connect_native_client_connection(backend=backend) as connection:
-        assert connection.dispatch_events(callbacks.append, max_events=2, event_kind=6) == 1
-        assert connection.dispatch_credit_updates(callbacks.append, max_events=3) == 1
-        assert connection.dispatch_result_hints(callbacks.append, max_events=8) == 1
-        assert connection.dispatch_structured_events(callbacks.append, max_events=4) == 1
-        assert connection.dispatch_tool_deltas(callbacks.append, max_events=5) == 1
-        assert connection.dispatch_workflow_states(callbacks.append, max_events=6) == 1
+        session = connection.open_session()
+        assert not hasattr(connection, "dispatch_events")
+        assert session.dispatch_events(callbacks.append, max_events=2, event_kind=6) == 1
+        assert session.dispatch_credit_updates(callbacks.append, max_events=3) == 1
+        assert session.dispatch_result_hints(callbacks.append, max_events=8) == 1
+        assert session.dispatch_structured_events(callbacks.append, max_events=4) == 1
+        assert session.dispatch_tool_deltas(callbacks.append, max_events=5) == 1
+        assert session.dispatch_workflow_states(callbacks.append, max_events=6) == 1
         assert (
-            connection.dispatch_payload_family_events(
+            session.dispatch_payload_family_events(
                 "structured_event",
                 callbacks.append,
                 max_events=7,
@@ -469,7 +489,7 @@ def test_native_client_connection_delegates_callback_dispatch() -> None:
         "workflow_state",
         "structured_event",
     ]
-    assert backend.connections[0].dispatch_calls == [
+    assert backend.connections[0].sessions[0].dispatch_calls == [
         ("events", 2, 6),
         ("credit_updates", 3, None),
         ("result_hints", 8, None),
@@ -484,7 +504,7 @@ def test_native_client_connection_supports_operation_cancellation() -> None:
     backend = FakeBackend()
     with connect_native_client_connection(backend=backend) as connection:
         session = connection.open_session()
-        operation = session.submit_operation(operation_id=100, frame_id=7, payload=b"payload")
+        operation = session.submit_operation(operation_id=100, frame_id=7, body=b"payload")
 
         connection.cancel_operation(operation)
         connection.cancel_frame(session, frame_id=7)
@@ -497,7 +517,7 @@ def test_native_client_connection_suppresses_cancelled_operation_results() -> No
     backend = FakeBackend()
     with connect_native_client_connection(backend=backend) as connection:
         session = connection.open_session()
-        operation = session.submit_operation(operation_id=100, frame_id=7, payload=b"payload")
+        operation = session.submit_operation(operation_id=100, frame_id=7, body=b"payload")
 
         connection.cancel_operation(operation)
 
@@ -512,7 +532,7 @@ def test_native_client_connection_suppresses_runtime_cancelled_operation_results
     backend = FakeBackend()
     with connect_native_client_connection(backend=backend) as connection:
         session = connection.open_session()
-        operation = session.submit_operation(operation_id=201, frame_id=9, payload=b"payload")
+        operation = session.submit_operation(operation_id=201, frame_id=9, body=b"payload")
 
         connection.cancel_runtime_operation(session, operation_id=201, control_sequence=1)
 
@@ -527,7 +547,7 @@ def test_native_client_connection_suppresses_cancelled_frame_results() -> None:
     backend = FakeBackend()
     with connect_native_client_connection(backend=backend) as connection:
         session = connection.open_session()
-        operation = session.submit_operation(operation_id=100, frame_id=7, payload=b"payload")
+        operation = session.submit_operation(operation_id=100, frame_id=7, body=b"payload")
 
         connection.cancel_frame(session, frame_id=7)
 
@@ -570,24 +590,39 @@ def test_native_client_connection_clears_cancelled_result_suppressions_on_close(
         assert connection._cancelled_operations == {}
 
 
+def test_native_client_connection_closes_sessions_before_connection() -> None:
+    backend = FakeBackend()
+    with connect_native_client_connection(backend=backend) as connection:
+        session = connection.open_session()
+        close_connection = connection.connection.close
+
+        def assert_session_closed_before_connection() -> None:
+            assert session.closed
+            close_connection()
+
+        connection.connection.close = assert_session_closed_before_connection
+
+
 def test_native_client_connection_suppresses_late_result_after_poll() -> None:
     backend = FakeBackend()
     with connect_native_client_connection(backend=backend) as connection:
         session = connection.open_session()
-        operation = session.submit_operation(operation_id=100, frame_id=7, payload=b"payload")
+        operation = session.submit_operation(operation_id=100, frame_id=7, body=b"payload")
 
         def poll_late_result(
             _operation: FakeOperation,
             *,
             max_events: int | None = None,
+            timeout_ms: int = 0,
         ) -> FakeResult:
             session.poll_result_calls += 1
             return FakeResult(
                 session_id=session.requested_session_id,
                 operation_id=101,
                 frame_id=8,
-                payload=b"late",
+                body=b"late",
                 max_events=max_events,
+                timeout_ms=timeout_ms,
             )
 
         session.poll_result = poll_late_result
@@ -626,36 +661,19 @@ def test_native_client_connection_allows_unknown_session_identity_results() -> N
     backend = FakeBackend()
     with connect_native_client_connection(backend=backend) as connection:
         session = FakeAnonymousSession()
-        operation = FakeOperation(session_id=0, operation_id=100, frame_id=7, payload=b"payload")
+        operation = FakeOperation(session_id=0, operation_id=100, frame_id=7, body=b"payload")
 
         result = connection.poll_result(session, operation)
 
-        assert result.payload == b"payload"
+        assert result.body == b"payload"
         assert session.poll_result_calls == 1
-
-
-def test_native_client_connection_supports_completion_drop_and_control_aliases() -> None:
-    backend = FakeBackend()
-    with connect_native_client_connection(backend=backend) as connection:
-        session = connection.open_session()
-        operation = session.submit_operation(operation_id=100, frame_id=7, payload=b"payload")
-
-        connection.complete_operation(operation, b"result")
-        connection.drop_operation(operation)
-        connection.send_flow_update(session, frame_id=7)
-        connection.send_result_hint(session, b"hint")
-
-        assert operation.completed_payloads == [b"result"]
-        assert operation.dropped is True
-        assert session.flow_updates == [7]
-        assert session.result_hints == [b"hint"]
 
 
 def test_native_client_connection_operation_scope_cancels_on_error() -> None:
     backend = FakeBackend()
     with connect_native_client_connection(backend=backend) as connection:
         session = connection.open_session()
-        operation = session.submit_operation(operation_id=100, frame_id=7, payload=b"payload")
+        operation = session.submit_operation(operation_id=100, frame_id=7, body=b"payload")
         scope = connection.operation_scope(operation)
 
         assert isinstance(scope, NativeClientOperationScope)
@@ -677,7 +695,7 @@ def test_native_client_connection_submits_and_polls_result() -> None:
             session,
             operation_id=100,
             frame_id=7,
-            payload=b"payload",
+            body=b"payload",
             parent_operation_id=99,
             operation_group_id=1234,
             max_events=4,
@@ -686,32 +704,10 @@ def test_native_client_connection_submits_and_polls_result() -> None:
         assert result.session_id == 1
         assert result.operation_id == 100
         assert result.frame_id == 7
-        assert result.payload == b"payload"
+        assert result.body == b"payload"
         assert result.max_events == 4
         assert session.operations[0].parent_operation_id == 99
         assert session.operations[0].operation_group_id == 1234
-
-
-def test_native_client_connection_submits_and_polls_result_through_coarse_runtime_call() -> None:
-    backend = FakeBackend()
-    with connect_native_client_connection(backend=backend) as connection:
-        session = connection.open_session()
-
-        result = connection.submit_and_poll_result(
-            session,
-            operation_id=100,
-            frame_id=7,
-            payload=b"payload",
-            result_payload=b"result",
-            max_events=4,
-        )
-
-        assert result.session_id == 1
-        assert result.operation_id == 100
-        assert result.frame_id == 7
-        assert result.payload == b"result"
-        assert result.max_events == 4
-        assert len(session.operations) == 1
 
 
 def test_native_client_connection_does_not_expose_raw_control() -> None:
@@ -915,16 +911,15 @@ def test_native_client_connection_keeps_hot_paths_on_coarse_runtime_calls() -> N
             session,
             operation_id=200,
             frame_id=1,
-            payload=b"submit",
-            result_payload=b"result",
+            body=b"submit",
+            timeout_ms=25,
         )
-        operation = session.submit_operation(operation_id=201, frame_id=2, payload=b"submit")
+        operation = session.submit_operation(operation_id=201, frame_id=2, body=b"submit")
         client_connection.poll_result(session, operation)
         client_connection.cancel_runtime_operation(session, operation_id=201, control_sequence=1)
 
-    assert session.submit_result_calls == 1
     assert session.submit_operation_calls == 2
-    assert session.poll_result_calls == 1
+    assert session.poll_result_calls == 2
     assert len(session.control_calls) == 1
     assert session.control_calls[0][0] == int(MessageType.CANCEL)
 
@@ -942,21 +937,27 @@ def test_select_client_native_backend_uses_fallback_when_artifact_missing(tmp_pa
     assert backend is fallback
 
 
-def test_connect_native_client_connection_uses_fallback_when_artifact_missing(tmp_path: Path) -> None:
+def test_connect_native_client_connection_does_not_replace_missing_carrier_with_role_fallback(tmp_path: Path) -> None:
     fallback = FakeBackend()
 
-    with connect_native_client_connection(tmp_path / "missing.dll", fallback=fallback) as connection:
-        session = connection.open_session(NativeClientSessionOpenOptions(requested_session_id=12))
+    with pytest.raises(NativeArtifactError):
+        with _connect_native_client_connection(
+            "nnrp://localhost",
+            transport="tcp",
+            root=tmp_path,
+            fallback=fallback,
+        ):
+            pass
 
-        assert session.requested_session_id == 12
-
-    assert fallback.connections[0].sessions[0].closed is True
+    assert fallback.connections == []
 
 
 def test_connect_native_client_session_can_require_native_artifact(tmp_path: Path) -> None:
     with pytest.raises(NativeArtifactError):
-        with connect_native_client_session(
-            tmp_path / "missing.dll",
+        with _connect_native_client_session(
+            "nnrp://localhost",
+            transport="tcp",
+            root=tmp_path,
             fallback=FakeBackend(),
             require_native=True,
         ):
@@ -990,3 +991,155 @@ def test_select_client_native_backend_prefers_native_artifact_when_available(mon
 
     assert backend is native_backend
     assert fallback_backend.connections == []
+
+
+def test_select_client_transport_validates_explicit_provider(monkeypatch: pytest.MonkeyPatch) -> None:
+    selections: list[tuple[str, ...]] = []
+    monkeypatch.setattr(
+        client_native_module,
+        "resolve_native_transport_provider",
+        lambda _name, **_kwargs: SimpleNamespace(name="tcp"),
+    )
+    monkeypatch.setattr(
+        client_native_module,
+        "select_native_transport_provider",
+        lambda *_args, **kwargs: selections.append(kwargs["supported_transports"]),
+    )
+
+    selected = client_native_module._select_client_transport(
+        client_native_module.parse_nnrp_endpoint("nnrp://localhost"),
+        provider_endpoint=None,
+        transport_policy="auto",
+        transport="tcp",
+        security=None,
+        artifact_path=None,
+        root=None,
+        native_platform=None,
+        library=None,
+    )
+
+    assert selected == "tcp"
+    assert selections == [("tcp",)]
+
+
+def test_select_client_transport_returns_direct_auto_selection(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        client_native_module,
+        "select_native_transport_provider",
+        lambda *_args, **_kwargs: SimpleNamespace(selected_transport_name="quic"),
+    )
+
+    selected = client_native_module._select_client_transport(
+        client_native_module.parse_nnrp_endpoint("nnrp://localhost"),
+        provider_endpoint=None,
+        transport_policy="auto",
+        transport=None,
+        security=None,
+        artifact_path=None,
+        root=None,
+        native_platform=None,
+        library=None,
+    )
+
+    assert selected == "quic"
+
+
+def test_select_client_transport_probes_missing_candidates(monkeypatch: pytest.MonkeyPatch) -> None:
+    providers = (
+        SimpleNamespace(name="tcp", metadata=SimpleNamespace(id="tcp-provider")),
+        SimpleNamespace(name="quic", metadata=SimpleNamespace(id="quic-provider")),
+        SimpleNamespace(name="websocket", metadata=SimpleNamespace(id="websocket-provider")),
+    )
+    selected_samples = []
+
+    def select_provider(*_args, **kwargs):
+        if "probe_samples" not in kwargs:
+            raise NativeArtifactError(
+                "probe samples required",
+                candidates=(
+                    SimpleNamespace(rejection_reason=SimpleNamespace(value="probe-missing")),
+                ),
+            )
+        selected_samples.extend(kwargs["probe_samples"])
+        return SimpleNamespace(selected_transport_name="tcp")
+
+    class FakeProbeBinding:
+        def __init__(self, name: str) -> None:
+            self.name = name
+
+        def _probe(self, *_args):
+            if self.name == "quic":
+                raise NativeArtifactError("probe failed")
+            return SimpleNamespace(
+                success_count=2,
+                sample_count=3,
+                median_rtt_us=12,
+                median_throughput_bytes_per_sec=4096,
+            )
+
+    monkeypatch.setattr(client_native_module, "select_native_transport_provider", select_provider)
+    monkeypatch.setattr(
+        client_native_module,
+        "discover_native_transport_providers",
+        lambda *_args: providers,
+    )
+    monkeypatch.setattr(
+        client_native_module,
+        "resolve_native_transport_endpoint",
+        lambda _endpoint, name, **_kwargs: SimpleNamespace(transport_name=name),
+    )
+    monkeypatch.setattr(
+        client_native_module,
+        "load_native_transport_binding",
+        lambda name, **_kwargs: FakeProbeBinding(name),
+    )
+
+    selected = client_native_module._select_client_transport(
+        client_native_module.parse_nnrp_endpoint("nnrp://localhost"),
+        provider_endpoint=None,
+        transport_policy="auto",
+        transport=None,
+        security=None,
+        artifact_path=None,
+        root=None,
+        native_platform=None,
+        library=None,
+    )
+
+    assert selected == "tcp"
+    assert [(sample.transport_name, sample.failed) for sample in selected_samples] == [
+        ("tcp", False),
+        ("tcp", False),
+        ("tcp", True),
+        ("quic", True),
+    ]
+    assert selected_samples[0].rtt_us == 12
+    assert selected_samples[0].bytes_received == 4096
+
+
+def test_select_client_transport_preserves_non_probe_selection_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        client_native_module,
+        "select_native_transport_provider",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            NativeArtifactError(
+                "provider rejected",
+                candidates=(
+                    SimpleNamespace(rejection_reason=SimpleNamespace(value="unsupported")),
+                ),
+            )
+        ),
+    )
+
+    with pytest.raises(NativeArtifactError, match="provider rejected"):
+        client_native_module._select_client_transport(
+            client_native_module.parse_nnrp_endpoint("nnrp://localhost"),
+            provider_endpoint=None,
+            transport_policy="auto",
+            transport=None,
+            security=None,
+            artifact_path=None,
+            root=None,
+            native_platform=None,
+            library=None,
+        )

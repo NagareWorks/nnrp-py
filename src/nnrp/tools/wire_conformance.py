@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import dataclasses
 import json
 import sys
 from collections.abc import Mapping, Sequence
@@ -29,10 +30,19 @@ _VALID_TERMINALS = frozenset({"success", "cancelled", "dropped", "error"})
 
 
 @dataclass(frozen=True, slots=True)
+class WireTargetTransportSecurity:
+    server_name: str
+    trusted_certificate_der_path: str
+    certificate_der_path: str
+    private_key_pkcs8_der_path: str
+
+
+@dataclass(frozen=True, slots=True)
 class WireTargetTransport:
     name: str
     endpoint: str
     tls: bool = False
+    security: WireTargetTransportSecurity | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -82,14 +92,7 @@ def build_wire_target_manifest(
         "suite_version": suite_version,
         "wire_conformance": {
             "modes": normalized_modes,
-            "transports": [
-                {
-                    "name": transport.name,
-                    "endpoint": transport.endpoint,
-                    "tls": transport.tls,
-                }
-                for transport in normalized_transports
-            ],
+            "transports": [_target_transport_to_dict(transport) for transport in normalized_transports],
             "capabilities": normalized_capabilities,
             "limits": {
                 "max_frame_bytes": max_frame_bytes,
@@ -242,10 +245,12 @@ def run_wire_harness_plan(
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = list(argv) if argv is not None else sys.argv[1:]
-    if args and args[0] in {"manifest", "run-plan"}:
+    if args and args[0] in {"manifest", "run-plan", "serve-target"}:
         command = args.pop(0)
         if command == "run-plan":
             return _run_wire_plan_cli(args)
+        if command == "serve-target":
+            return _serve_wire_target_cli(args)
         return _target_manifest_cli(args)
     return _target_manifest_cli(args)
 
@@ -262,17 +267,41 @@ def _target_manifest_cli(argv: Sequence[str] | None = None) -> int:
         required=True,
         help="Transport in name=endpoint form, for example tcp=127.0.0.1:19091 or websocket=wss://host/nnrp.",
     )
+    parser.add_argument(
+        "--transport-security",
+        action="append",
+        dest="transport_security",
+        default=[],
+        help=(
+            "JSON object containing transport, server_name, trusted_certificate_der_path, "
+            "certificate_der_path, and private_key_pkcs8_der_path. Repeat for each TLS transport."
+        ),
+    )
     parser.add_argument("--capability", action="append", dest="capabilities", required=True)
     parser.add_argument("--max-frame-bytes", type=int, default=_DEFAULT_MAX_FRAME_BYTES)
     parser.add_argument("--max-in-flight", type=int, default=_DEFAULT_MAX_IN_FLIGHT)
     parser.add_argument("--output", required=True)
     args = parser.parse_args(list(argv) if argv is not None else None)
 
+    transports = [parse_wire_target_transport(value) for value in args.transports]
+    security_by_transport: dict[str, WireTargetTransportSecurity] = {}
+    for value in args.transport_security:
+        transport_name, security = parse_wire_target_security(value)
+        if transport_name in security_by_transport:
+            raise ValueError(f"duplicate transport security: {transport_name}")
+        security_by_transport[transport_name] = security
+    unknown_security = sorted(set(security_by_transport) - {transport.name for transport in transports})
+    if unknown_security:
+        raise ValueError(f"transport security references undeclared transport: {', '.join(unknown_security)}")
+    transports = [
+        dataclasses.replace(transport, security=security_by_transport.get(transport.name))
+        for transport in transports
+    ]
     manifest = build_wire_target_manifest(
         target_name=args.target_name,
         suite_version=args.suite_version,
         modes=args.modes,
-        transports=[parse_wire_target_transport(value) for value in args.transports],
+        transports=transports,
         capabilities=args.capabilities,
         max_frame_bytes=args.max_frame_bytes,
         max_in_flight=args.max_in_flight,
@@ -300,6 +329,27 @@ def _run_wire_plan_cli(argv: Sequence[str] | None = None) -> int:
     return 0
 
 
+def _serve_wire_target_cli(argv: Sequence[str] | None = None) -> int:
+    from nnrp.tools.wire_target import run_live_wire_target
+
+    parser = argparse.ArgumentParser(prog="nnrp-wire-conformance serve-target")
+    parser.add_argument("--plan", required=True)
+    parser.add_argument("--target", required=True)
+    parser.add_argument("--mode", required=True, choices=sorted(_VALID_MODES))
+    parser.add_argument("--ready-file")
+    parser.add_argument("--timeout-seconds", type=float, default=10.0)
+    args = parser.parse_args(list(argv) if argv is not None else None)
+
+    run_live_wire_target(
+        Path(args.plan),
+        Path(args.target),
+        mode=args.mode,
+        ready_path=Path(args.ready_file) if args.ready_file is not None else None,
+        timeout_seconds=args.timeout_seconds,
+    )
+    return 0
+
+
 def parse_wire_target_transport(value: str) -> WireTargetTransport:
     name, separator, endpoint = value.partition("=")
     if not separator:
@@ -312,6 +362,35 @@ def parse_wire_target_transport(value: str) -> WireTargetTransport:
         name=normalized_name,
         endpoint=normalized_endpoint,
         tls=_endpoint_uses_tls(normalized_name, normalized_endpoint),
+    )
+
+
+def parse_wire_target_security(value: str) -> tuple[str, WireTargetTransportSecurity]:
+    try:
+        document = json.loads(value)
+    except json.JSONDecodeError as error:
+        raise ValueError("transport security must be a JSON object") from error
+    if not isinstance(document, Mapping):
+        raise ValueError("transport security must be a JSON object")
+    expected_fields = {
+        "transport",
+        "server_name",
+        "trusted_certificate_der_path",
+        "certificate_der_path",
+        "private_key_pkcs8_der_path",
+    }
+    unexpected_fields = sorted(set(document) - expected_fields)
+    if unexpected_fields:
+        raise ValueError(f"transport security contains unknown fields: {', '.join(unexpected_fields)}")
+    missing_fields = sorted(expected_fields - set(document))
+    if missing_fields:
+        raise ValueError(f"transport security is missing fields: {', '.join(missing_fields)}")
+    transport = _required_string(document, "transport").strip().lower()
+    return transport, WireTargetTransportSecurity(
+        server_name=_required_string(document, "server_name"),
+        trusted_certificate_der_path=_required_string(document, "trusted_certificate_der_path"),
+        certificate_der_path=_required_string(document, "certificate_der_path"),
+        private_key_pkcs8_der_path=_required_string(document, "private_key_pkcs8_der_path"),
     )
 
 
@@ -402,6 +481,17 @@ def _normalize_transports(transports: Sequence[WireTargetTransport]) -> list[Wir
             raise ValueError("transport endpoint must be non-empty")
         if transport.name in seen:
             raise ValueError(f"duplicate wire conformance transport: {transport.name}")
+        expected_tls = _endpoint_uses_tls(transport.name, transport.endpoint)
+        if transport.name == "quic" and not transport.tls:
+            raise ValueError("QUIC wire conformance transport requires TLS")
+        if transport.name in {"tcp", "ipc"} and transport.tls:
+            raise ValueError(f"{transport.name} wire conformance transport does not use TLS")
+        if transport.name == "websocket" and transport.tls != expected_tls:
+            raise ValueError("WebSocket TLS flag must match its ws:// or wss:// endpoint")
+        if transport.tls and transport.security is None:
+            raise ValueError(f"{transport.name} TLS transport requires security material")
+        if not transport.tls and transport.security is not None:
+            raise ValueError(f"{transport.name} non-TLS transport must not declare security material")
         seen.add(transport.name)
         normalized.append(transport)
     if not normalized:
@@ -409,11 +499,22 @@ def _normalize_transports(transports: Sequence[WireTargetTransport]) -> list[Wir
     return normalized
 
 
+def _target_transport_to_dict(transport: WireTargetTransport) -> dict[str, Any]:
+    document: dict[str, Any] = {
+        "name": transport.name,
+        "endpoint": transport.endpoint,
+        "tls": transport.tls,
+    }
+    if transport.security is not None:
+        document["security"] = dataclasses.asdict(transport.security)
+    return document
+
+
 def _endpoint_uses_tls(name: str, endpoint: str) -> bool:
     if name == "websocket":
         return endpoint.lower().startswith("wss://")
     if name == "quic":
-        return endpoint.lower().startswith("quic+tls://")
+        return True
     return False
 
 

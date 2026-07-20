@@ -474,16 +474,14 @@ wheels = [
 
 [[package]]
 name = "nnrp-py"
-version = "1.0.0rc4.post1"
+version = "1.0.0rc4.post5"
 source = { editable = "." }
 dependencies = [
     { name = "aioquic" },
-    { name = "cffi" },
 ]
 
 [package.optional-dependencies]
 dev = [
-    { name = "cffi" },
     { name = "mypy" },
     { name = "pytest" },
     { name = "pytest-asyncio" },
@@ -494,15 +492,12 @@ dev = [
 
 [package.dev-dependencies]
 dev = [
-    { name = "cffi" },
     { name = "setuptools" },
 ]
 
 [package.metadata]
 requires-dist = [
     { name = "aioquic", specifier = ">=1.2.0" },
-    { name = "cffi", specifier = ">=2.0.0" },
-    { name = "cffi", marker = "extra == 'dev'", specifier = ">=2.0.0" },
     { name = "mypy", marker = "extra == 'dev'", specifier = ">=1.11.0" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.3.0" },
     { name = "pytest-asyncio", marker = "extra == 'dev'", specifier = ">=0.24.0" },
@@ -513,10 +508,7 @@ requires-dist = [
 provides-extras = ["dev"]
 
 [package.metadata.requires-dev]
-dev = [
-    { name = "cffi", specifier = ">=2.0.0" },
-    { name = "setuptools", specifier = ">=82.0.1" },
-]
+dev = [{ name = "setuptools", specifier = ">=82.0.1" }]
 
 [[package]]
 name = "packaging"

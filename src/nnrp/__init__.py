@@ -549,4 +549,4 @@ __all__ = [
     "unpack_tile_index_block",
 ]
 
-__version__ = "1.0.0rc4.post4"
+__version__ = "1.0.0rc4.post5"

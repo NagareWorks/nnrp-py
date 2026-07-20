@@ -12,9 +12,6 @@ from pathlib import Path
 NATIVE_ARTIFACT_PREFIX = "nnrp/native_artifacts/"
 NATIVE_LIBRARY_SUFFIXES = (".dll", ".so", ".dylib", ".a")
 UNIVERSAL_PLATFORM_TAG = "any"
-CFFI_API_MODULE_PREFIX = "nnrp/_nnrp_cffi_api_submit_result"
-CFFI_API_SUFFIXES = (".py", ".pyd", ".so", ".dylib")
-COMPILED_CFFI_API_SUFFIXES = (".pyd", ".so", ".dylib")
 
 ARTIFACT_PLATFORM_TAGS = {
     "windows-x86": "win32",
@@ -45,7 +42,6 @@ class WheelNativeSummary:
     libraries: tuple[str, ...]
     artifact_tags: tuple[str, ...]
     platform_tag: str
-    cffi_api_entries: tuple[str, ...] = ()
     transport_scopes: tuple[str, ...] = ()
     manifest_packages: tuple[str, ...] = ()
     transport_names: tuple[str, ...] = ()
@@ -61,11 +57,6 @@ class WheelNativeSummary:
     def is_universal(self) -> bool:
         return self.platform_tag == UNIVERSAL_PLATFORM_TAG
 
-    @property
-    def has_compiled_cffi_api(self) -> bool:
-        return any(entry.endswith(COMPILED_CFFI_API_SUFFIXES) for entry in self.cffi_api_entries)
-
-
 def inspect_wheel(path: Path) -> WheelNativeSummary:
     platform_tag = _wheel_platform_tag(path)
     with zipfile.ZipFile(path) as archive:
@@ -78,18 +69,12 @@ def inspect_wheel(path: Path) -> WheelNativeSummary:
         name for name in names if name.startswith(NATIVE_ARTIFACT_PREFIX) and name.endswith(NATIVE_LIBRARY_SUFFIXES)
     )
     artifact_tags = tuple(sorted(_artifact_tags(manifests + libraries)))
-    cffi_api_entries = tuple(
-        name
-        for name in names
-        if name.startswith(CFFI_API_MODULE_PREFIX) and name.endswith(CFFI_API_SUFFIXES)
-    )
     return WheelNativeSummary(
         path,
         manifests,
         libraries,
         artifact_tags,
         platform_tag,
-        cffi_api_entries,
         manifest_metadata["transport_scopes"],
         manifest_metadata["manifest_packages"],
         manifest_metadata["transport_names"],
@@ -113,8 +98,6 @@ def verify_native_wheels(
     reject_universal_native: bool = False,
     require_single_platform: bool = False,
     verify_platform_tag: bool = False,
-    require_cffi_api: bool = False,
-    require_compiled_cffi_api: bool = False,
     require_split_transports: bool = False,
     require_preview4_native_artifacts: bool = False,
     require_abi_version: str | None = None,
@@ -158,24 +141,6 @@ def verify_native_wheels(
             for summary in tag_mismatches
         )
         raise ValueError(f"wheel platform tag does not match embedded native artifact: {details}")
-
-    missing_cffi_api = [
-        summary
-        for summary in summary_list
-        if require_cffi_api and summary.has_native_artifacts and not summary.cffi_api_entries
-    ]
-    if missing_cffi_api:
-        wheel_names = ", ".join(summary.wheel.name for summary in missing_cffi_api)
-        raise ValueError(f"wheel is missing packaged cffi API module: {wheel_names}")
-
-    missing_compiled_cffi_api = [
-        summary
-        for summary in summary_list
-        if require_compiled_cffi_api and summary.has_native_artifacts and not summary.has_compiled_cffi_api
-    ]
-    if missing_compiled_cffi_api:
-        wheel_names = ", ".join(summary.wheel.name for summary in missing_compiled_cffi_api)
-        raise ValueError(f"wheel is missing packaged compiled cffi API module: {wheel_names}")
 
     split_transport_failures = [
         summary
@@ -320,8 +285,6 @@ def main() -> int:
     parser.add_argument("--reject-universal-native", action="store_true")
     parser.add_argument("--require-single-platform", action="store_true")
     parser.add_argument("--verify-platform-tag", action="store_true")
-    parser.add_argument("--require-cffi-api", action="store_true")
-    parser.add_argument("--require-compiled-cffi-api", action="store_true")
     parser.add_argument("--require-split-transports", action="store_true")
     parser.add_argument("--require-preview4-native-artifacts", action="store_true")
     parser.add_argument("--require-abi-version")
@@ -335,8 +298,6 @@ def main() -> int:
             reject_universal_native=args.reject_universal_native,
             require_single_platform=args.require_single_platform,
             verify_platform_tag=args.verify_platform_tag,
-            require_cffi_api=args.require_cffi_api,
-            require_compiled_cffi_api=args.require_compiled_cffi_api,
             require_split_transports=args.require_split_transports,
             require_preview4_native_artifacts=args.require_preview4_native_artifacts,
             require_abi_version=args.require_abi_version,
@@ -354,9 +315,7 @@ def main() -> int:
             f"platform={summary.platform_tag}, artifacts={','.join(summary.artifact_tags) or '-'}, "
             f"transports={','.join(summary.transport_scopes) or '-'}, "
             f"packages={','.join(summary.manifest_packages) or '-'}, "
-            f"abi={','.join(summary.abi_versions) or '-'}, "
-            f"cffi_api={len(summary.cffi_api_entries)}, "
-            f"compiled_cffi_api={1 if summary.has_compiled_cffi_api else 0}"
+            f"abi={','.join(summary.abi_versions) or '-'}"
         )
     return 0
 

@@ -203,6 +203,7 @@ def test_build_frame_submit_packet_assembles_metadata_and_body() -> None:
     build_frame_submit_packet(
         session_id=7,
         frame_id=101,
+        operation_id=1001,
         src_width=640,
         src_height=360,
         tile_width=32,
@@ -325,6 +326,7 @@ def test_frame_submit_typed_payload_packet_validates_current_body_contract() -> 
     packet = build_frame_submit_typed_payload_packet(
         session_id=7,
         frame_id=701,
+        operation_id=1701,
         frames=(build_token_chunk_frame(b"tok"), build_audio_chunk_frame(b"aud")),
         target_fps_x100=3000,
     )
@@ -347,6 +349,7 @@ def test_frame_submit_mixed_packet_validates_tensor_and_typed_regions() -> None:
     packet = build_frame_submit_mixed_packet(
         session_id=7,
         frame_id=702,
+        operation_id=1702,
         src_width=640,
         src_height=360,
         tile_width=32,
@@ -582,6 +585,7 @@ def test_build_frame_submit_packet_rejects_out_of_order_sections() -> None:
         build_frame_submit_packet(
             session_id=7,
             frame_id=102,
+            operation_id=1002,
             src_width=640,
             src_height=360,
             tile_width=32,

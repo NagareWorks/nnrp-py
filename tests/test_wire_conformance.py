@@ -7,10 +7,12 @@ from nnrp.tools.wire_conformance import (
     WireCaseResult,
     WireObservedFrame,
     WireTargetTransport,
+    WireTargetTransportSecurity,
     build_wire_case_results_report,
     build_wire_skipped_results_from_plan,
     build_wire_target_manifest,
     main,
+    parse_wire_target_security,
     parse_wire_target_transport,
     run_wire_harness_plan,
     validate_wire_case_results_against_plan,
@@ -20,13 +22,19 @@ from nnrp.tools.wire_conformance import (
 
 
 def test_build_wire_target_manifest_uses_preview4_schema_and_explicit_capabilities() -> None:
+    security = WireTargetTransportSecurity(
+        server_name="localhost",
+        trusted_certificate_der_path="certs/server.der",
+        certificate_der_path="certs/server.der",
+        private_key_pkcs8_der_path="certs/server-key.der",
+    )
     manifest = build_wire_target_manifest(
         target_name="nnrp-py-dev",
         suite_version="0.1.0",
         modes=["suite_as_client", "suite_as_server", "suite_as_client"],
         transports=[
             WireTargetTransport("tcp", "127.0.0.1:19091"),
-            WireTargetTransport("websocket", "wss://localhost/nnrp", tls=True),
+            WireTargetTransport("websocket", "wss://localhost/nnrp", tls=True, security=security),
         ],
         capabilities=["control.cancel_abort", "control.trace_context", "control.cancel_abort"],
         max_frame_bytes=4096,
@@ -41,7 +49,17 @@ def test_build_wire_target_manifest_uses_preview4_schema_and_explicit_capabiliti
         "modes": ["suite_as_client", "suite_as_server"],
         "transports": [
             {"name": "tcp", "endpoint": "127.0.0.1:19091", "tls": False},
-            {"name": "websocket", "endpoint": "wss://localhost/nnrp", "tls": True},
+            {
+                "name": "websocket",
+                "endpoint": "wss://localhost/nnrp",
+                "tls": True,
+                "security": {
+                    "server_name": "localhost",
+                    "trusted_certificate_der_path": "certs/server.der",
+                    "certificate_der_path": "certs/server.der",
+                    "private_key_pkcs8_der_path": "certs/server-key.der",
+                },
+            },
         ],
         "capabilities": ["control.cancel_abort", "control.trace_context"],
         "limits": {
@@ -62,6 +80,53 @@ def test_parse_wire_target_transport_infers_tls_for_secure_websocket() -> None:
         "quic+tls://localhost:19092",
         tls=True,
     )
+
+
+def test_parse_wire_target_security_reads_frozen_fields() -> None:
+    transport, security = parse_wire_target_security(
+        json.dumps(
+            {
+                "transport": "quic",
+                "server_name": "localhost",
+                "trusted_certificate_der_path": "certs/server.der",
+                "certificate_der_path": "certs/server.der",
+                "private_key_pkcs8_der_path": "certs/server-key.der",
+            }
+        )
+    )
+    assert transport == "quic"
+    assert security == WireTargetTransportSecurity(
+        server_name="localhost",
+        trusted_certificate_der_path="certs/server.der",
+        certificate_der_path="certs/server.der",
+        private_key_pkcs8_der_path="certs/server-key.der",
+    )
+
+
+@pytest.mark.parametrize(
+    ("value", "message"),
+    [
+        ("{", "must be a JSON object"),
+        ("[]", "must be a JSON object"),
+        (
+            json.dumps(
+                {
+                    "transport": "quic",
+                    "server_name": "localhost",
+                    "trusted_certificate_der_path": "trust.der",
+                    "certificate_der_path": "server.der",
+                    "private_key_pkcs8_der_path": "server-key.der",
+                    "unexpected": True,
+                }
+            ),
+            "contains unknown fields",
+        ),
+        (json.dumps({"transport": "quic"}), "is missing fields"),
+    ],
+)
+def test_parse_wire_target_security_rejects_incomplete_or_ambiguous_values(value: str, message: str) -> None:
+    with pytest.raises(ValueError, match=message):
+        parse_wire_target_security(value)
 
 
 @pytest.mark.parametrize(
@@ -162,6 +227,59 @@ def test_parse_wire_target_transport_infers_tls_for_secure_websocket() -> None:
             },
             "duplicate wire conformance transport",
         ),
+        (
+            {
+                "modes": ["suite_as_client"],
+                "transports": [WireTargetTransport("quic", "quic+tls://127.0.0.1:1", tls=True)],
+                "capabilities": ["control.cancel_abort"],
+            },
+            "requires security material",
+        ),
+        (
+            {
+                "modes": ["suite_as_client"],
+                "transports": [WireTargetTransport("quic", "127.0.0.1:1")],
+                "capabilities": ["control.cancel_abort"],
+            },
+            "requires TLS",
+        ),
+        (
+            {
+                "modes": ["suite_as_client"],
+                "transports": [
+                    WireTargetTransport(
+                        "tcp",
+                        "127.0.0.1:1",
+                        security=WireTargetTransportSecurity("localhost", "trust", "cert", "key"),
+                    )
+                ],
+                "capabilities": ["control.cancel_abort"],
+            },
+            "must not declare security material",
+        ),
+        (
+            {
+                "modes": ["suite_as_client"],
+                "transports": [WireTargetTransport("tcp", "127.0.0.1:1", tls=True)],
+                "capabilities": ["control.cancel_abort"],
+            },
+            "does not use TLS",
+        ),
+        (
+            {
+                "modes": ["suite_as_client"],
+                "transports": [
+                    WireTargetTransport(
+                        "websocket",
+                        "ws://127.0.0.1:1/nnrp",
+                        tls=True,
+                        security=WireTargetTransportSecurity("localhost", "trust", "cert", "key"),
+                    )
+                ],
+                "capabilities": ["control.cancel_abort"],
+            },
+            "TLS flag must match",
+        ),
     ],
 )
 def test_build_wire_target_manifest_rejects_false_or_invalid_claims(
@@ -230,6 +348,97 @@ def test_wire_target_manifest_cli_accepts_manifest_subcommand(tmp_path) -> None:
 
     manifest = json.loads(output_path.read_text(encoding="utf-8"))
     assert manifest["wire_conformance"]["modes"] == ["suite_as_server"]
+
+
+def test_wire_target_manifest_cli_writes_tls_security(tmp_path) -> None:
+    output_path = tmp_path / "target.json"
+    security = json.dumps(
+        {
+            "transport": "quic",
+            "server_name": "localhost",
+            "trusted_certificate_der_path": "certs/server.der",
+            "certificate_der_path": "certs/server.der",
+            "private_key_pkcs8_der_path": "certs/server-key.der",
+        }
+    )
+
+    assert main(
+        [
+            "manifest",
+            "--mode",
+            "suite_as_client",
+            "--transport",
+            "quic=quic+tls://localhost:19092",
+            "--transport-security",
+            security,
+            "--capability",
+            "control.cancel_abort",
+            "--output",
+            str(output_path),
+        ]
+    ) == 0
+
+    transport = json.loads(output_path.read_text(encoding="utf-8"))["wire_conformance"]["transports"][0]
+    assert transport["security"]["server_name"] == "localhost"
+
+
+@pytest.mark.parametrize(
+    ("security_values", "message"),
+    [
+        (
+            [
+                {
+                    "transport": "quic",
+                    "server_name": "localhost",
+                    "trusted_certificate_der_path": "trust.der",
+                    "certificate_der_path": "server.der",
+                    "private_key_pkcs8_der_path": "server-key.der",
+                },
+                {
+                    "transport": "quic",
+                    "server_name": "localhost",
+                    "trusted_certificate_der_path": "other-trust.der",
+                    "certificate_der_path": "other-server.der",
+                    "private_key_pkcs8_der_path": "other-key.der",
+                },
+            ],
+            "duplicate transport security",
+        ),
+        (
+            [
+                {
+                    "transport": "websocket",
+                    "server_name": "localhost",
+                    "trusted_certificate_der_path": "trust.der",
+                    "certificate_der_path": "server.der",
+                    "private_key_pkcs8_der_path": "server-key.der",
+                }
+            ],
+            "references undeclared transport",
+        ),
+    ],
+)
+def test_wire_target_manifest_cli_rejects_duplicate_or_unknown_security(
+    tmp_path,
+    security_values: list[dict[str, object]],
+    message: str,
+) -> None:
+    arguments = [
+        "manifest",
+        "--mode",
+        "suite_as_client",
+        "--transport",
+        "quic=quic+tls://localhost:19092",
+        "--capability",
+        "control.cancel_abort",
+        "--output",
+        str(tmp_path / "target.json"),
+    ]
+    for security in security_values:
+        arguments.extend(("--transport-security", json.dumps(security)))
+
+    with pytest.raises(ValueError, match=message):
+        main(arguments)
 
 
 def test_build_wire_case_results_report_uses_preview4_schema_and_observed_frames() -> None:

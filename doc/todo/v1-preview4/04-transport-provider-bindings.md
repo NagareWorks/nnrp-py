@@ -67,3 +67,24 @@
 - [x] Expose typed client and server security configuration objects.
 - [x] Make connection and listener close idempotent.
 - [x] Reject provider-local endpoint locators that do not match the owning artifact.
+
+## Role Runtime Carrier Ownership
+
+- [x] Connect production client roles through the selected provider artifact.
+  - [x] Open the provider-local carrier endpoint.
+  - [x] Transfer carrier ownership to the role runtime in the same library.
+  - [x] Perform the real session handshake before exposing a usable connection.
+  - [x] Keep raw transfer handles private and invalidate packet wrappers after success.
+- [x] Bind production server roles through the selected provider artifact.
+  - [x] Transfer listener ownership to the role runtime in the same library.
+  - [x] Accept real carrier connections and complete server handshake in Rust.
+  - [x] Surface submit/control/object/cache events from Rust-owned reads.
+  - [x] Send partial/terminal/drop/trace output over the accepted carrier.
+- [x] Remove logical-only and synthetic production paths.
+  - [x] Do not complete submit/result locally when no peer is connected.
+  - [x] Keep packet-level `connect`/`listen` limited to diagnostics, conformance, and custom carriers.
+  - [x] Reject artifacts that expose standalone transport calls without role adoption symbols.
+- [x] Add carrier-backed E2E tests for TCP, QUIC, IPC, and WebSocket.
+  - [x] Cover client/server handshake and submit/result exchange.
+  - [x] Cover runtime control and object/cache events.
+  - [x] Cover ownership transfer failure and idempotent role close.

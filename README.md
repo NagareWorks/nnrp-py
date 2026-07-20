@@ -65,6 +65,7 @@ from nnrp.client import (
 )
 
 with connect_native_client_connection(
+	"nnrps://runtime.example/session/default",
 	options=NativeClientConnectionOptions(connection_id=7),
 	require_native=True,
 ) as connection:
@@ -96,9 +97,9 @@ The native helpers provide:
 6. `NativeClientConnection.cancel_frame()` and `NativeClientConnection.cancel_operation()` for operation-aware cancellation.
 7. Named Preview4 runtime-control helpers for scheduling, route hints, execution hints, capability negotiation, and profile degradation. Raw control codes are internal.
 
-By default the native loader searches `nnrp/native_artifacts/<os>-<arch>/` inside the installed package. Set `NNRP_NATIVE_ARTIFACT_ROOT` when testing an external artifact tree. Pass `require_native=True` in host code that must fail fast instead of falling back to SDK-local fixtures.
+By default the native loader searches `nnrp/native_artifacts/<os>-<arch>/` inside the installed package. Set `NNRP_NATIVE_ARTIFACT_ROOT` when testing an external artifact tree. Pass `require_native=True` in host code that must fail fast instead of using an explicitly supplied test or diagnostic fallback.
 
-The native binding layer has two paths. The default `NNRP_NATIVE_BINDING_MODE=auto` tries a packaged cffi API fast path for compact submit/result operations and falls back to the zero-compile `ctypes` ABI path when that module is unavailable or cannot preserve the requested payload semantics. Set `NNRP_NATIVE_BINDING_MODE=ctypes` for compiler-free diagnostics, or `NNRP_NATIVE_BINDING_MODE=cffi_api` when a benchmark or deployment should fail fast unless the cffi API module is present.
+The production binding is the ABI 3 carrier/role surface exposed through `ctypes`. A provider artifact opens the TCP, QUIC, IPC, or WebSocket carrier, then transfers that carrier to the Rust client or server role. Submit, cancellation, server receive/result delivery, and event polling remain coarse role calls; the Python package does not ship a second compact-result runtime or a compiled CFFI side path.
 
 Polled native events and results expose Python-owned `bytes` payload snapshots. The current Python API does not expose borrowed result buffers, so a result object remains stable even if the native runtime reuses its poll buffer after the call returns.
 
@@ -109,7 +110,10 @@ Client control helpers build the frozen preview4 metadata payloads and send one 
 ```python
 from nnrp.client import NativeClientSessionOpenOptions, connect_native_client_connection
 
-with connect_native_client_connection(require_native=True) as connection:
+with connect_native_client_connection(
+	"nnrps://runtime.example/session/default",
+	require_native=True,
+) as connection:
 	session = connection.open_session(NativeClientSessionOpenOptions(requested_session_id=42))
 
 	connection.update_runtime_priority(
@@ -224,7 +228,10 @@ from nnrp import (
 )
 from nnrp.client import NativeClientSessionOpenOptions, connect_native_client_connection
 
-with connect_native_client_connection(require_native=True) as connection:
+with connect_native_client_connection(
+	"nnrps://runtime.example/session/default",
+	require_native=True,
+) as connection:
 	session = connection.open_session(NativeClientSessionOpenOptions(requested_session_id=42))
 
 	cache = session.cache_backend(now_ms=10_000, ttl_ms=30_000)
@@ -407,7 +414,10 @@ The canonical host shape is a long-lived native connection with one or more expl
 ```python
 from nnrp.client import NativeClientSessionOpenOptions, connect_native_client_connection
 
-with connect_native_client_connection(require_native=True) as connection:
+with connect_native_client_connection(
+	"nnrps://runtime.example/session/default",
+	require_native=True,
+) as connection:
 	interactive = connection.open_session(
 		NativeClientSessionOpenOptions(requested_session_id=10, profile_id=1)
 	)

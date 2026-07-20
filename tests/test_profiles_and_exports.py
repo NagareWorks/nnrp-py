@@ -376,7 +376,6 @@ def test_preview4_host_runtime_api_keeps_request_options_off_packet_helpers() ->
     assert set(NativeClientConnectionOptions.__annotations__) == {
         "connection_id",
         "connection_generation",
-        "transport_id",
     }
     assert set(NativeClientSessionOpenOptions.__annotations__) == {
         "requested_session_id",
@@ -553,7 +552,7 @@ def test_compatibility_exports_expose_core_symbols() -> None:
     assert RESULT_PUSH_METADATA_LENGTH == 64
     assert BODY_REGION_PRELUDE_LENGTH == 32
     assert INLINE_OBJECT_BLOCK_HEADER_LENGTH == 16
-    assert OBJECT_REFERENCE_BLOCK_LENGTH == 16
+    assert OBJECT_REFERENCE_BLOCK_LENGTH == 24
     assert TYPED_PAYLOAD_DESCRIPTOR_LENGTH == 16
     assert EXTENSION_FRAME_DESCRIPTOR_LENGTH == 16
     assert FrameSubmitMetadata.__name__ == "FrameSubmitMetadata"

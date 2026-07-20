@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import ctypes
-import importlib
 import json
 import os
 import platform
@@ -18,7 +17,17 @@ from typing import Any, Protocol, TypeVar, runtime_checkable
 from urllib.parse import SplitResult, urlsplit
 
 from nnrp.core import MessageType
-from nnrp.core.messages.control import CacheInvalidateMetadata, TransportId, TransportPolicy
+from nnrp.core.messages import (
+    FRAME_SUBMIT_METADATA_LENGTH,
+    RESULT_PUSH_METADATA_LENGTH,
+    BudgetPolicy,
+    FrameSubmitMetadata,
+    InputProfile,
+    ResultPushMetadata,
+    SubmitMode,
+    TileIndexMode,
+)
+from nnrp.core.messages.control import CacheInvalidateMetadata, PayloadKind, TransportId, TransportPolicy
 from nnrp.runtime import (
     BudgetMetadata,
     CacheMissMetadata,
@@ -48,8 +57,8 @@ from nnrp.runtime.types import _FixedRuntimeMetadata
 
 EXPECTED_PROTOCOL_MAJOR = 1
 EXPECTED_PROTOCOL_WIRE_FORMAT = 0
-EXPECTED_ABI_MAJOR = 1
-MINIMUM_ABI_MINOR = 12
+EXPECTED_ABI_MAJOR = 3
+EXPECTED_ABI_MINOR = 0
 TRANSPORT_SLOT_QUIC = 0x00000001
 TRANSPORT_SLOT_TCP = 0x00000002
 TRANSPORT_SLOT_IPC = 0x00000004
@@ -91,9 +100,6 @@ RUNTIME_FEATURE_CACHE_LEASE_OPS = 0x0000000000000400
 RUNTIME_FEATURE_SCHEMA_REGISTRY_HANDLES = 0x0000000000000800
 RUNTIME_FEATURE_BUFFER_HANDLES = 0x0000000000001000
 RUNTIME_FEATURE_EXECUTABLE_RESUME = 0x0000000000002000
-RUNTIME_FEATURE_CLIENT_COMPLETION_HELPERS = 0x0000000000004000
-RUNTIME_FEATURE_CLIENT_COARSE_RESULT_HELPERS = 0x0000000000008000
-RUNTIME_FEATURE_CLIENT_COMPACT_RESULT_HELPERS = 0x0000000000010000
 RUNTIME_FEATURE_PREVIEW4_CONTROL_EVENTS = 0x0000000000020000
 RUNTIME_FEATURE_PREVIEW4_OBJECT_CACHE_EVENTS = 0x0000000000040000
 RUNTIME_FEATURE_PREVIEW4_RUNTIME_FRAME_SEND = 0x0000000000080000
@@ -114,9 +120,6 @@ class NativeRuntimeFeatureFlag(IntFlag):
     SCHEMA_REGISTRY_HANDLES = RUNTIME_FEATURE_SCHEMA_REGISTRY_HANDLES
     BUFFER_HANDLES = RUNTIME_FEATURE_BUFFER_HANDLES
     EXECUTABLE_RESUME = RUNTIME_FEATURE_EXECUTABLE_RESUME
-    CLIENT_COMPLETION_HELPERS = RUNTIME_FEATURE_CLIENT_COMPLETION_HELPERS
-    CLIENT_COARSE_RESULT_HELPERS = RUNTIME_FEATURE_CLIENT_COARSE_RESULT_HELPERS
-    CLIENT_COMPACT_RESULT_HELPERS = RUNTIME_FEATURE_CLIENT_COMPACT_RESULT_HELPERS
     PREVIEW4_CONTROL_EVENTS = RUNTIME_FEATURE_PREVIEW4_CONTROL_EVENTS
     PREVIEW4_OBJECT_CACHE_EVENTS = RUNTIME_FEATURE_PREVIEW4_OBJECT_CACHE_EVENTS
     PREVIEW4_RUNTIME_FRAME_SEND = RUNTIME_FEATURE_PREVIEW4_RUNTIME_FRAME_SEND
@@ -128,9 +131,6 @@ RUNTIME_CONTROL_FEATURE_FLAGS = (
     | NativeRuntimeFeatureFlag.EVENT_POLLING
     | NativeRuntimeFeatureFlag.CALLBACK_DISPATCH
     | NativeRuntimeFeatureFlag.BATCH_POLLING
-    | NativeRuntimeFeatureFlag.CLIENT_COMPLETION_HELPERS
-    | NativeRuntimeFeatureFlag.CLIENT_COARSE_RESULT_HELPERS
-    | NativeRuntimeFeatureFlag.CLIENT_COMPACT_RESULT_HELPERS
     | NativeRuntimeFeatureFlag.PREVIEW4_CONTROL_EVENTS
     | NativeRuntimeFeatureFlag.PREVIEW4_RUNTIME_FRAME_SEND
 )
@@ -158,9 +158,6 @@ _RUNTIME_FEATURE_FLAG_NAMES = {
     NativeRuntimeFeatureFlag.SCHEMA_REGISTRY_HANDLES: "schema_registry_handles",
     NativeRuntimeFeatureFlag.BUFFER_HANDLES: "buffer_handles",
     NativeRuntimeFeatureFlag.EXECUTABLE_RESUME: "executable_resume",
-    NativeRuntimeFeatureFlag.CLIENT_COMPLETION_HELPERS: "client_completion_helpers",
-    NativeRuntimeFeatureFlag.CLIENT_COARSE_RESULT_HELPERS: "client_coarse_result_helpers",
-    NativeRuntimeFeatureFlag.CLIENT_COMPACT_RESULT_HELPERS: "client_compact_result_helpers",
     NativeRuntimeFeatureFlag.PREVIEW4_CONTROL_EVENTS: "preview4_control_events",
     NativeRuntimeFeatureFlag.PREVIEW4_OBJECT_CACHE_EVENTS: "preview4_object_cache_events",
     NativeRuntimeFeatureFlag.PREVIEW4_RUNTIME_FRAME_SEND: "preview4_runtime_frame_send",
@@ -177,13 +174,6 @@ SESSION_RECOVERY_OUTCOME_FRESH = 0
 SESSION_RECOVERY_OUTCOME_RESUME_ENABLED = 1
 SESSION_RECOVERY_OUTCOME_RESUMED = 2
 SESSION_RECOVERY_OUTCOME_RESUME_REJECTED = 3
-RESULT_STATE_NONE = 0
-RESULT_STATE_COMPLETED = 1
-RESULT_STATE_PARTIAL = 2
-RESULT_STATE_DEGRADED = 3
-RESULT_STATE_STALE_REUSE = 4
-RESULT_STATE_CANCELLED = 5
-RESULT_STATE_FAILED = 6
 REQUIRED_RUNTIME_FEATURES = (
     RUNTIME_FEATURE_PROTOCOL_CORE
     | RUNTIME_FEATURE_CLIENT_API
@@ -199,9 +189,6 @@ REQUIRED_RUNTIME_FEATURES = (
     | RUNTIME_FEATURE_SCHEMA_REGISTRY_HANDLES
     | RUNTIME_FEATURE_BUFFER_HANDLES
     | RUNTIME_FEATURE_EXECUTABLE_RESUME
-    | RUNTIME_FEATURE_CLIENT_COMPLETION_HELPERS
-    | RUNTIME_FEATURE_CLIENT_COARSE_RESULT_HELPERS
-    | RUNTIME_FEATURE_CLIENT_COMPACT_RESULT_HELPERS
     | RUNTIME_FEATURE_PREVIEW4_CONTROL_EVENTS
     | RUNTIME_FEATURE_PREVIEW4_OBJECT_CACHE_EVENTS
     | RUNTIME_FEATURE_PREVIEW4_RUNTIME_FRAME_SEND
@@ -271,9 +258,7 @@ EVENT_KIND_ERROR = 10
 EVENT_KIND_RESULT_HINT = 11
 EVENT_KIND_PARTIAL_RESULT = 12
 EVENT_KIND_RUNTIME_FRAME = 13
-CONTROL_CODE_RESULT_HINT = 0x18
 DEFAULT_ARTIFACT_ROOT_ENV = "NNRP_NATIVE_ARTIFACT_ROOT"
-NATIVE_BINDING_MODE_ENV = "NNRP_NATIVE_BINDING_MODE"
 _CallbackEventT = TypeVar("_CallbackEventT")
 
 
@@ -1045,33 +1030,12 @@ class _NnrpPollResult(ctypes.Structure):
     ]
 
 
-class _NnrpCompactResult(ctypes.Structure):
-    _fields_ = [
-        ("status", _NnrpFfiStatus),
-        ("has_result", ctypes.c_uint8),
-        ("event_kind", ctypes.c_uint32),
-        ("result_state", ctypes.c_uint32),
-        ("operation", _NnrpHandle),
-        ("operation_id", ctypes.c_uint64),
-        ("frame_id", ctypes.c_uint32),
-        ("payload", _NnrpBufferView),
-        ("diagnostic", _NnrpFfiDiagnostic),
-    ]
-
-
-class _NnrpConnectionBootstrap(ctypes.Structure):
-    _fields_ = [
-        ("connection_id", ctypes.c_uint64),
-        ("generation", ctypes.c_uint32),
-        ("transport_id", ctypes.c_uint32),
-    ]
-
-
 class _NnrpClientConnectRequest(ctypes.Structure):
     _fields_ = [
         ("connection_id", ctypes.c_uint64),
         ("generation", ctypes.c_uint32),
-        ("transport_id", ctypes.c_uint32),
+        ("reserved0", ctypes.c_uint32),
+        ("transport_connection", _NnrpHandle),
     ]
 
 
@@ -1079,7 +1043,8 @@ class _NnrpServerBindRequest(ctypes.Structure):
     _fields_ = [
         ("server_id", ctypes.c_uint64),
         ("generation", ctypes.c_uint32),
-        ("transport_id", ctypes.c_uint32),
+        ("reserved0", ctypes.c_uint32),
+        ("transport_listener", _NnrpHandle),
     ]
 
 
@@ -1110,30 +1075,6 @@ class _NnrpClientCancelRequest(ctypes.Structure):
     ]
 
 
-class _NnrpClientCompleteOperationRequest(ctypes.Structure):
-    _fields_ = [
-        ("operation", _NnrpHandle),
-        ("payload", _NnrpBufferView),
-    ]
-
-
-class _NnrpClientDropOperationRequest(ctypes.Structure):
-    _fields_ = [
-        ("operation", _NnrpHandle),
-    ]
-
-
-class _NnrpClientSubmitResultRequest(ctypes.Structure):
-    _fields_ = [
-        ("session", _NnrpHandle),
-        ("operation_id", ctypes.c_uint64),
-        ("frame_id", ctypes.c_uint32),
-        ("submit_payload", _NnrpBufferView),
-        ("result_payload", _NnrpBufferView),
-        ("max_events", ctypes.c_size_t),
-    ]
-
-
 class _NnrpRuntimeObjectDescriptor(ctypes.Structure):
     _fields_ = [
         ("object_id", ctypes.c_uint64),
@@ -1153,41 +1094,25 @@ class _NnrpRuntimeObjectDescriptor(ctypes.Structure):
 class _NnrpServerAcceptRequest(ctypes.Structure):
     _fields_ = [
         ("server", _NnrpHandle),
-        ("session_id", ctypes.c_uint32),
+        ("session_handle_id", ctypes.c_uint64),
         ("generation", ctypes.c_uint32),
-        ("profile_id", ctypes.c_uint16),
-        ("schema_id", ctypes.c_uint32),
-        ("schema_version", ctypes.c_uint32),
+        ("timeout_ms", ctypes.c_uint32),
     ]
 
 
-class _NnrpServerReceiveSubmitRequest(ctypes.Structure):
+class _NnrpRoleEventPollRequest(ctypes.Structure):
     _fields_ = [
-        ("session", _NnrpHandle),
-        ("operation_id", ctypes.c_uint64),
-        ("frame_id", ctypes.c_uint32),
-        ("payload", _NnrpBufferView),
+        ("scope", _NnrpHandle),
+        ("max_events", ctypes.c_uint32),
+        ("timeout_ms", ctypes.c_uint32),
+        ("flags", ctypes.c_uint32),
+        ("reserved0", ctypes.c_uint32),
     ]
 
 
 class _NnrpServerSendResultRequest(ctypes.Structure):
     _fields_ = [
         ("operation", _NnrpHandle),
-        ("payload", _NnrpBufferView),
-    ]
-
-
-class _NnrpServerFlowUpdateRequest(ctypes.Structure):
-    _fields_ = [
-        ("session", _NnrpHandle),
-        ("frame_id", ctypes.c_uint32),
-    ]
-
-
-class _NnrpControlRequest(ctypes.Structure):
-    _fields_ = [
-        ("handle", _NnrpHandle),
-        ("control_code", ctypes.c_uint32),
         ("payload", _NnrpBufferView),
     ]
 
@@ -1240,9 +1165,9 @@ class _NnrpSessionRecoveryOutcome(ctypes.Structure):
 class _NnrpCacheObjectId(ctypes.Structure):
     _fields_ = [
         ("cache_namespace", ctypes.c_uint32),
-        ("cache_key_hi", ctypes.c_uint32),
-        ("cache_key_lo", ctypes.c_uint32),
         ("object_kind", ctypes.c_uint32),
+        ("cache_key_hi", ctypes.c_uint64),
+        ("cache_key_lo", ctypes.c_uint64),
     ]
 
 
@@ -1369,21 +1294,13 @@ class NativeRuntimeEntrypoints:
         library: Any,
         *,
         artifact_path: Path | None = None,
-        cffi_submit_result_api: _NativeCffiSubmitResultApi | None = None,
     ) -> None:
         self.artifact_path = artifact_path
-        self.cffi_submit_result_api = cffi_submit_result_api
         self.current_protocol_version = _bind_native_function(
             library, "nnrp_current_protocol_version", _NnrpProtocolVersion, []
         )
         self.runtime_capabilities = _bind_native_function(
             library, "nnrp_runtime_capabilities", _NnrpRuntimeCapabilities, []
-        )
-        self.connection_bootstrap = _bind_native_function(
-            library,
-            "nnrp_connection_bootstrap",
-            _NnrpFfiStatus,
-            [_NnrpConnectionBootstrap, ctypes.POINTER(_NnrpHandle)],
         )
         self.client_connect = _bind_native_function(
             library,
@@ -1429,36 +1346,6 @@ class NativeRuntimeEntrypoints:
         self.client_cancel = _bind_native_function(
             library, "nnrp_client_cancel", _NnrpFfiStatus, [_NnrpClientCancelRequest]
         )
-        self.client_complete_operation = _bind_native_function(
-            library,
-            "nnrp_client_complete_operation",
-            _NnrpFfiStatus,
-            [_NnrpClientCompleteOperationRequest],
-        )
-        self.client_drop_operation = _bind_native_function(
-            library,
-            "nnrp_client_drop_operation",
-            _NnrpFfiStatus,
-            [_NnrpClientDropOperationRequest],
-        )
-        self.client_submit_result = _bind_native_function(
-            library,
-            "nnrp_client_submit_result",
-            _NnrpFfiStatus,
-            [_NnrpClientSubmitResultRequest, ctypes.POINTER(_NnrpHandle), ctypes.POINTER(_NnrpPollResult)],
-        )
-        self.client_submit_result_compact = _bind_native_function(
-            library,
-            "nnrp_client_submit_result_compact",
-            _NnrpFfiStatus,
-            [_NnrpClientSubmitResultRequest, ctypes.POINTER(_NnrpCompactResult)],
-        )
-        self.client_send_flow_update = _bind_native_function(
-            library, "nnrp_client_send_flow_update", _NnrpFfiStatus, [_NnrpServerFlowUpdateRequest]
-        )
-        self.client_send_result_hint = _bind_native_function(
-            library, "nnrp_client_send_result_hint", _NnrpFfiStatus, [_NnrpControlRequest]
-        )
         self.client_await_event = _bind_native_function(
             library,
             "nnrp_client_await_event",
@@ -1469,7 +1356,7 @@ class NativeRuntimeEntrypoints:
             library,
             "nnrp_client_await_events",
             _NnrpFfiStatus,
-            [_NnrpHandle, ctypes.POINTER(_NnrpEvent), ctypes.c_size_t, ctypes.POINTER(ctypes.c_size_t)],
+            [_NnrpRoleEventPollRequest, ctypes.POINTER(_NnrpEvent), ctypes.c_size_t, ctypes.POINTER(ctypes.c_size_t)],
         )
         self.server_bind = _bind_native_function(
             library,
@@ -1483,20 +1370,16 @@ class NativeRuntimeEntrypoints:
             _NnrpFfiStatus,
             [_NnrpServerAcceptRequest, ctypes.POINTER(_NnrpHandle)],
         )
-        self.server_receive_submit = _bind_native_function(
+        self.server_await_events = _bind_native_function(
             library,
-            "nnrp_server_receive_submit",
+            "nnrp_server_await_events",
             _NnrpFfiStatus,
-            [_NnrpServerReceiveSubmitRequest, ctypes.POINTER(_NnrpHandle)],
+            [_NnrpRoleEventPollRequest, ctypes.POINTER(_NnrpEvent), ctypes.c_size_t, ctypes.POINTER(ctypes.c_size_t)],
         )
         self.server_send_result = _bind_native_function(
             library, "nnrp_server_send_result", _NnrpFfiStatus, [_NnrpServerSendResultRequest]
         )
-        self.server_send_flow_update = _bind_native_function(
-            library, "nnrp_server_send_flow_update", _NnrpFfiStatus, [_NnrpServerFlowUpdateRequest]
-        )
         self.server_close = _bind_native_function(library, "nnrp_server_close", _NnrpFfiStatus, [_NnrpHandle])
-        self.control = _bind_native_function(library, "nnrp_control", _NnrpFfiStatus, [_NnrpControlRequest])
         self.runtime_frame_send = _bind_native_function(
             library,
             "nnrp_runtime_frame_send",
@@ -1686,15 +1569,11 @@ class NativeRuntimeEntrypoints:
             [_NnrpCallbackSink, ctypes.POINTER(_NnrpEvent)],
         )
 
-    @property
-    def binding_mode(self) -> str:
-        return "cffi_api" if self.cffi_submit_result_api is not None else "ctypes"
-
-
 class _NativeTransportEntrypoints:
     """ctypes entrypoint table for complete-packet native transport I/O."""
 
     def __init__(self, library: Any, *, artifact_path: Path | None = None) -> None:
+        self.library = library
         self.artifact_path = artifact_path
         self.client_security_config_create = _bind_native_function(
             library,
@@ -1864,6 +1743,30 @@ class NativeTransportConnection:
             _raise_for_native_ffi_status(self._entrypoints.close(self._handle.to_ffi()))
             self._closed = True
 
+    def _adopt_client_role(
+        self,
+        entrypoints: NativeRuntimeEntrypoints,
+        *,
+        connection_id: int,
+        generation: int,
+    ) -> NativeRuntimeConnection:
+        _validate_u64("connection_id", connection_id)
+        _validate_u32("generation", generation)
+        with self._lock:
+            self._require_open()
+            request = _NnrpClientConnectRequest(
+                connection_id,
+                generation,
+                0,
+                self._handle.to_ffi(),
+            )
+            output = _NnrpHandle()
+            status = entrypoints.client_connect(request, ctypes.byref(output))
+            raise_for_native_status(status)
+            self._closed = True
+            self._handle = NativeHandle.invalid()
+            return NativeRuntimeConnection(entrypoints, NativeConnectionHandle.from_ffi(output))
+
     def _require_open(self) -> None:
         if self._closed:
             raise NativeInvalidStateError(
@@ -1931,19 +1834,89 @@ class NativeTransportListener:
             _raise_for_native_ffi_status(self._entrypoints.close(self._handle.to_ffi()))
             self._closed = True
 
+    def _adopt_server_role(
+        self,
+        entrypoints: NativeRuntimeEntrypoints,
+        *,
+        server_id: int,
+        generation: int,
+    ) -> NativeRuntimeServer:
+        _validate_u64("server_id", server_id)
+        _validate_u32("generation", generation)
+        with self._lock:
+            self._require_open()
+            request = _NnrpServerBindRequest(
+                server_id,
+                generation,
+                0,
+                self._handle.to_ffi(),
+            )
+            output = _NnrpHandle()
+            status = entrypoints.server_bind(request, ctypes.byref(output))
+            raise_for_native_status(status)
+            self._closed = True
+            self._handle = NativeHandle.invalid()
+            return NativeRuntimeServer(entrypoints, NativeConnectionHandle.from_ffi(output))
+
     def _require_open(self) -> None:
         if self._closed:
             raise NativeInvalidStateError(NativeStatus(FFI_STATUS_INVALID_STATE), "native transport listener is closed")
 
 
+def _native_ffi_endpoint_uri(endpoint: NativeTransportEndpoint) -> str:
+    if endpoint.transport_name == "quic" and endpoint.scheme == "quic+tls":
+        return f"quic://{endpoint.address}"
+    return endpoint.uri
+
+
 class NativeTransportBinding:
     """Host-facing binding for one transport-scoped Rust artifact."""
 
-    def __init__(self, entrypoints: _NativeTransportEntrypoints, provider: NativeTransportProvider) -> None:
+    def __init__(
+        self,
+        entrypoints: _NativeTransportEntrypoints,
+        provider: NativeTransportProvider,
+        role_entrypoints: NativeRuntimeEntrypoints | None = None,
+    ) -> None:
         if provider.name not in provider.transport_slots:
             raise NativeArtifactError(f"native provider {provider.name!r} does not own its transport slot")
         self.entrypoints = entrypoints
         self.provider = provider
+        self._role_entrypoints = role_entrypoints
+
+    def adopt_client(
+        self,
+        connection: NativeTransportConnection,
+        *,
+        connection_id: int,
+        generation: int,
+    ) -> NativeRuntimeConnection:
+        if connection._entrypoints is not self.entrypoints:
+            raise NativeArtifactError("native carrier must be adopted by its owning transport artifact")
+        if self._role_entrypoints is None:
+            raise NativeArtifactError("native transport artifact does not expose role adoption entrypoints")
+        return connection._adopt_client_role(
+            self._role_entrypoints,
+            connection_id=connection_id,
+            generation=generation,
+        )
+
+    def adopt_server(
+        self,
+        listener: NativeTransportListener,
+        *,
+        server_id: int,
+        generation: int,
+    ) -> NativeRuntimeServer:
+        if listener._entrypoints is not self.entrypoints:
+            raise NativeArtifactError("native listener must be adopted by its owning transport artifact")
+        if self._role_entrypoints is None:
+            raise NativeArtifactError("native transport artifact does not expose role adoption entrypoints")
+        return listener._adopt_server_role(
+            self._role_entrypoints,
+            server_id=server_id,
+            generation=generation,
+        )
 
     @property
     def kind(self) -> str:
@@ -2095,7 +2068,7 @@ class NativeTransportBinding:
     ) -> tuple[_NnrpTransportOpenRequest, object | None]:
         _require_bounded_integer("max_packet_bytes", max_packet_bytes, 0xFFFFFFFFFFFFFFFF)
         _require_bounded_integer("timeout_ms", timeout_ms, 0xFFFFFFFF)
-        view, owner = _buffer_view_from_payload(endpoint.uri.encode("utf-8"))
+        view, owner = _buffer_view_from_payload(_native_ffi_endpoint_uri(endpoint).encode("utf-8"))
         return (
             _NnrpTransportOpenRequest(
                 int(endpoint.transport_id),
@@ -2108,7 +2081,6 @@ class NativeTransportBinding:
             ),
             owner,
         )
-
     def _listener_endpoint(self, listener: NativeHandle) -> NativeTransportEndpoint:
         owner = _NnrpHandle()
         view = _NnrpBufferView()
@@ -2164,59 +2136,6 @@ class NativeTransportBinding:
     def _close_config(self, config: NativeHandle) -> None:
         if config.is_valid:
             _raise_for_native_ffi_status(self.entrypoints.close(config.to_ffi()))
-
-
-@dataclass(frozen=True)
-class _NativeCffiSubmitResultApi:
-    ffi: Any
-    library: Any
-    artifact_path_bytes: bytes
-
-    @property
-    def supports_max_events(self) -> bool:
-        return hasattr(self.library, "nnrp_py_client_submit_result_compact_v2")
-
-    def submit_result_compact(
-        self,
-        *,
-        session: NativeHandle,
-        operation_id: int,
-        frame_id: int,
-        payload_view: Any,
-        payload_len: int,
-        max_events: int,
-        out_result: Any,
-    ) -> int | None:
-        if self.supports_max_events:
-            return self.library.nnrp_py_client_submit_result_compact_v2(
-                self.artifact_path_bytes,
-                session.kind,
-                session.id,
-                session.generation,
-                session.flags,
-                operation_id,
-                frame_id,
-                payload_view,
-                payload_len,
-                max_events,
-                out_result,
-            )
-
-        if max_events != 2:
-            return None
-
-        return self.library.nnrp_py_client_submit_result_compact(
-            self.artifact_path_bytes,
-            session.kind,
-            session.id,
-            session.generation,
-            session.flags,
-            operation_id,
-            frame_id,
-            payload_view,
-            payload_len,
-            out_result,
-        )
 
 
 @dataclass(frozen=True)
@@ -3118,9 +3037,11 @@ class NativeRuntimeResult:
         "_event_session",
         "diagnostic",
         "frame_id",
+        "metadata",
         "operation_id",
-        "payload",
+        "body",
         "state",
+        "_payload",
     )
 
     def __init__(
@@ -3144,10 +3065,21 @@ class NativeRuntimeResult:
         self.state = state
         self.operation_id = operation_id
         self.frame_id = frame_id
-        self.payload = payload
+        self._payload = payload
         self.diagnostic = diagnostic
         self._event = event
         self._event_kind = event.kind if event is not None else event_kind
+        if self._event_kind == EVENT_KIND_RESULT_PUSHED:
+            if len(payload) < RESULT_PUSH_METADATA_LENGTH:
+                raise ValueError(
+                    "native RESULT_PUSH payload is shorter than the fixed result metadata prefix: "
+                    f"expected at least {RESULT_PUSH_METADATA_LENGTH} bytes, got {len(payload)}"
+                )
+            self.metadata = ResultPushMetadata.unpack(payload[:RESULT_PUSH_METADATA_LENGTH])
+            self.body = payload[RESULT_PUSH_METADATA_LENGTH:]
+        else:
+            self.metadata = None
+            self.body = payload
         self._event_connection = event.connection if event is not None else event_connection
         self._event_session = event.session if event is not None else event_session
         self._event_operation_kind = event.operation.kind if event is not None else event_operation_kind
@@ -3178,7 +3110,7 @@ class NativeRuntimeResult:
             self._event_session,
             operation,
             self.frame_id,
-            self.payload,
+            self._payload,
             self._event_diagnostic,
         )
         self._event = event
@@ -3190,11 +3122,12 @@ class NativeRuntimeResult:
         event: NativeRuntimeEvent,
         *,
         state: NativeOperationLifecycle | str | None = None,
+        operation_id: int | None = None,
     ) -> NativeRuntimeResult:
         selected_state = NativeOperationLifecycle(state) if state is not None else _infer_lifecycle_from_event(event)
         return cls(
             state=selected_state,
-            operation_id=event.operation.id,
+            operation_id=event.operation.id if operation_id is None else operation_id,
             frame_id=event.frame_id,
             payload=event.payload,
             event=event,
@@ -3208,6 +3141,7 @@ def _submit_result_from_ffi_event(
     connection: NativeHandle,
     session: NativeHandle,
     state: NativeOperationLifecycle | str | None,
+    operation_id: int,
 ) -> NativeRuntimeResult:
     kind = int(event.kind)
     payload = _copy_buffer_view(event.payload)
@@ -3255,7 +3189,7 @@ def _submit_result_from_ffi_event(
         )
     else:
         selected_state = NativeOperationLifecycle.FAILED
-    return NativeRuntimeResult(selected_state, operation.id, frame_id, payload, runtime_event, structured_diagnostic)
+    return NativeRuntimeResult(selected_state, operation_id, frame_id, payload, runtime_event, structured_diagnostic)
 
 
 def _submit_result_from_ok_result_pushed_ffi_event(
@@ -3263,6 +3197,7 @@ def _submit_result_from_ok_result_pushed_ffi_event(
     *,
     connection: NativeHandle,
     session: NativeHandle,
+    operation_id: int,
 ) -> NativeRuntimeResult:
     payload = _copy_buffer_view(event.payload)
     raw_operation = event.operation
@@ -3283,198 +3218,12 @@ def _submit_result_from_ok_result_pushed_ffi_event(
     )
     return NativeRuntimeResult(
         NativeOperationLifecycle.COMPLETED,
-        operation.id,
+        operation_id,
         frame_id,
         payload,
         runtime_event,
         _NATIVE_STRUCTURED_DIAGNOSTIC_OK,
     )
-
-
-def _submit_result_from_compact_ffi_result(
-    compact: _NnrpCompactResult,
-    *,
-    connection: NativeHandle,
-    session: NativeHandle,
-    state: NativeOperationLifecycle | str | None,
-    result_payload: bytes | bytearray | memoryview,
-) -> NativeRuntimeResult:
-    raw_diagnostic = compact.diagnostic
-    raw_status = raw_diagnostic.status
-    status = NativeStatus.from_ffi(raw_status)
-    if (
-        status is _NATIVE_STATUS_OK
-        and raw_diagnostic.related_connection_id == 0
-        and raw_diagnostic.related_session_id == 0
-        and raw_diagnostic.related_operation_id == 0
-        and raw_diagnostic.related_frame_id == 0
-    ):
-        diagnostic = _NATIVE_RUNTIME_DIAGNOSTIC_OK
-        structured_diagnostic = _NATIVE_STRUCTURED_DIAGNOSTIC_OK
-    else:
-        diagnostic = NativeRuntimeDiagnostic(
-            status=status,
-            related_connection_id=int(raw_diagnostic.related_connection_id),
-            related_session_id=int(raw_diagnostic.related_session_id),
-            related_operation_id=int(raw_diagnostic.related_operation_id),
-            related_frame_id=int(raw_diagnostic.related_frame_id),
-        )
-        structured_diagnostic = NativeStructuredDiagnostic(
-            status=status,
-            related_connection_id=diagnostic.related_connection_id,
-            related_session_id=diagnostic.related_session_id,
-            related_operation_id=diagnostic.related_operation_id,
-            related_frame_id=diagnostic.related_frame_id,
-        )
-
-    raw_operation = compact.operation
-    operation_id = int(raw_operation.id or compact.operation_id)
-    frame_id = int(compact.frame_id)
-    payload = _compact_result_payload(compact.payload, result_payload)
-    event_kind = int(compact.event_kind)
-    return NativeRuntimeResult(
-        _compact_result_state(compact, status=status, state=state),
-        int(compact.operation_id or operation_id),
-        frame_id,
-        payload,
-        None,
-        structured_diagnostic,
-        event_kind=event_kind,
-        event_connection=connection,
-        event_session=session,
-        event_operation_kind=int(raw_operation.kind),
-        event_operation_id=operation_id,
-        event_operation_generation=int(raw_operation.generation),
-        event_operation_flags=int(raw_operation.flags),
-        event_diagnostic=diagnostic,
-    )
-
-
-def _submit_result_from_ok_compact_ffi_result(
-    compact: _NnrpCompactResult,
-    *,
-    connection: NativeHandle,
-    session: NativeHandle,
-    result_payload: bytes | bytearray | memoryview,
-) -> NativeRuntimeResult:
-    raw_operation = compact.operation
-    operation_id = int(raw_operation.id or compact.operation_id)
-    frame_id = int(compact.frame_id)
-    payload_view = compact.payload
-    if isinstance(result_payload, bytes) and int(payload_view.len) == len(result_payload):
-        payload = result_payload
-    else:
-        payload = _copy_buffer_view(payload_view)
-    result = object.__new__(NativeRuntimeResult)
-    result.state = NativeOperationLifecycle.COMPLETED
-    result.operation_id = int(compact.operation_id or operation_id)
-    result.frame_id = frame_id
-    result.payload = payload
-    result.diagnostic = _NATIVE_STRUCTURED_DIAGNOSTIC_OK
-    result._event = None
-    result._event_kind = EVENT_KIND_RESULT_PUSHED
-    result._event_connection = connection
-    result._event_session = session
-    result._event_operation_kind = int(raw_operation.kind)
-    result._event_operation_id = operation_id
-    result._event_operation_generation = int(raw_operation.generation)
-    result._event_operation_flags = int(raw_operation.flags)
-    result._event_diagnostic = _NATIVE_RUNTIME_DIAGNOSTIC_OK
-    return result
-
-
-def _submit_result_from_cffi_api_result(
-    compact: Any,
-    *,
-    connection: NativeHandle,
-    session: NativeHandle,
-    state: NativeOperationLifecycle | str | None,
-    result_payload: bytes | bytearray | memoryview,
-) -> NativeRuntimeResult:
-    status = _status_from_cffi_api_result(compact)
-    diagnostic = (
-        _NATIVE_RUNTIME_DIAGNOSTIC_OK
-        if status is _NATIVE_STATUS_OK
-        else NativeRuntimeDiagnostic(
-            status=status,
-            related_connection_id=0,
-            related_session_id=0,
-            related_operation_id=int(compact.operation_id),
-            related_frame_id=int(compact.frame_id),
-        )
-    )
-    structured_diagnostic = (
-        _NATIVE_STRUCTURED_DIAGNOSTIC_OK
-        if diagnostic is _NATIVE_RUNTIME_DIAGNOSTIC_OK
-        else NativeStructuredDiagnostic.from_runtime_diagnostic(diagnostic)
-    )
-    operation_id = int(compact.operation_id)
-    frame_id = int(compact.frame_id)
-    payload = _cffi_api_result_payload(int(compact.payload_len), result_payload)
-    event_kind = int(compact.event_kind)
-    return NativeRuntimeResult(
-        _compact_result_state(compact, status=status, state=state),
-        operation_id,
-        frame_id,
-        payload,
-        None,
-        structured_diagnostic,
-        event_kind=event_kind,
-        event_connection=connection,
-        event_session=session,
-        event_operation_kind=HANDLE_KIND_OPERATION,
-        event_operation_id=operation_id,
-        event_operation_generation=0,
-        event_operation_flags=0,
-        event_diagnostic=diagnostic,
-    )
-
-
-def _compact_result_payload(view: _NnrpBufferView, result_payload: bytes | bytearray | memoryview) -> bytes:
-    if isinstance(result_payload, bytes) and int(view.len) == len(result_payload):
-        return result_payload
-    return _copy_buffer_view(view)
-
-
-def _cffi_api_result_payload(length: int, result_payload: bytes | bytearray | memoryview) -> bytes:
-    if isinstance(result_payload, bytes) and length == len(result_payload):
-        return result_payload
-    view = memoryview(result_payload)
-    if length == view.nbytes:
-        return view.tobytes()
-    return view[:length].tobytes()
-
-
-def _status_from_cffi_api_result(compact: Any) -> NativeStatus:
-    if (
-        int(compact.status_code) == FFI_STATUS_OK
-        and int(compact.error_family) == ERROR_FAMILY_NONE
-        and int(compact.protocol_error_code) == 0
-        and int(compact.detail_code) == 0
-    ):
-        return _NATIVE_STATUS_OK
-    return NativeStatus(
-        int(compact.status_code),
-        int(compact.error_family),
-        int(compact.protocol_error_code),
-        int(compact.detail_code),
-    )
-
-
-def _compact_result_state(
-    compact: _NnrpCompactResult,
-    *,
-    status: NativeStatus,
-    state: NativeOperationLifecycle | str | None,
-) -> NativeOperationLifecycle:
-    if state is not None:
-        return NativeOperationLifecycle(state)
-    try:
-        return _RESULT_STATE_LIFECYCLE[int(compact.result_state)]
-    except KeyError:
-        if status.status_code == FFI_STATUS_OK and int(compact.event_kind) != EVENT_KIND_ERROR:
-            return NativeOperationLifecycle.COMPLETED
-        return NativeOperationLifecycle.FAILED
 
 
 @dataclass(frozen=True)
@@ -3491,17 +3240,6 @@ class NativeRuntimeOperation:
     def cancel(self) -> None:
         request = _NnrpClientCancelRequest(self.session.to_ffi(), self.frame_id)
         status = self.entrypoints.client_cancel(request)
-        raise_for_native_status(status)
-
-    def complete(self, payload: bytes | bytearray | memoryview = b"") -> None:
-        payload_view, _payload_owner = _buffer_view_from_payload(payload)
-        request = _NnrpClientCompleteOperationRequest(self.handle.to_ffi(), payload_view)
-        status = self.entrypoints.client_complete_operation(request)
-        raise_for_native_status(status)
-
-    def drop(self) -> None:
-        request = _NnrpClientDropOperationRequest(self.handle.to_ffi())
-        status = self.entrypoints.client_drop_operation(request)
         raise_for_native_status(status)
 
     def cache_backend(self, *, now_ms: int = 0, ttl_ms: int = 0, expected_version: int = 0) -> NativeCacheLeaseBackend:
@@ -3608,14 +3346,12 @@ class NativeCacheLeaseBackend:
 
 @runtime_checkable
 class NativeRuntimeBackend(Protocol):
-    def connect(self, *, connection_id: int, generation: int, transport_id: int) -> NativeRuntimeConnection: ...
-
-    def bootstrap_connection(
+    def connect(
         self,
         *,
         connection_id: int,
         generation: int,
-        transport_id: int,
+        transport_connection: NativeTransportConnection,
     ) -> NativeRuntimeConnection: ...
 
 
@@ -3623,32 +3359,31 @@ class NativeRuntimeBackend(Protocol):
 class NativeRuntimeClient:
     entrypoints: NativeRuntimeEntrypoints
 
-    def connect(self, *, connection_id: int, generation: int, transport_id: int) -> NativeRuntimeConnection:
-        request = _NnrpClientConnectRequest(connection_id, generation, transport_id)
-        out_connection = _NnrpHandle()
-        status = self.entrypoints.client_connect(request, ctypes.byref(out_connection))
-        raise_for_native_status(status)
-        return NativeRuntimeConnection(self.entrypoints, NativeConnectionHandle.from_ffi(out_connection))
-
-    def bootstrap_connection(
+    def connect(
         self,
         *,
         connection_id: int,
         generation: int,
-        transport_id: int,
+        transport_connection: NativeTransportConnection,
     ) -> NativeRuntimeConnection:
-        request = _NnrpConnectionBootstrap(connection_id, generation, transport_id)
-        out_connection = _NnrpHandle()
-        status = self.entrypoints.connection_bootstrap(request, ctypes.byref(out_connection))
-        raise_for_native_status(status)
-        return NativeRuntimeConnection(self.entrypoints, NativeConnectionHandle.from_ffi(out_connection))
+        return transport_connection._adopt_client_role(
+            self.entrypoints,
+            connection_id=connection_id,
+            generation=generation,
+        )
 
-    def bind_server(self, *, server_id: int, generation: int, transport_id: int) -> NativeRuntimeServer:
-        request = _NnrpServerBindRequest(server_id, generation, transport_id)
-        out_server = _NnrpHandle()
-        status = self.entrypoints.server_bind(request, ctypes.byref(out_server))
-        raise_for_native_status(status)
-        return NativeRuntimeServer(self.entrypoints, NativeConnectionHandle.from_ffi(out_server))
+    def bind_server(
+        self,
+        *,
+        server_id: int,
+        generation: int,
+        transport_listener: NativeTransportListener,
+    ) -> NativeRuntimeServer:
+        return transport_listener._adopt_server_role(
+            self.entrypoints,
+            server_id=server_id,
+            generation=generation,
+        )
 
 
 @dataclass(frozen=True)
@@ -3660,20 +3395,19 @@ class NativeRuntimeServer:
     def accept_session(
         self,
         *,
-        session_id: int,
+        session_handle_id: int,
         generation: int,
-        profile_id: int,
-        schema_id: int,
-        schema_version: int,
+        timeout_ms: int = 0,
     ) -> NativeRuntimeServerSession:
         self._ensure_open()
+        _validate_u64("session_handle_id", session_handle_id)
+        _validate_u32("generation", generation)
+        _validate_u32("timeout_ms", timeout_ms)
         request = _NnrpServerAcceptRequest(
             self.handle.to_ffi(),
-            session_id,
+            session_handle_id,
             generation,
-            profile_id,
-            schema_id,
-            schema_version,
+            timeout_ms,
         )
         out_session = _NnrpHandle()
         status = self.entrypoints.server_accept(request, ctypes.byref(out_session))
@@ -3823,240 +3557,6 @@ class NativeRuntimeConnection:
             expected_version=expected_version,
         )
 
-    def await_event(self) -> NativeRuntimePollResult:
-        self._ensure_open()
-        result = _NnrpPollResult()
-        status = self.entrypoints.client_await_event(self.handle.to_ffi(), ctypes.byref(result))
-        raise_for_native_status(status)
-        raise_for_native_status(result.status)
-        return NativeRuntimePollResult.from_ffi(result, self.entrypoints)
-
-    def poll_event(self) -> NativeRuntimeEvent | None:
-        return self.await_event().event
-
-    def poll_events(
-        self,
-        *,
-        max_events: int | None = None,
-        event_kind: int | None = None,
-    ) -> tuple[NativeRuntimeEvent, ...]:
-        if max_events is not None:
-            return self.poll_events_batch(max_events=max_events, event_kind=event_kind)
-
-        if event_kind is not None:
-            _validate_u32("event_kind", event_kind)
-
-        events: list[NativeRuntimeEvent] = []
-        while True:
-            event = self.poll_event()
-            if event is None:
-                break
-            if event_kind is not None and event.kind != event_kind:
-                continue
-            events.append(event)
-        return tuple(events)
-
-    def poll_events_batch(
-        self,
-        *,
-        max_events: int,
-        event_kind: int | None = None,
-    ) -> tuple[NativeRuntimeEvent, ...]:
-        self._ensure_open()
-        if max_events is not None and max_events < 0:
-            raise ValueError("max_events must be non-negative")
-        if max_events == 0:
-            return ()
-        if event_kind is not None:
-            _validate_u32("event_kind", event_kind)
-
-        event_buffer = (_NnrpEvent * max_events)()
-        event_count = ctypes.c_size_t()
-        status = self.entrypoints.client_await_events(
-            self.handle.to_ffi(),
-            event_buffer,
-            max_events,
-            ctypes.byref(event_count),
-        )
-        native_status = NativeStatus.from_ffi(status)
-        if native_status.status_code == FFI_STATUS_WOULD_BLOCK:
-            return ()
-        raise_for_native_status(native_status)
-
-        events: list[NativeRuntimeEvent] = []
-        for index in range(int(event_count.value)):
-            raw_event = event_buffer[index]
-            if event_kind is not None and int(raw_event.kind) != event_kind:
-                _release_owned_event_payload(self.entrypoints, raw_event)
-                continue
-            events.append(NativeRuntimeEvent.from_ffi(raw_event, self.entrypoints))
-        return tuple(events)
-
-    def poll_credit_updates(self, *, max_events: int | None = None) -> tuple[NativeCreditUpdateEvent, ...]:
-        return tuple(
-            event.to_credit_update()
-            for event in self.poll_events(max_events=max_events, event_kind=EVENT_KIND_FLOW_UPDATED)
-        )
-
-    def poll_result_hints(self, *, max_events: int | None = None) -> tuple[NativeResultHintEvent, ...]:
-        return tuple(
-            NativeResultHintEvent.from_event(event)
-            for event in self.poll_events(max_events=max_events, event_kind=EVENT_KIND_RESULT_HINT)
-        )
-
-    def poll_payload_family_events(
-        self,
-        payload_family: str,
-        *,
-        max_events: int | None = None,
-        event_kind: int = EVENT_KIND_RESULT_PUSHED,
-    ) -> tuple[NativePayloadFamilyEvent, ...]:
-        return tuple(
-            NativePayloadFamilyEvent.from_event(event, payload_family=payload_family)
-            for event in self.poll_events(max_events=max_events, event_kind=event_kind)
-        )
-
-    def poll_structured_events(self, *, max_events: int | None = None) -> tuple[NativePayloadFamilyEvent, ...]:
-        return self.poll_payload_family_events("structured_event", max_events=max_events)
-
-    def poll_tool_deltas(self, *, max_events: int | None = None) -> tuple[NativePayloadFamilyEvent, ...]:
-        return self.poll_payload_family_events("tool_delta", max_events=max_events)
-
-    def poll_workflow_states(self, *, max_events: int | None = None) -> tuple[NativePayloadFamilyEvent, ...]:
-        return self.poll_payload_family_events("workflow_state", max_events=max_events)
-
-    def poll_runtime_frames(self, *, max_events: int | None = None) -> tuple[NativeRuntimeFrameEvent, ...]:
-        frames: list[NativeRuntimeFrameEvent] = []
-        for event in self.poll_events(max_events=max_events, event_kind=EVENT_KIND_RUNTIME_FRAME):
-            frame = event.to_runtime_frame()
-            if frame is not None:
-                frames.append(frame)
-        return tuple(frames)
-
-    def dispatch_events(
-        self,
-        callback: NativeRuntimeEventCallback,
-        *,
-        max_events: int | None = None,
-        event_kind: int | None = None,
-    ) -> int:
-        return _dispatch_callback_batch(
-            self.poll_events(max_events=max_events, event_kind=event_kind),
-            callback,
-        )
-
-    def dispatch_credit_updates(
-        self,
-        callback: NativeCreditUpdateCallback,
-        *,
-        max_events: int | None = None,
-    ) -> int:
-        return _dispatch_callback_batch(self.poll_credit_updates(max_events=max_events), callback)
-
-    def dispatch_result_hints(
-        self,
-        callback: NativeResultHintCallback,
-        *,
-        max_events: int | None = None,
-    ) -> int:
-        return _dispatch_callback_batch(self.poll_result_hints(max_events=max_events), callback)
-
-    def dispatch_payload_family_events(
-        self,
-        payload_family: str,
-        callback: NativePayloadFamilyCallback,
-        *,
-        max_events: int | None = None,
-        event_kind: int = EVENT_KIND_RESULT_PUSHED,
-    ) -> int:
-        return _dispatch_callback_batch(
-            self.poll_payload_family_events(payload_family, max_events=max_events, event_kind=event_kind),
-            callback,
-        )
-
-    def dispatch_structured_events(
-        self,
-        callback: NativePayloadFamilyCallback,
-        *,
-        max_events: int | None = None,
-    ) -> int:
-        return self.dispatch_payload_family_events("structured_event", callback, max_events=max_events)
-
-    def dispatch_tool_deltas(
-        self,
-        callback: NativePayloadFamilyCallback,
-        *,
-        max_events: int | None = None,
-    ) -> int:
-        return self.dispatch_payload_family_events("tool_delta", callback, max_events=max_events)
-
-    def dispatch_workflow_states(
-        self,
-        callback: NativePayloadFamilyCallback,
-        *,
-        max_events: int | None = None,
-    ) -> int:
-        return self.dispatch_payload_family_events("workflow_state", callback, max_events=max_events)
-
-    async def async_poll_event(self) -> NativeRuntimeEvent | None:
-        return await asyncio.to_thread(self.poll_event)
-
-    async def iter_events(
-        self,
-        *,
-        max_events: int | None = None,
-        event_kind: int | None = None,
-    ) -> AsyncIterator[NativeRuntimeEvent]:
-        for event in await asyncio.to_thread(self.poll_events, max_events=max_events, event_kind=event_kind):
-            yield event
-
-    async def iter_credit_updates(self, *, max_events: int | None = None) -> AsyncIterator[NativeCreditUpdateEvent]:
-        for update in await asyncio.to_thread(self.poll_credit_updates, max_events=max_events):
-            yield update
-
-    async def iter_result_hints(self, *, max_events: int | None = None) -> AsyncIterator[NativeResultHintEvent]:
-        for hint in await asyncio.to_thread(self.poll_result_hints, max_events=max_events):
-            yield hint
-
-    async def iter_payload_family_events(
-        self,
-        payload_family: str,
-        *,
-        max_events: int | None = None,
-        event_kind: int = EVENT_KIND_RESULT_PUSHED,
-    ) -> AsyncIterator[NativePayloadFamilyEvent]:
-        events = await asyncio.to_thread(
-            self.poll_payload_family_events,
-            payload_family,
-            max_events=max_events,
-            event_kind=event_kind,
-        )
-        for event in events:
-            yield event
-
-    async def iter_structured_events(self, *, max_events: int | None = None) -> AsyncIterator[NativePayloadFamilyEvent]:
-        async for event in self.iter_payload_family_events("structured_event", max_events=max_events):
-            yield event
-
-    async def iter_tool_deltas(self, *, max_events: int | None = None) -> AsyncIterator[NativePayloadFamilyEvent]:
-        async for event in self.iter_payload_family_events("tool_delta", max_events=max_events):
-            yield event
-
-    async def iter_workflow_states(self, *, max_events: int | None = None) -> AsyncIterator[NativePayloadFamilyEvent]:
-        async for event in self.iter_payload_family_events("workflow_state", max_events=max_events):
-            yield event
-
-    async def iter_runtime_frames(self, *, max_events: int | None = None) -> AsyncIterator[NativeRuntimeFrameEvent]:
-        for frame in await asyncio.to_thread(self.poll_runtime_frames, max_events=max_events):
-            yield frame
-
-    def _control(self, *, control_code: int, payload: bytes | bytearray | memoryview = b"") -> None:
-        self._ensure_open()
-        payload_view, _payload_owner = _buffer_view_from_payload(payload)
-        request = _NnrpControlRequest(self.handle.to_ffi(), control_code, payload_view)
-        status = self.entrypoints.control(request)
-        raise_for_native_status(status)
-
     def close(self) -> None:
         self._ensure_open()
         status = self.entrypoints.client_close_connection(self.handle.to_ffi())
@@ -4095,6 +3595,35 @@ def _encode_native_runtime_frame(
     return encode_runtime_control_metadata(message_type, metadata, tail=tail)
 
 
+def _canonical_token_submit_metadata(operation_id: int) -> FrameSubmitMetadata:
+    return FrameSubmitMetadata(
+        src_width=0,
+        src_height=0,
+        tile_width=0,
+        tile_height=0,
+        tile_count=0,
+        section_count=0,
+        frame_class=0,
+        input_profile=InputProfile.UNSPECIFIED,
+        tile_index_mode=TileIndexMode.DENSE_RANGE,
+        reserved0=0,
+        latency_budget_ms=25,
+        target_fps_x100=0,
+        retry_of_frame=0,
+        tile_base_id=0,
+        camera_bytes=0,
+        tile_index_bytes=0,
+        operation_id=operation_id,
+        submit_mode=SubmitMode.INLINE,
+        budget_policy=BudgetPolicy.NONE,
+        loss_tolerance_policy=0xFF,
+        object_ref_mask=0,
+        dependency_frame_id=0,
+        payload_kind_bitmap=PayloadKind.TOKEN_CHUNK,
+        payload_frame_count=1,
+    )
+
+
 @dataclass(frozen=True)
 class NativeRuntimeSession:
     entrypoints: NativeRuntimeEntrypoints
@@ -4105,46 +3634,447 @@ class NativeRuntimeSession:
     _poll_event_buffer: Any = field(default=None, init=False, repr=False, compare=False)
     _poll_event_buffer_capacity: int = field(default=0, init=False, repr=False, compare=False)
     _poll_event_count: Any = field(default=None, init=False, repr=False, compare=False)
-    _submit_result_request: Any = field(default=None, init=False, repr=False, compare=False)
-    _submit_result_out_operation: Any = field(default=None, init=False, repr=False, compare=False)
-    _submit_result_poll_result: Any = field(default=None, init=False, repr=False, compare=False)
-    _submit_result_compact_result: Any = field(default=None, init=False, repr=False, compare=False)
-    _submit_result_out_operation_ref: Any = field(default=None, init=False, repr=False, compare=False)
-    _submit_result_poll_result_ref: Any = field(default=None, init=False, repr=False, compare=False)
-    _submit_result_compact_result_ref: Any = field(default=None, init=False, repr=False, compare=False)
-    _submit_result_session_handle: Any = field(default=None, init=False, repr=False, compare=False)
-    _submit_result_payload_cache: Any = field(default=None, init=False, repr=False, compare=False)
-    _submit_result_payload_view: Any = field(default=None, init=False, repr=False, compare=False)
-    _submit_result_payload_owner: Any = field(default=None, init=False, repr=False, compare=False)
-    _submit_result_result_payload_cache: Any = field(default=None, init=False, repr=False, compare=False)
-    _submit_result_result_payload_view: Any = field(default=None, init=False, repr=False, compare=False)
-    _submit_result_result_payload_owner: Any = field(default=None, init=False, repr=False, compare=False)
-    _submit_result_client_submit_result: Any = field(default=None, init=False, repr=False, compare=False)
-    _submit_result_client_submit_result_compact: Any = field(default=None, init=False, repr=False, compare=False)
-    _submit_result_max_events: Any = field(default=None, init=False, repr=False, compare=False)
-    _submit_result_connection_handle: Any = field(default=None, init=False, repr=False, compare=False)
-    _submit_result_native_session_handle: Any = field(default=None, init=False, repr=False, compare=False)
-    _cffi_submit_result_out: Any = field(default=None, init=False, repr=False, compare=False)
-    _cffi_submit_result_payload_cache: Any = field(default=None, init=False, repr=False, compare=False)
-    _cffi_submit_result_payload_view: Any = field(default=None, init=False, repr=False, compare=False)
+    _pending_events: list[NativeRuntimeEvent] = field(default_factory=list, init=False, repr=False, compare=False)
+    _poll_lock: threading.Lock = field(default_factory=threading.Lock, init=False, repr=False, compare=False)
     _next_runtime_frame_id: int = field(default=1, init=False, repr=False, compare=False)
+
+    def await_event(self) -> NativeRuntimePollResult:
+        self._ensure_open()
+        with self._poll_lock:
+            if self._pending_events:
+                return NativeRuntimePollResult(NativeStatus.ok(), self._pending_events.pop(0))
+            result = _NnrpPollResult()
+            status = self.entrypoints.client_await_event(self.handle.to_ffi(), ctypes.byref(result))
+            raise_for_native_status(status)
+            raise_for_native_status(result.status)
+            return NativeRuntimePollResult.from_ffi(result, self.entrypoints)
+
+    def poll_event(self, *, timeout_ms: int = 0) -> NativeRuntimeEvent | None:
+        events = self.poll_events_batch(max_events=1, timeout_ms=timeout_ms)
+        return events[0] if events else None
+
+    def poll_events(
+        self,
+        *,
+        max_events: int | None = None,
+        event_kind: int | None = None,
+        timeout_ms: int = 0,
+    ) -> tuple[NativeRuntimeEvent, ...]:
+        if max_events is not None:
+            return self.poll_events_batch(
+                max_events=max_events,
+                event_kind=event_kind,
+                timeout_ms=timeout_ms,
+            )
+        if event_kind is not None:
+            _validate_u32("event_kind", event_kind)
+
+        events: list[NativeRuntimeEvent] = []
+        next_timeout_ms = timeout_ms
+        while True:
+            polled = self.poll_events_batch(max_events=1, timeout_ms=next_timeout_ms)
+            next_timeout_ms = 0
+            if not polled:
+                break
+            event = polled[0]
+            if event_kind is None or event.kind == event_kind:
+                events.append(event)
+        return tuple(events)
+
+    def poll_events_batch(
+        self,
+        *,
+        max_events: int,
+        event_kind: int | None = None,
+        timeout_ms: int = 0,
+    ) -> tuple[NativeRuntimeEvent, ...]:
+        self._ensure_open()
+        _require_bounded_integer("max_events", max_events, 0xFFFFFFFF)
+        _require_bounded_integer("timeout_ms", timeout_ms, 0xFFFFFFFF)
+        if max_events == 0:
+            return ()
+        if event_kind is not None:
+            _validate_u32("event_kind", event_kind)
+
+        with self._poll_lock:
+            events = self._take_pending_events(max_events=max_events, event_kind=event_kind)
+            remaining = max_events - len(events)
+            if remaining == 0:
+                return tuple(events)
+
+            event_buffer, event_count = self._borrow_poll_event_buffer(remaining)
+            status = self.entrypoints.client_await_events(
+                _NnrpRoleEventPollRequest(
+                    self.handle.to_ffi(),
+                    remaining,
+                    _ffi_role_poll_timeout_ms(timeout_ms),
+                    0,
+                    0,
+                ),
+                event_buffer,
+                remaining,
+                ctypes.byref(event_count),
+            )
+            native_status = NativeStatus.from_ffi(status)
+            if native_status.status_code == FFI_STATUS_WOULD_BLOCK:
+                return tuple(events)
+            raise_for_native_status(native_status)
+
+            for index in range(int(event_count.value)):
+                event = NativeRuntimeEvent.from_ffi(event_buffer[index], self.entrypoints)
+                if event_kind is None or event.kind == event_kind:
+                    events.append(event)
+                else:
+                    self._pending_events.append(event)
+            return tuple(events)
+
+    def _take_pending_events(
+        self,
+        *,
+        max_events: int,
+        event_kind: int | None,
+    ) -> list[NativeRuntimeEvent]:
+        selected: list[NativeRuntimeEvent] = []
+        retained: list[NativeRuntimeEvent] = []
+        for event in self._pending_events:
+            if len(selected) < max_events and (event_kind is None or event.kind == event_kind):
+                selected.append(event)
+            else:
+                retained.append(event)
+        self._pending_events[:] = retained
+        return selected
+
+    def poll_credit_updates(
+        self,
+        *,
+        max_events: int | None = None,
+        timeout_ms: int = 0,
+    ) -> tuple[NativeCreditUpdateEvent, ...]:
+        return tuple(
+            event.to_credit_update()
+            for event in self.poll_events(
+                max_events=max_events,
+                event_kind=EVENT_KIND_FLOW_UPDATED,
+                timeout_ms=timeout_ms,
+            )
+        )
+
+    def poll_result_hints(
+        self,
+        *,
+        max_events: int | None = None,
+        timeout_ms: int = 0,
+    ) -> tuple[NativeResultHintEvent, ...]:
+        return tuple(
+            NativeResultHintEvent.from_event(event)
+            for event in self.poll_events(
+                max_events=max_events,
+                event_kind=EVENT_KIND_RESULT_HINT,
+                timeout_ms=timeout_ms,
+            )
+        )
+
+    def poll_payload_family_events(
+        self,
+        payload_family: str,
+        *,
+        max_events: int | None = None,
+        event_kind: int = EVENT_KIND_RESULT_PUSHED,
+        timeout_ms: int = 0,
+    ) -> tuple[NativePayloadFamilyEvent, ...]:
+        return tuple(
+            NativePayloadFamilyEvent.from_event(event, payload_family=payload_family)
+            for event in self.poll_events(
+                max_events=max_events,
+                event_kind=event_kind,
+                timeout_ms=timeout_ms,
+            )
+        )
+
+    def poll_structured_events(
+        self,
+        *,
+        max_events: int | None = None,
+        timeout_ms: int = 0,
+    ) -> tuple[NativePayloadFamilyEvent, ...]:
+        return self.poll_payload_family_events(
+            "structured_event",
+            max_events=max_events,
+            timeout_ms=timeout_ms,
+        )
+
+    def poll_tool_deltas(
+        self,
+        *,
+        max_events: int | None = None,
+        timeout_ms: int = 0,
+    ) -> tuple[NativePayloadFamilyEvent, ...]:
+        return self.poll_payload_family_events("tool_delta", max_events=max_events, timeout_ms=timeout_ms)
+
+    def poll_workflow_states(
+        self,
+        *,
+        max_events: int | None = None,
+        timeout_ms: int = 0,
+    ) -> tuple[NativePayloadFamilyEvent, ...]:
+        return self.poll_payload_family_events("workflow_state", max_events=max_events, timeout_ms=timeout_ms)
+
+    def poll_runtime_frames(
+        self,
+        *,
+        max_events: int | None = None,
+        timeout_ms: int = 0,
+    ) -> tuple[NativeRuntimeFrameEvent, ...]:
+        frames: list[NativeRuntimeFrameEvent] = []
+        for event in self.poll_events(
+            max_events=max_events,
+            event_kind=EVENT_KIND_RUNTIME_FRAME,
+            timeout_ms=timeout_ms,
+        ):
+            frame = event.to_runtime_frame()
+            if frame is not None:
+                frames.append(frame)
+        return tuple(frames)
+
+    def dispatch_events(
+        self,
+        callback: NativeRuntimeEventCallback,
+        *,
+        max_events: int | None = None,
+        event_kind: int | None = None,
+        timeout_ms: int = 0,
+    ) -> int:
+        return _dispatch_callback_batch(
+            self.poll_events(max_events=max_events, event_kind=event_kind, timeout_ms=timeout_ms),
+            callback,
+        )
+
+    def dispatch_credit_updates(
+        self,
+        callback: NativeCreditUpdateCallback,
+        *,
+        max_events: int | None = None,
+        timeout_ms: int = 0,
+    ) -> int:
+        return _dispatch_callback_batch(
+            self.poll_credit_updates(max_events=max_events, timeout_ms=timeout_ms),
+            callback,
+        )
+
+    def dispatch_result_hints(
+        self,
+        callback: NativeResultHintCallback,
+        *,
+        max_events: int | None = None,
+        timeout_ms: int = 0,
+    ) -> int:
+        return _dispatch_callback_batch(
+            self.poll_result_hints(max_events=max_events, timeout_ms=timeout_ms),
+            callback,
+        )
+
+    def dispatch_payload_family_events(
+        self,
+        payload_family: str,
+        callback: NativePayloadFamilyCallback,
+        *,
+        max_events: int | None = None,
+        event_kind: int = EVENT_KIND_RESULT_PUSHED,
+        timeout_ms: int = 0,
+    ) -> int:
+        return _dispatch_callback_batch(
+            self.poll_payload_family_events(
+                payload_family,
+                max_events=max_events,
+                event_kind=event_kind,
+                timeout_ms=timeout_ms,
+            ),
+            callback,
+        )
+
+    def dispatch_structured_events(
+        self,
+        callback: NativePayloadFamilyCallback,
+        *,
+        max_events: int | None = None,
+        timeout_ms: int = 0,
+    ) -> int:
+        return self.dispatch_payload_family_events(
+            "structured_event",
+            callback,
+            max_events=max_events,
+            timeout_ms=timeout_ms,
+        )
+
+    def dispatch_tool_deltas(
+        self,
+        callback: NativePayloadFamilyCallback,
+        *,
+        max_events: int | None = None,
+        timeout_ms: int = 0,
+    ) -> int:
+        return self.dispatch_payload_family_events(
+            "tool_delta",
+            callback,
+            max_events=max_events,
+            timeout_ms=timeout_ms,
+        )
+
+    def dispatch_workflow_states(
+        self,
+        callback: NativePayloadFamilyCallback,
+        *,
+        max_events: int | None = None,
+        timeout_ms: int = 0,
+    ) -> int:
+        return self.dispatch_payload_family_events(
+            "workflow_state",
+            callback,
+            max_events=max_events,
+            timeout_ms=timeout_ms,
+        )
+
+    async def async_poll_event(self, *, timeout_ms: int = 0) -> NativeRuntimeEvent | None:
+        return await asyncio.to_thread(self.poll_event, timeout_ms=timeout_ms)
+
+    async def iter_events(
+        self,
+        *,
+        max_events: int | None = None,
+        event_kind: int | None = None,
+        timeout_ms: int = 0,
+    ) -> AsyncIterator[NativeRuntimeEvent]:
+        events = await asyncio.to_thread(
+            self.poll_events,
+            max_events=max_events,
+            event_kind=event_kind,
+            timeout_ms=timeout_ms,
+        )
+        for event in events:
+            yield event
+
+    async def iter_credit_updates(
+        self,
+        *,
+        max_events: int | None = None,
+        timeout_ms: int = 0,
+    ) -> AsyncIterator[NativeCreditUpdateEvent]:
+        updates = await asyncio.to_thread(
+            self.poll_credit_updates,
+            max_events=max_events,
+            timeout_ms=timeout_ms,
+        )
+        for update in updates:
+            yield update
+
+    async def iter_result_hints(
+        self,
+        *,
+        max_events: int | None = None,
+        timeout_ms: int = 0,
+    ) -> AsyncIterator[NativeResultHintEvent]:
+        hints = await asyncio.to_thread(
+            self.poll_result_hints,
+            max_events=max_events,
+            timeout_ms=timeout_ms,
+        )
+        for hint in hints:
+            yield hint
+
+    async def iter_payload_family_events(
+        self,
+        payload_family: str,
+        *,
+        max_events: int | None = None,
+        event_kind: int = EVENT_KIND_RESULT_PUSHED,
+        timeout_ms: int = 0,
+    ) -> AsyncIterator[NativePayloadFamilyEvent]:
+        events = await asyncio.to_thread(
+            self.poll_payload_family_events,
+            payload_family,
+            max_events=max_events,
+            event_kind=event_kind,
+            timeout_ms=timeout_ms,
+        )
+        for event in events:
+            yield event
+
+    async def iter_structured_events(
+        self,
+        *,
+        max_events: int | None = None,
+        timeout_ms: int = 0,
+    ) -> AsyncIterator[NativePayloadFamilyEvent]:
+        async for event in self.iter_payload_family_events(
+            "structured_event",
+            max_events=max_events,
+            timeout_ms=timeout_ms,
+        ):
+            yield event
+
+    async def iter_tool_deltas(
+        self,
+        *,
+        max_events: int | None = None,
+        timeout_ms: int = 0,
+    ) -> AsyncIterator[NativePayloadFamilyEvent]:
+        async for event in self.iter_payload_family_events(
+            "tool_delta",
+            max_events=max_events,
+            timeout_ms=timeout_ms,
+        ):
+            yield event
+
+    async def iter_workflow_states(
+        self,
+        *,
+        max_events: int | None = None,
+        timeout_ms: int = 0,
+    ) -> AsyncIterator[NativePayloadFamilyEvent]:
+        async for event in self.iter_payload_family_events(
+            "workflow_state",
+            max_events=max_events,
+            timeout_ms=timeout_ms,
+        ):
+            yield event
+
+    async def iter_runtime_frames(
+        self,
+        *,
+        max_events: int | None = None,
+        timeout_ms: int = 0,
+    ) -> AsyncIterator[NativeRuntimeFrameEvent]:
+        frames = await asyncio.to_thread(
+            self.poll_runtime_frames,
+            max_events=max_events,
+            timeout_ms=timeout_ms,
+        )
+        for frame in frames:
+            yield frame
 
     def submit(
         self,
         *,
         operation_id: int,
         frame_id: int,
-        payload: bytes | bytearray | memoryview = b"",
+        metadata: FrameSubmitMetadata | None = None,
+        body: bytes | bytearray | memoryview = b"",
     ) -> NativeOperationHandle:
         self._ensure_open()
-        return self.submit_operation(operation_id=operation_id, frame_id=frame_id, payload=payload).handle
+        return self.submit_operation(
+            operation_id=operation_id,
+            frame_id=frame_id,
+            metadata=metadata,
+            body=body,
+        ).handle
 
     def submit_operation(
         self,
         *,
         operation_id: int,
         frame_id: int,
-        payload: bytes | bytearray | memoryview = b"",
+        metadata: FrameSubmitMetadata | None = None,
+        body: bytes | bytearray | memoryview = b"",
         parent_operation_id: int | None = None,
         operation_group_id: int | None = None,
         scheduling_hint: NativeOperationSchedulingHint | None = None,
@@ -4155,7 +4085,14 @@ class NativeRuntimeSession:
             parent_operation_id=parent_operation_id,
             operation_group_id=operation_group_id,
         )
-        payload_view, _payload_owner = _buffer_view_from_payload(payload)
+        selected_metadata = metadata or _canonical_token_submit_metadata(operation_id)
+        if selected_metadata.operation_id != operation_id:
+            raise ValueError(
+                "metadata.operation_id must equal the submit operation_id: "
+                f"expected {operation_id}, got {selected_metadata.operation_id}"
+            )
+        encoded_submit = selected_metadata.pack() + bytes(body)
+        payload_view, _payload_owner = _buffer_view_from_payload(encoded_submit)
         request = _NnrpSubmitRequest(self.handle.to_ffi(), operation_id, frame_id, payload_view)
         out_operation = _NnrpHandle()
         status = self.entrypoints.client_submit(request, ctypes.byref(out_operation))
@@ -4186,7 +4123,8 @@ class NativeRuntimeSession:
         *,
         operation_id: int,
         frame_id: int,
-        payload: bytes | bytearray | memoryview = b"",
+        metadata: FrameSubmitMetadata | None = None,
+        body: bytes | bytearray | memoryview = b"",
         parent_operation_id: int | None = None,
         operation_group_id: int | None = None,
         scheduling_hint: NativeOperationSchedulingHint | None = None,
@@ -4196,7 +4134,8 @@ class NativeRuntimeSession:
                 self.submit_operation,
                 operation_id=operation_id,
                 frame_id=frame_id,
-                payload=payload,
+                metadata=metadata,
+                body=body,
                 parent_operation_id=parent_operation_id,
                 operation_group_id=operation_group_id,
                 scheduling_hint=scheduling_hint,
@@ -4211,30 +4150,20 @@ class NativeRuntimeSession:
         *,
         state: NativeOperationLifecycle | str | None = None,
         max_events: int | None = None,
+        timeout_ms: int = 0,
     ) -> NativeRuntimeResult:
         self._ensure_open()
         if max_events is not None and max_events < 0:
             raise ValueError("max_events must be non-negative")
-        if max_events is not None and max_events > 1:
-            result = self._poll_result_batch(operation, state=state, max_events=max_events)
-            if result is not None:
-                return result
-            raise NativeWouldBlockError(NativeStatus(FFI_STATUS_WOULD_BLOCK))
-
-        seen_events = 0
-        while max_events is None or seen_events < max_events:
-            result = _NnrpPollResult()
-            status = self.entrypoints.client_await_event(self.connection.to_ffi(), ctypes.byref(result))
-            raise_for_native_status(status)
-            raise_for_native_status(result.status)
-            poll_result = NativeRuntimePollResult.from_ffi(result, self.entrypoints)
-            event = poll_result.event
-            if event is None:
-                break
-            seen_events += 1
-            if _event_is_result_event(event) and _event_matches_operation(event, operation):
-                return NativeRuntimeResult.from_event(event, state=state)
-
+        _require_bounded_integer("timeout_ms", timeout_ms, 0xFFFFFFFF)
+        result = self._poll_result_batch(
+            operation,
+            state=state,
+            max_events=1 if max_events is None else max_events,
+            timeout_ms=timeout_ms,
+        )
+        if result is not None:
+            return result
         raise NativeWouldBlockError(NativeStatus(FFI_STATUS_WOULD_BLOCK))
 
     def _poll_result_batch(
@@ -4243,32 +4172,62 @@ class NativeRuntimeSession:
         *,
         state: NativeOperationLifecycle | str | None,
         max_events: int,
+        timeout_ms: int,
     ) -> NativeRuntimeResult | None:
-        event_buffer, event_count = self._borrow_poll_event_buffer(max_events)
-        status = self.entrypoints.client_await_events(
-            self.connection.to_ffi(),
-            event_buffer,
-            max_events,
-            ctypes.byref(event_count),
-        )
-        native_status = NativeStatus.from_ffi(status)
-        if native_status.status_code == FFI_STATUS_WOULD_BLOCK:
-            return None
-        raise_for_native_status(native_status)
+        with self._poll_lock:
+            matched_result = self._take_pending_result(operation, state=state)
+            if matched_result is not None or max_events == 0:
+                return matched_result
 
-        matched_result: NativeRuntimeResult | None = None
-        for index in range(int(event_count.value)):
-            raw_event = event_buffer[index]
-            if (
-                matched_result is not None
-                or not _raw_event_is_result_event(raw_event)
-                or not _raw_event_matches_operation(raw_event, operation)
-            ):
-                _release_owned_event_payload(self.entrypoints, raw_event)
-                continue
-            event = NativeRuntimeEvent.from_ffi(raw_event, self.entrypoints)
-            matched_result = NativeRuntimeResult.from_event(event, state=state)
-        return matched_result
+            event_buffer, event_count = self._borrow_poll_event_buffer(max_events)
+            status = self.entrypoints.client_await_events(
+                _NnrpRoleEventPollRequest(
+                    self.handle.to_ffi(),
+                    max_events,
+                    _ffi_role_poll_timeout_ms(timeout_ms),
+                    0,
+                    0,
+                ),
+                event_buffer,
+                max_events,
+                ctypes.byref(event_count),
+            )
+            native_status = NativeStatus.from_ffi(status)
+            if native_status.status_code == FFI_STATUS_WOULD_BLOCK:
+                return None
+            raise_for_native_status(native_status)
+
+            for index in range(int(event_count.value)):
+                event = NativeRuntimeEvent.from_ffi(event_buffer[index], self.entrypoints)
+                if (
+                    matched_result is None
+                    and _event_is_result_event(event)
+                    and _event_matches_operation(event, operation)
+                ):
+                    matched_result = NativeRuntimeResult.from_event(
+                        event,
+                        state=state,
+                        operation_id=operation.operation_id,
+                    )
+                else:
+                    self._pending_events.append(event)
+            return matched_result
+
+    def _take_pending_result(
+        self,
+        operation: NativeRuntimeOperation,
+        *,
+        state: NativeOperationLifecycle | str | None,
+    ) -> NativeRuntimeResult | None:
+        for index, event in enumerate(self._pending_events):
+            if _event_is_result_event(event) and _event_matches_operation(event, operation):
+                del self._pending_events[index]
+                return NativeRuntimeResult.from_event(
+                    event,
+                    state=state,
+                    operation_id=operation.operation_id,
+                )
+        return None
 
     def _borrow_poll_event_buffer(self, max_events: int) -> tuple[Any, ctypes.c_size_t]:
         event_buffer = self._poll_event_buffer
@@ -4284,308 +4243,57 @@ class NativeRuntimeSession:
             event_count.value = 0
         return event_buffer, event_count
 
-    def complete_operation(
-        self,
-        operation: NativeRuntimeOperation,
-        payload: bytes | bytearray | memoryview = b"",
-    ) -> None:
-        self._ensure_open()
-        operation.complete(payload)
-
-    def drop_operation(self, operation: NativeRuntimeOperation) -> None:
-        self._ensure_open()
-        operation.drop()
-
-    def submit_result(
-        self,
-        *,
-        operation_id: int,
-        frame_id: int,
-        payload: bytes | bytearray | memoryview = b"",
-        result_payload: bytes | bytearray | memoryview | None = None,
-        state: NativeOperationLifecycle | str | None = None,
-        max_events: int | None = None,
-    ) -> NativeRuntimeResult:
-        self._ensure_open()
-        if max_events is not None and max_events < 0:
-            raise ValueError("max_events must be non-negative")
-        if isinstance(payload, bytes) and payload is self._submit_result_payload_cache:
-            submit_payload_view = self._submit_result_payload_view
-            _submit_payload_owner = self._submit_result_payload_owner
-            assign_submit_payload = False
-        else:
-            submit_payload_view, _submit_payload_owner = _buffer_view_from_payload(payload)
-            assign_submit_payload = True
-            if isinstance(payload, bytes):
-                object.__setattr__(self, "_submit_result_payload_cache", payload)
-                object.__setattr__(self, "_submit_result_payload_view", submit_payload_view)
-                object.__setattr__(self, "_submit_result_payload_owner", _submit_payload_owner)
-        selected_result_payload = payload if result_payload is None else result_payload
-        if selected_result_payload is payload:
-            result_payload_view = submit_payload_view
-            _result_payload_owner = _submit_payload_owner
-            assign_result_payload = selected_result_payload is not self._submit_result_result_payload_cache
-            if assign_result_payload and isinstance(selected_result_payload, bytes):
-                object.__setattr__(self, "_submit_result_result_payload_cache", selected_result_payload)
-                object.__setattr__(self, "_submit_result_result_payload_view", result_payload_view)
-                object.__setattr__(self, "_submit_result_result_payload_owner", _result_payload_owner)
-        elif (
-            isinstance(selected_result_payload, bytes)
-            and selected_result_payload is self._submit_result_result_payload_cache
-        ):
-            result_payload_view = self._submit_result_result_payload_view
-            _result_payload_owner = self._submit_result_result_payload_owner
-            assign_result_payload = False
-        else:
-            result_payload_view, _result_payload_owner = _buffer_view_from_payload(selected_result_payload)
-            assign_result_payload = True
-            if isinstance(selected_result_payload, bytes):
-                object.__setattr__(self, "_submit_result_result_payload_cache", selected_result_payload)
-                object.__setattr__(self, "_submit_result_result_payload_view", result_payload_view)
-                object.__setattr__(self, "_submit_result_result_payload_owner", _result_payload_owner)
-        request = self._submit_result_request
-        assign_static_request_fields = request is None
-        if request is None:
-            request = _NnrpClientSubmitResultRequest()
-            out_operation = _NnrpHandle()
-            poll_result = _NnrpPollResult()
-            compact_result = _NnrpCompactResult()
-            object.__setattr__(self, "_submit_result_request", request)
-            object.__setattr__(self, "_submit_result_out_operation", out_operation)
-            object.__setattr__(self, "_submit_result_poll_result", poll_result)
-            object.__setattr__(self, "_submit_result_compact_result", compact_result)
-            object.__setattr__(self, "_submit_result_out_operation_ref", ctypes.byref(out_operation))
-            object.__setattr__(self, "_submit_result_poll_result_ref", ctypes.byref(poll_result))
-            object.__setattr__(self, "_submit_result_compact_result_ref", ctypes.byref(compact_result))
-            object.__setattr__(self, "_submit_result_session_handle", self.handle.to_ffi())
-            object.__setattr__(self, "_submit_result_client_submit_result", self.entrypoints.client_submit_result)
-            object.__setattr__(
-                self,
-                "_submit_result_client_submit_result_compact",
-                self.entrypoints.client_submit_result_compact,
-            )
-            object.__setattr__(self, "_submit_result_connection_handle", self.connection.handle)
-            object.__setattr__(self, "_submit_result_native_session_handle", self.handle.handle)
-        selected_max_events = 0 if max_events is None else max_events
-        if assign_static_request_fields:
-            request.session = self._submit_result_session_handle
-        if assign_submit_payload:
-            request.submit_payload = submit_payload_view
-        if assign_result_payload:
-            request.result_payload = result_payload_view
-        if selected_max_events != self._submit_result_max_events:
-            request.max_events = selected_max_events
-            object.__setattr__(self, "_submit_result_max_events", selected_max_events)
-        request.operation_id = operation_id
-        request.frame_id = frame_id
-        cffi_api = self.entrypoints.cffi_submit_result_api
-        if cffi_api is not None:
-            cffi_result = self._try_submit_result_cffi_api(
-                cffi_api=cffi_api,
-                operation_id=operation_id,
-                frame_id=frame_id,
-                payload=payload,
-                selected_result_payload=selected_result_payload,
-                state=state,
-                max_events=selected_max_events,
-            )
-            if cffi_result is not None:
-                return cffi_result
-        compact_result = self._submit_result_compact_result
-        status = self._submit_result_client_submit_result_compact(
-            request,
-            self._submit_result_compact_result_ref,
-        )
-        if status.status_code != FFI_STATUS_OK:
-            _raise_for_native_ffi_status(status)
-        compact_status = compact_result.status
-        if compact_status.status_code != FFI_STATUS_OK:
-            _raise_for_native_ffi_status(compact_status)
-        if not compact_result.has_result:
-            raise NativeWouldBlockError(NativeStatus(FFI_STATUS_WOULD_BLOCK))
-        raw_diagnostic = compact_result.diagnostic
-        raw_diagnostic_status = raw_diagnostic.status
-        if (
-            state is None
-            and compact_result.event_kind == EVENT_KIND_RESULT_PUSHED
-            and compact_result.result_state == RESULT_STATE_COMPLETED
-            and raw_diagnostic_status.status_code == FFI_STATUS_OK
-            and raw_diagnostic_status.error_family == ERROR_FAMILY_NONE
-            and raw_diagnostic_status.protocol_error_code == 0
-            and raw_diagnostic_status.detail_code == 0
-            and raw_diagnostic.related_connection_id == 0
-            and raw_diagnostic.related_session_id == 0
-            and raw_diagnostic.related_operation_id == 0
-            and raw_diagnostic.related_frame_id == 0
-        ):
-            return _submit_result_from_ok_compact_ffi_result(
-                compact_result,
-                connection=self._submit_result_connection_handle,
-                session=self._submit_result_native_session_handle,
-                result_payload=selected_result_payload,
-            )
-        return _submit_result_from_compact_ffi_result(
-            compact_result,
-            connection=self._submit_result_connection_handle,
-            session=self._submit_result_native_session_handle,
-            state=state,
-            result_payload=selected_result_payload,
-        )
-        poll_result = self._submit_result_poll_result
-        status = self._submit_result_client_submit_result(
-            request,
-            self._submit_result_out_operation_ref,
-            self._submit_result_poll_result_ref,
-        )
-        if status.status_code != FFI_STATUS_OK:
-            _raise_for_native_ffi_status(status)
-        poll_status = poll_result.status
-        if poll_status.status_code != FFI_STATUS_OK:
-            _raise_for_native_ffi_status(poll_status)
-        if not poll_result.has_event:
-            raise NativeWouldBlockError(NativeStatus(FFI_STATUS_WOULD_BLOCK))
-        raw_event = poll_result.event
-        raw_diagnostic = raw_event.diagnostic
-        raw_status = raw_diagnostic.status
-        if (
-            state is None
-            and raw_event.kind == EVENT_KIND_RESULT_PUSHED
-            and raw_status.status_code == FFI_STATUS_OK
-            and raw_status.error_family == ERROR_FAMILY_NONE
-            and raw_status.protocol_error_code == 0
-            and raw_status.detail_code == 0
-            and raw_diagnostic.related_connection_id == 0
-            and raw_diagnostic.related_session_id == 0
-            and raw_diagnostic.related_operation_id == 0
-            and raw_diagnostic.related_frame_id == 0
-        ):
-            return _submit_result_from_ok_result_pushed_ffi_event(
-                raw_event,
-                connection=self._submit_result_connection_handle,
-                session=self._submit_result_native_session_handle,
-            )
-        return _submit_result_from_ffi_event(
-            raw_event,
-            connection=self._submit_result_connection_handle,
-            session=self._submit_result_native_session_handle,
-            state=state,
-        )
-
-    def _try_submit_result_cffi_api(
-        self,
-        *,
-        cffi_api: _NativeCffiSubmitResultApi,
-        operation_id: int,
-        frame_id: int,
-        payload: bytes | bytearray | memoryview,
-        selected_result_payload: bytes | bytearray | memoryview,
-        state: NativeOperationLifecycle | str | None,
-        max_events: int,
-    ) -> NativeRuntimeResult | None:
-        if selected_result_payload is not payload:
-            return None
-
-        if self._cffi_submit_result_out is None:
-            object.__setattr__(
-                self,
-                "_cffi_submit_result_out",
-                cffi_api.ffi.new("NnrpPyCompactResult *"),
-            )
-
-        if isinstance(payload, bytes) and payload is self._cffi_submit_result_payload_cache:
-            payload_view = self._cffi_submit_result_payload_view
-        else:
-            payload_view = cffi_api.ffi.from_buffer(payload)
-            if isinstance(payload, bytes):
-                object.__setattr__(self, "_cffi_submit_result_payload_cache", payload)
-                object.__setattr__(self, "_cffi_submit_result_payload_view", payload_view)
-
-        wrapper_status = cffi_api.submit_result_compact(
-            session=self.handle.handle,
-            operation_id=operation_id,
-            frame_id=frame_id,
-            payload_view=payload_view,
-            payload_len=memoryview(payload).nbytes,
-            max_events=max_events,
-            out_result=self._cffi_submit_result_out,
-        )
-        if wrapper_status is None:
-            return None
-        if wrapper_status != 0:
-            raise NativeInternalError(
-                NativeStatus(FFI_STATUS_INTERNAL_ERROR),
-                f"native cffi API submit/result wrapper failed: {wrapper_status}",
-            )
-
-        result = self._cffi_submit_result_out
-        status = _status_from_cffi_api_result(result)
-        raise_for_native_status(status)
-        if not result.has_result:
-            raise NativeWouldBlockError(NativeStatus(FFI_STATUS_WOULD_BLOCK))
-        return _submit_result_from_cffi_api_result(
-            result,
-            connection=self._submit_result_connection_handle,
-            session=self._submit_result_native_session_handle,
-            state=state,
-            result_payload=selected_result_payload,
-        )
-
     def submit_and_poll_result(
         self,
         *,
         operation_id: int,
         frame_id: int,
-        payload: bytes | bytearray | memoryview = b"",
-        result_payload: bytes | bytearray | memoryview | None = None,
+        metadata: FrameSubmitMetadata | None = None,
+        body: bytes | bytearray | memoryview = b"",
         parent_operation_id: int | None = None,
         operation_group_id: int | None = None,
         scheduling_hint: NativeOperationSchedulingHint | None = None,
         state: NativeOperationLifecycle | str | None = None,
         max_events: int | None = None,
+        timeout_ms: int = 0,
     ) -> NativeRuntimeResult:
-        if parent_operation_id is None and operation_group_id is None and scheduling_hint is None:
-            return self.submit_result(
-                operation_id=operation_id,
-                frame_id=frame_id,
-                payload=payload,
-                result_payload=result_payload,
-                state=state,
-                max_events=max_events,
-            )
         operation = self.submit_operation(
             operation_id=operation_id,
             frame_id=frame_id,
-            payload=payload,
+            metadata=metadata,
+            body=body,
             parent_operation_id=parent_operation_id,
             operation_group_id=operation_group_id,
             scheduling_hint=scheduling_hint,
         )
-        return self.poll_result(operation, state=state, max_events=max_events)
+        return self.poll_result(operation, state=state, max_events=max_events, timeout_ms=timeout_ms)
 
     async def async_submit_and_poll_result(
         self,
         *,
         operation_id: int,
         frame_id: int,
-        payload: bytes | bytearray | memoryview = b"",
-        result_payload: bytes | bytearray | memoryview | None = None,
+        metadata: FrameSubmitMetadata | None = None,
+        body: bytes | bytearray | memoryview = b"",
         parent_operation_id: int | None = None,
         operation_group_id: int | None = None,
         scheduling_hint: NativeOperationSchedulingHint | None = None,
         state: NativeOperationLifecycle | str | None = None,
         max_events: int | None = None,
+        timeout_ms: int = 0,
     ) -> NativeRuntimeResult:
         return await asyncio.to_thread(
             self.submit_and_poll_result,
             operation_id=operation_id,
             frame_id=frame_id,
-            payload=payload,
-            result_payload=result_payload,
+            metadata=metadata,
+            body=body,
             parent_operation_id=parent_operation_id,
             operation_group_id=operation_group_id,
             scheduling_hint=scheduling_hint,
             state=state,
             max_events=max_events,
+            timeout_ms=timeout_ms,
         )
 
     def cancel_operation(
@@ -4722,26 +4430,6 @@ class NativeRuntimeSession:
         status = self.entrypoints.client_cancel(request)
         raise_for_native_status(status)
 
-    def send_flow_update(self, *, frame_id: int) -> None:
-        self._ensure_open()
-        request = _NnrpServerFlowUpdateRequest(self.handle.to_ffi(), frame_id)
-        status = self.entrypoints.client_send_flow_update(request)
-        raise_for_native_status(status)
-
-    def send_result_hint(self, payload: bytes | bytearray | memoryview = b"") -> None:
-        self._ensure_open()
-        payload_view, _payload_owner = _buffer_view_from_payload(payload)
-        request = _NnrpControlRequest(self.handle.to_ffi(), CONTROL_CODE_RESULT_HINT, payload_view)
-        status = self.entrypoints.client_send_result_hint(request)
-        raise_for_native_status(status)
-
-    def _control(self, *, control_code: int, payload: bytes | bytearray | memoryview = b"") -> None:
-        self._ensure_open()
-        payload_view, _payload_owner = _buffer_view_from_payload(payload)
-        request = _NnrpControlRequest(self.handle.to_ffi(), control_code, payload_view)
-        status = self.entrypoints.control(request)
-        raise_for_native_status(status)
-
     def _send_runtime_frame(
         self,
         message_type: MessageType,
@@ -4769,8 +4457,17 @@ class NativeRuntimeServerOperation:
     handle: NativeOperationHandle
     operation_id: int
     frame_id: int
+    metadata: FrameSubmitMetadata
+    body: bytes
 
-    def send_result(self, payload: bytes | bytearray | memoryview = b"") -> None:
+    def send_result(
+        self,
+        metadata: ResultPushMetadata,
+        body: bytes | bytearray | memoryview = b"",
+    ) -> None:
+        if not isinstance(metadata, ResultPushMetadata):
+            raise TypeError("metadata must be ResultPushMetadata")
+        payload = metadata.pack() + bytes(body)
         payload_view, _payload_owner = _buffer_view_from_payload(payload)
         request = _NnrpServerSendResultRequest(self.handle.to_ffi(), payload_view)
         status = self.entrypoints.server_send_result(request)
@@ -4788,29 +4485,71 @@ class NativeRuntimeServerSession:
     def receive_submit(
         self,
         *,
-        operation_id: int,
-        frame_id: int,
-        payload: bytes | bytearray | memoryview = b"",
+        timeout_ms: int = 0,
+        max_events: int = 1,
     ) -> NativeRuntimeServerOperation:
         self._ensure_open()
-        payload_view, _payload_owner = _buffer_view_from_payload(payload)
-        request = _NnrpServerReceiveSubmitRequest(self.handle.to_ffi(), operation_id, frame_id, payload_view)
-        out_operation = _NnrpHandle()
-        status = self.entrypoints.server_receive_submit(request, ctypes.byref(out_operation))
-        raise_for_native_status(status)
-        return NativeRuntimeServerOperation(
-            self.entrypoints,
-            self.handle,
-            NativeOperationHandle.from_ffi(out_operation),
-            operation_id,
-            frame_id,
+        for event in self.poll_events(max_events=max_events, timeout_ms=timeout_ms):
+            if event.kind != EVENT_KIND_SUBMIT_ACCEPTED:
+                continue
+            event.operation.require_kind(HANDLE_KIND_OPERATION)
+            submit_metadata = FrameSubmitMetadata.unpack(event.payload[:FRAME_SUBMIT_METADATA_LENGTH])
+            return NativeRuntimeServerOperation(
+                self.entrypoints,
+                self.handle,
+                NativeOperationHandle(event.operation),
+                submit_metadata.operation_id,
+                event.frame_id,
+                submit_metadata,
+                bytes(event.payload[FRAME_SUBMIT_METADATA_LENGTH:]),
+            )
+        raise NativeWouldBlockError(NativeStatus(FFI_STATUS_WOULD_BLOCK))
+
+    def poll_events(
+        self,
+        *,
+        max_events: int = 1,
+        timeout_ms: int = 0,
+    ) -> tuple[NativeRuntimeEvent, ...]:
+        self._ensure_open()
+        _require_bounded_integer("max_events", max_events, 0xFFFFFFFF)
+        _require_bounded_integer("timeout_ms", timeout_ms, 0xFFFFFFFF)
+        if max_events == 0:
+            return ()
+        event_buffer = (_NnrpEvent * max_events)()
+        event_count = ctypes.c_size_t()
+        status = self.entrypoints.server_await_events(
+            _NnrpRoleEventPollRequest(
+                self.handle.to_ffi(),
+                max_events,
+                _ffi_role_poll_timeout_ms(timeout_ms),
+                0,
+                0,
+            ),
+            event_buffer,
+            max_events,
+            ctypes.byref(event_count),
+        )
+        native_status = NativeStatus.from_ffi(status)
+        if native_status.status_code == FFI_STATUS_WOULD_BLOCK:
+            return ()
+        raise_for_native_status(native_status)
+        return tuple(
+            NativeRuntimeEvent.from_ffi(event_buffer[index], self.entrypoints)
+            for index in range(int(event_count.value))
         )
 
-    def send_flow_update(self, *, frame_id: int) -> None:
-        self._ensure_open()
-        request = _NnrpServerFlowUpdateRequest(self.handle.to_ffi(), frame_id)
-        status = self.entrypoints.server_send_flow_update(request)
-        raise_for_native_status(status)
+    def poll_runtime_frames(
+        self,
+        *,
+        max_events: int = 1,
+        timeout_ms: int = 0,
+    ) -> tuple[NativeRuntimeFrameEvent, ...]:
+        return tuple(
+            frame
+            for event in self.poll_events(max_events=max_events, timeout_ms=timeout_ms)
+            if (frame := event.to_runtime_frame()) is not None
+        )
 
     def send_progress(
         self,
@@ -4914,13 +4653,6 @@ class NativeRuntimeServerSession:
     def invalidate_cache(self, metadata: CacheInvalidateMetadata) -> None:
         self._send_runtime_frame(MessageType.CACHE_INVALIDATE, metadata)
 
-    def _control(self, *, control_code: int, payload: bytes | bytearray | memoryview = b"") -> None:
-        self._ensure_open()
-        payload_view, _payload_owner = _buffer_view_from_payload(payload)
-        request = _NnrpControlRequest(self.handle.to_ffi(), control_code, payload_view)
-        status = self.entrypoints.control(request)
-        raise_for_native_status(status)
-
     def _send_runtime_frame(
         self,
         message_type: MessageType,
@@ -4962,26 +4694,6 @@ def _event_matches_operation(event: NativeRuntimeEvent, operation: NativeRuntime
 
 def _event_is_result_event(event: NativeRuntimeEvent) -> bool:
     return event.kind in {EVENT_KIND_RESULT_PUSHED, EVENT_KIND_RESULT_DROPPED, EVENT_KIND_ERROR}
-
-
-def _raw_event_is_result_event(event: _NnrpEvent) -> bool:
-    return int(event.kind) in {EVENT_KIND_RESULT_PUSHED, EVENT_KIND_RESULT_DROPPED, EVENT_KIND_ERROR}
-
-
-def _raw_event_matches_operation(event: _NnrpEvent, operation: NativeRuntimeOperation) -> bool:
-    session = operation.session.handle
-    if (
-        int(event.session.kind) != session.kind
-        or int(event.session.id) != session.id
-        or int(event.session.generation) != session.generation
-        or int(event.session.flags) != session.flags
-    ):
-        return False
-    return (
-        int(event.operation.id) == operation.handle.handle.id
-        or int(event.operation.id) == operation.operation_id
-        or int(event.frame_id) == operation.frame_id
-    )
 
 
 def _dispatch_callback_batch(
@@ -5596,36 +5308,6 @@ def load_native_library(artifact_path: Path | str) -> ctypes.CDLL:
         raise NativeArtifactError(f"failed to load native artifact {artifact_path}: {error}") from error
 
 
-def _load_native_cffi_submit_result_api(artifact_path: Path) -> _NativeCffiSubmitResultApi | None:
-    mode = os.environ.get(NATIVE_BINDING_MODE_ENV, "auto").strip().lower().replace("-", "_")
-    if mode in {"", "auto"}:
-        required = False
-    elif mode in {"ctypes", "ctypes_abi"}:
-        return None
-    elif mode in {"cffi", "cffi_api"}:
-        required = True
-    else:
-        raise NativeArtifactError(f"unsupported native binding mode: {mode}")
-
-    try:
-        try:
-            module = importlib.import_module("nnrp._nnrp_cffi_api_submit_result")
-        except ImportError:
-            module = importlib.import_module("_nnrp_cffi_api_submit_result")
-        ffi = module.ffi
-        library = module.lib
-        if not hasattr(library, "nnrp_py_client_submit_result_compact") and not hasattr(
-            library,
-            "nnrp_py_client_submit_result_compact_v2",
-        ):
-            raise NativeArtifactError("native cffi API module does not expose submit/result compact wrapper")
-        return _NativeCffiSubmitResultApi(ffi, library, os.fsencode(artifact_path))
-    except (ImportError, AttributeError, OSError, RuntimeError, NativeArtifactError) as error:
-        if required:
-            raise NativeArtifactError(f"native cffi API binding is unavailable: {error}") from error
-        return None
-
-
 def load_native_runtime(
     artifact_path: Path | str | None = None,
     *,
@@ -5633,7 +5315,6 @@ def load_native_runtime(
     native_platform: NativePlatform | None = None,
     transport: str | None = None,
     library: Any | None = None,
-    cffi_submit_result_api: _NativeCffiSubmitResultApi | None = None,
 ) -> NativeRuntimeEntrypoints:
     resolved_path = (
         Path(artifact_path)
@@ -5646,28 +5327,65 @@ def load_native_runtime(
         capabilities,
         required_transport_slots=_required_transport_slots_for_artifact(resolved_path, transport),
     )
-    resolved_cffi_api = cffi_submit_result_api
-    if resolved_cffi_api is None and library is None:
-        resolved_cffi_api = _load_native_cffi_submit_result_api(resolved_path)
     return NativeRuntimeEntrypoints(
         loaded_library,
         artifact_path=resolved_path,
-        cffi_submit_result_api=resolved_cffi_api,
     )
+
+
+def resolve_native_transport_endpoint(
+    endpoint: str | NnrpEndpoint,
+    transport_name: str,
+    *,
+    provider_endpoint: str | NativeTransportEndpoint | None = None,
+) -> NativeTransportEndpoint:
+    application_endpoint = endpoint if isinstance(endpoint, NnrpEndpoint) else parse_nnrp_endpoint(endpoint)
+    normalized_transport = _normalize_native_transport_scope(transport_name)
+    if provider_endpoint is not None:
+        resolved = (
+            provider_endpoint
+            if isinstance(provider_endpoint, NativeTransportEndpoint)
+            else parse_native_transport_endpoint(provider_endpoint)
+        )
+        if resolved.transport_name != normalized_transport:
+            raise NativeArtifactError(
+                f"{normalized_transport} provider cannot use {resolved.transport_name} carrier endpoint"
+            )
+        return resolved
+    if normalized_transport in {"ipc", "websocket"}:
+        raise NativeArtifactError(f"{normalized_transport} requires an explicit provider_endpoint")
+
+    parsed = urlsplit(application_endpoint.uri)
+    hostname = parsed.hostname
+    if hostname is None:
+        raise NativeArtifactError("NNRP application endpoint authority does not contain a host")
+    port = parsed.port or 4433
+    host = f"[{hostname}]" if ":" in hostname else hostname
+    if normalized_transport == "tcp":
+        scheme = "tcp"
+    elif normalized_transport == "quic":
+        scheme = "quic+tls" if application_endpoint.secure else "quic"
+    else:
+        raise NativeArtifactError(f"unsupported native transport provider: {normalized_transport}")
+    return parse_native_transport_endpoint(f"{scheme}://{host}:{port}")
 
 
 def load_native_transport_binding(
     name: str,
     *,
+    artifact_path: Path | str | None = None,
     root: Path | str | None = None,
     native_platform: NativePlatform | None = None,
+    library: Any | None = None,
 ) -> NativeTransportBinding:
     provider = resolve_native_transport_provider(
         name,
         root=root,
         native_platform=native_platform,
     )
-    loaded_library = load_native_library(provider.artifact_path)
+    if artifact_path is not None:
+        provider = replace(provider, artifact_path=Path(artifact_path))
+    loaded_library = library if library is not None else load_native_library(provider.artifact_path)
     capabilities = _call_runtime_capabilities(loaded_library)
     _validate_runtime_capabilities(
         capabilities,
@@ -5676,6 +5394,7 @@ def load_native_transport_binding(
     return NativeTransportBinding(
         _NativeTransportEntrypoints(loaded_library, artifact_path=provider.artifact_path),
         provider,
+        NativeRuntimeEntrypoints(loaded_library, artifact_path=provider.artifact_path),
     )
 
 
@@ -5686,7 +5405,6 @@ def load_native_client(
     native_platform: NativePlatform | None = None,
     transport: str | None = None,
     library: Any | None = None,
-    cffi_submit_result_api: _NativeCffiSubmitResultApi | None = None,
 ) -> NativeRuntimeClient:
     return NativeRuntimeClient(
         load_native_runtime(
@@ -5695,7 +5413,6 @@ def load_native_client(
             native_platform=native_platform,
             transport=transport,
             library=library,
-            cffi_submit_result_api=cffi_submit_result_api,
         )
     )
 
@@ -5803,10 +5520,10 @@ def _validate_runtime_capabilities(
     *,
     required_transport_slots: int = REQUIRED_TRANSPORT_SLOTS,
 ) -> None:
-    if capabilities.abi_major != EXPECTED_ABI_MAJOR or capabilities.abi_minor < MINIMUM_ABI_MINOR:
+    if capabilities.abi_major != EXPECTED_ABI_MAJOR or capabilities.abi_minor != EXPECTED_ABI_MINOR:
         raise NativeArtifactError(
             "native artifact ABI mismatch: "
-            f"expected {EXPECTED_ABI_MAJOR}.{MINIMUM_ABI_MINOR}.x, "
+            f"expected {EXPECTED_ABI_MAJOR}.{EXPECTED_ABI_MINOR}.x, "
             f"got {capabilities.abi_major}.{capabilities.abi_minor}.{capabilities.abi_patch}"
         )
     version = capabilities.protocol_version
@@ -6095,6 +5812,10 @@ def _require_bounded_integer(name: str, value: int, maximum: int) -> None:
         raise ValueError(f"{name} must be an integer in 0..{maximum}")
 
 
+def _ffi_role_poll_timeout_ms(timeout_ms: int) -> int:
+    return 1 if timeout_ms == 0 else timeout_ms
+
+
 def _validate_u64(name: str, value: int) -> None:
     if not isinstance(value, int) or value < 0 or value > 0xFFFFFFFFFFFFFFFF:
         raise NativeHandleError(f"{name} must be a uint64 value")
@@ -6302,25 +6023,30 @@ def _schema_registry_action_from_ffi(action_code: int) -> Any:
 
 def _cache_identity_to_ffi(identity: Any) -> _NnrpCacheObjectId:
     return _NnrpCacheObjectId(
-        int(identity.namespace),
-        int(identity.key_hi),
-        int(identity.key_lo),
+        int(identity.cache_namespace),
         int(identity.object_kind),
+        int(identity.cache_key_hi),
+        int(identity.cache_key_lo),
     )
 
 
 def _cache_identity_key(identity: Any) -> tuple[int, int, int, int]:
-    return (int(identity.namespace), int(identity.key_hi), int(identity.key_lo), int(identity.object_kind))
+    return (
+        int(identity.cache_namespace),
+        int(identity.cache_key_hi),
+        int(identity.cache_key_lo),
+        int(identity.object_kind),
+    )
 
 
 def _cache_identity_from_ffi(object_id: _NnrpCacheObjectId) -> Any:
     from nnrp.cache import CacheObjectIdentity
 
     return CacheObjectIdentity(
-        namespace=int(object_id.cache_namespace),
+        cache_namespace=int(object_id.cache_namespace),
         object_kind=int(object_id.object_kind),
-        key_hi=int(object_id.cache_key_hi),
-        key_lo=int(object_id.cache_key_lo),
+        cache_key_hi=int(object_id.cache_key_hi),
+        cache_key_lo=int(object_id.cache_key_lo),
     )
 
 
@@ -6475,15 +6201,6 @@ _SESSION_PRIORITY_CLASS_CODES = {
 
 _SESSION_PRIORITY_CLASS_BY_CODE = {
     code: priority_class for priority_class, code in _SESSION_PRIORITY_CLASS_CODES.items()
-}
-
-_RESULT_STATE_LIFECYCLE = {
-    RESULT_STATE_COMPLETED: NativeOperationLifecycle.COMPLETED,
-    RESULT_STATE_PARTIAL: NativeOperationLifecycle.PARTIAL,
-    RESULT_STATE_DEGRADED: NativeOperationLifecycle.DEGRADED,
-    RESULT_STATE_STALE_REUSE: NativeOperationLifecycle.STALE_REUSE,
-    RESULT_STATE_CANCELLED: NativeOperationLifecycle.CANCELLED,
-    RESULT_STATE_FAILED: NativeOperationLifecycle.FAILED,
 }
 
 _SESSION_RECOVERY_OUTCOME_NAMES = {

@@ -199,6 +199,7 @@ def frame_features_to_packet(
     packet_kwargs = dict(
         session_id=_coerce_session_id(_read_required(frame_features, "session_id"), override=session_id),
         frame_id=_as_int(_read_required(frame_features, "frame_id")),
+        operation_id=_as_int(_read_required(frame_features, "operation_id")),
         src_width=src_width,
         src_height=src_height,
         tile_width=tile_size,
@@ -361,6 +362,7 @@ def _build_frame_submit_current_reference_packet(
     *,
     session_id: int,
     frame_id: int,
+    operation_id: int,
     src_width: int,
     src_height: int,
     tile_width: int,
@@ -443,6 +445,7 @@ def _build_frame_submit_current_reference_packet(
         tile_base_id=tile_base_id,
         camera_bytes=camera_bytes,
         tile_index_bytes=tile_index_bytes,
+        operation_id=operation_id,
         submit_mode=submit_mode,
         budget_policy=budget_policy,
         loss_tolerance_policy=loss_tolerance_policy,

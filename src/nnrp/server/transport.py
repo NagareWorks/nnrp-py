@@ -757,6 +757,7 @@ def _decode_submit_request(
 
     request = SubmitRequest(
         frame_id=int(packet.header.frame_id),
+        operation_id=metadata.operation_id,
         src_width=metadata.src_width,
         src_height=metadata.src_height,
         tile_width=metadata.tile_width,

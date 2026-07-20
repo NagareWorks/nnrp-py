@@ -14,8 +14,8 @@ def test_release_workflow_manual_ref_defaults_to_main() -> None:
 def test_release_workflow_pins_preview4_rust_native_artifacts() -> None:
     workflow = RELEASE_WORKFLOW.read_text(encoding="utf-8")
 
-    assert "default: 1.0.0-preview.4.4" in workflow
-    assert "vars.NNRP_RS_NATIVE_VERSION || '1.0.0-preview.4.4'" in workflow
+    assert "default: 1.0.0-preview.4.7" in workflow
+    assert "vars.NNRP_RS_NATIVE_VERSION || '1.0.0-preview.4.7'" in workflow
     assert "1.0.0-preview.3.8" not in workflow
 
 
@@ -30,7 +30,7 @@ def test_release_workflow_rejects_non_preview4_native_artifact_shape() -> None:
     workflow = RELEASE_WORKFLOW.read_text(encoding="utf-8")
 
     assert "--require-preview4-native-artifacts" in workflow
-    assert "--require-abi-version 1.12.1" in workflow
+    assert "--require-abi-version 3.0.0" in workflow
 
 
 def test_release_workflow_smokes_preview4_ipc_and_websocket_artifacts() -> None:
@@ -50,6 +50,12 @@ def test_release_workflow_runs_native_runtime_benchmark_thresholds() -> None:
     assert "doc/benchmarks/native-runtime-benchmark-plan.json" in workflow
     assert "scripts/check_benchmark_thresholds.py" in workflow
     assert "doc/benchmarks/native-runtime-smoke-thresholds.json" in workflow
+    assert "python -m pip install --force-reinstall --no-deps \"$candidate_wheel\"" in workflow
+    assert 'NNRP_BENCHMARK_RUST_ARTIFACT_VERSION="$NNRP_RS_NATIVE_VERSION"' in workflow
+    assert 'NNRP_BENCHMARK_SDK_COMMIT="$GITHUB_SHA"' in workflow
+    assert workflow.index("Verify packaged native artifacts") < workflow.index(
+        "Run native runtime benchmark smoke thresholds"
+    )
 
 
 def test_release_workflow_rejects_polluted_source_distributions() -> None:

@@ -17,9 +17,6 @@ _SPEC.loader.exec_module(_MODULE)
 
 build_native_wheels = _MODULE.build_native_wheels
 build_native_wheels_main = _MODULE.main
-_cffi_entries_for_artifact = _MODULE._cffi_entries_for_artifact
-_python_abi_tags = _MODULE._python_abi_tags
-_normalize_python_tag = _MODULE._normalize_python_tag
 _retag_wheel_metadata = _MODULE._retag_wheel_metadata
 
 
@@ -42,213 +39,58 @@ def _write_staging_wheel(path: Path) -> Path:
         )
         archive.writestr("nnrp/native_artifacts/windows-x86_64/tcp/nnrp_ffi.dll", b"windows-tcp")
         archive.writestr(
-            "nnrp/native_artifacts/windows-x86_64/quic/manifest.json",
-            json.dumps({"transport_scope": "quic", "transport_slots": ["quic"]}).encode(),
+            "nnrp/native_artifacts/ios-arm64-sim/tcp/manifest.json",
+            json.dumps({"transport_scope": "tcp", "transport_slots": ["tcp"]}).encode(),
         )
-        archive.writestr("nnrp/native_artifacts/windows-x86_64/quic/nnrp_ffi.dll", b"windows-quic")
-        archive.writestr("nnrp/native_artifacts/ios-arm64-sim/manifest.json", b"{}")
-        archive.writestr("nnrp/native_artifacts/ios-arm64-sim/libnnrp_ffi.a", b"ios-sim")
+        archive.writestr("nnrp/native_artifacts/ios-arm64-sim/tcp/libnnrp_ffi.a", b"ios-sim")
         archive.writestr(
-            "nnrp_py-1.0.0rc3.dist-info/WHEEL",
+            "nnrp_py-1.0.0rc4.post5.dist-info/WHEEL",
             b"Wheel-Version: 1.0\nGenerator: test\nRoot-Is-Purelib: true\nTag: py3-none-any\n",
         )
-        archive.writestr("nnrp_py-1.0.0rc3.dist-info/METADATA", b"Name: nnrp-py\n")
-        archive.writestr("nnrp_py-1.0.0rc3.dist-info/RECORD", b"")
+        archive.writestr("nnrp_py-1.0.0rc4.post5.dist-info/METADATA", b"Name: nnrp-py\n")
+        archive.writestr("nnrp_py-1.0.0rc4.post5.dist-info/RECORD", b"")
     return path
 
 
 def test_build_native_wheels_splits_artifacts_and_retags_platforms(tmp_path: Path) -> None:
-    source = _write_staging_wheel(tmp_path / "nnrp_py-1.0.0rc3-py3-none-any.whl")
-    output = tmp_path / "dist"
+    source = _write_staging_wheel(tmp_path / "nnrp_py-1.0.0rc4.post5-py3-none-any.whl")
 
-    built = build_native_wheels(source, output)
+    built = build_native_wheels(source, tmp_path / "dist")
 
     assert [wheel.name for wheel in built] == [
-        "nnrp_py-1.0.0rc3-py3-none-ios_13_0_arm64_iphonesimulator.whl",
-        "nnrp_py-1.0.0rc3-py3-none-manylinux_2_28_x86_64.whl",
-        "nnrp_py-1.0.0rc3-py3-none-win_amd64.whl",
+        "nnrp_py-1.0.0rc4.post5-py3-none-ios_13_0_arm64_iphonesimulator.whl",
+        "nnrp_py-1.0.0rc4.post5-py3-none-manylinux_2_28_x86_64.whl",
+        "nnrp_py-1.0.0rc4.post5-py3-none-win_amd64.whl",
     ]
-
-    linux_wheel = built[1]
-    with zipfile.ZipFile(linux_wheel) as archive:
+    with zipfile.ZipFile(built[0]) as archive:
+        ios_names = set(archive.namelist())
+    with zipfile.ZipFile(built[1]) as archive:
         names = set(archive.namelist())
-        wheel_metadata = archive.read("nnrp_py-1.0.0rc3.dist-info/WHEEL").decode("utf-8")
-
+        metadata = archive.read("nnrp_py-1.0.0rc4.post5.dist-info/WHEEL").decode()
+    assert "nnrp/native_artifacts/ios-arm64-sim/tcp/libnnrp_ffi.a" in ios_names
+    assert "nnrp/native_artifacts/ios-arm64-sim/libnnrp_ffi.a" not in ios_names
     assert "nnrp/native_artifacts/linux-x86_64/tcp/libnnrp_ffi.so" in names
     assert "nnrp/native_artifacts/linux-x86_64/quic/libnnrp_ffi.so" in names
-    assert "nnrp/native_artifacts/windows-x86_64/nnrp_ffi.dll" not in names
     assert "nnrp/native_artifacts/windows-x86_64/tcp/nnrp_ffi.dll" not in names
-    assert "Root-Is-Purelib: false" in wheel_metadata
-    assert "Tag: py3-none-manylinux_2_28_x86_64" in wheel_metadata
-    assert "nnrp_py-1.0.0rc3.dist-info/RECORD" in names
-
-    ios_wheel = built[0]
-    with zipfile.ZipFile(ios_wheel) as archive:
-        ios_names = set(archive.namelist())
-        ios_metadata = archive.read("nnrp_py-1.0.0rc3.dist-info/WHEEL").decode("utf-8")
-
-    assert "nnrp/native_artifacts/ios-arm64-sim/libnnrp_ffi.a" in ios_names
-    assert "nnrp/native_artifacts/linux-x86_64/libnnrp_ffi.so" not in ios_names
-    assert "Tag: py3-none-ios_13_0_arm64_iphonesimulator" in ios_metadata
-
-
-def test_build_native_wheels_injects_matching_cffi_api_artifacts(tmp_path: Path) -> None:
-    source = _write_staging_wheel(tmp_path / "nnrp_py-1.0.0rc3-py3-none-any.whl")
-    output = tmp_path / "dist"
-    cffi_dir = tmp_path / "cffi-api"
-    linux_cffi = cffi_dir / "linux-x86_64" / "nnrp" / "_nnrp_cffi_api_submit_result.cpython-311-x86_64-linux-gnu.so"
-    windows_cffi = cffi_dir / "windows-x86_64" / "nnrp" / "_nnrp_cffi_api_submit_result.cp312-win_amd64.pyd"
-    linux_cffi.parent.mkdir(parents=True)
-    windows_cffi.parent.mkdir(parents=True)
-    linux_cffi.write_bytes(b"linux-cffi")
-    windows_cffi.write_bytes(b"windows-cffi")
-
-    built = build_native_wheels(source, output, cffi_dir=cffi_dir)
-
-    assert [wheel.name for wheel in built] == [
-        "nnrp_py-1.0.0rc3-py3-none-ios_13_0_arm64_iphonesimulator.whl",
-        "nnrp_py-1.0.0rc3-cp311-cp311-manylinux_2_28_x86_64.whl",
-        "nnrp_py-1.0.0rc3-cp312-cp312-win_amd64.whl",
-    ]
-    with zipfile.ZipFile(built[1]) as archive:
-        linux_names = set(archive.namelist())
-        linux_metadata = archive.read("nnrp_py-1.0.0rc3.dist-info/WHEEL").decode("utf-8")
-        linux_cffi_payload = archive.read("nnrp/_nnrp_cffi_api_submit_result.cpython-311-x86_64-linux-gnu.so")
-    with zipfile.ZipFile(built[2]) as archive:
-        windows_names = set(archive.namelist())
-        windows_metadata = archive.read("nnrp_py-1.0.0rc3.dist-info/WHEEL").decode("utf-8")
-        windows_cffi_payload = archive.read("nnrp/_nnrp_cffi_api_submit_result.cp312-win_amd64.pyd")
-    with zipfile.ZipFile(built[0]) as archive:
-        ios_metadata = archive.read("nnrp_py-1.0.0rc3.dist-info/WHEEL").decode("utf-8")
-
-    assert "Tag: py3-none-ios_13_0_arm64_iphonesimulator" in ios_metadata
-    assert "nnrp/_nnrp_cffi_api_submit_result.cpython-311-x86_64-linux-gnu.so" in linux_names
-    assert "nnrp/_nnrp_cffi_api_submit_result.cp312-win_amd64.pyd" not in linux_names
-    assert linux_cffi_payload == b"linux-cffi"
-    assert "Tag: cp311-cp311-manylinux_2_28_x86_64" in linux_metadata
-    assert "nnrp/_nnrp_cffi_api_submit_result.cp312-win_amd64.pyd" in windows_names
-    assert "nnrp/_nnrp_cffi_api_submit_result.cpython-311-x86_64-linux-gnu.so" not in windows_names
-    assert windows_cffi_payload == b"windows-cffi"
-    assert "Tag: cp312-cp312-win_amd64" in windows_metadata
-
-
-def test_build_native_wheels_supports_abi3_cffi_api_artifacts(tmp_path: Path) -> None:
-    source = _write_staging_wheel(tmp_path / "nnrp_py-1.0.0rc3-py3-none-any.whl")
-    output = tmp_path / "dist"
-    cffi_dir = tmp_path / "cffi-api"
-    linux_cffi = cffi_dir / "linux-x86_64" / "nnrp" / "_nnrp_cffi_api_submit_result.abi3.so"
-    linux_cffi.parent.mkdir(parents=True)
-    linux_cffi.write_bytes(b"linux-abi3-cffi")
-
-    built = build_native_wheels(source, output, cffi_dir=cffi_dir)
-
-    assert built[1].name == "nnrp_py-1.0.0rc3-cp311-abi3-manylinux_2_28_x86_64.whl"
-    with zipfile.ZipFile(built[1]) as archive:
-        metadata = archive.read("nnrp_py-1.0.0rc3.dist-info/WHEEL").decode("utf-8")
-
-    assert "Tag: cp311-abi3-manylinux_2_28_x86_64" in metadata
-
-
-def test_build_native_wheels_allows_configured_abi3_python_tag(tmp_path: Path) -> None:
-    source = _write_staging_wheel(tmp_path / "nnrp_py-1.0.0rc3-py3-none-any.whl")
-    output = tmp_path / "dist"
-    cffi_dir = tmp_path / "cffi-api"
-    linux_cffi = cffi_dir / "linux-x86_64" / "nnrp" / "_nnrp_cffi_api_submit_result.abi3.so"
-    linux_cffi.parent.mkdir(parents=True)
-    linux_cffi.write_bytes(b"linux-abi3-cffi")
-
-    built = build_native_wheels(source, output, cffi_dir=cffi_dir, abi3_python_tag="3.12")
-
-    assert built[1].name == "nnrp_py-1.0.0rc3-cp312-abi3-manylinux_2_28_x86_64.whl"
-
-
-def test_build_native_wheels_validates_configured_abi3_python_tag() -> None:
-    assert _normalize_python_tag("cp311") == "cp311"
-    assert _normalize_python_tag("3.12") == "cp312"
-    assert _normalize_python_tag("python3.13") == "cp313"
-    with pytest.raises(ValueError, match="Python 3.11"):
-        _normalize_python_tag("3.10")
-
-
-def test_build_native_wheels_requires_cffi_api_for_each_native_artifact(tmp_path: Path) -> None:
-    source = _write_staging_wheel(tmp_path / "nnrp_py-1.0.0rc3-py3-none-any.whl")
-    cffi_dir = tmp_path / "cffi-api"
-    linux_cffi = cffi_dir / "linux-x86_64" / "nnrp" / "_nnrp_cffi_api_submit_result.abi3.so"
-    linux_cffi.parent.mkdir(parents=True)
-    linux_cffi.write_bytes(b"linux-abi3-cffi")
-
-    with pytest.raises(ValueError, match="missing compiled cffi API artifact for native artifact ios-arm64-sim"):
-        build_native_wheels(source, tmp_path / "dist", cffi_dir=cffi_dir, require_cffi_api=True)
-
-
-def test_build_native_wheels_can_publish_only_artifacts_with_compiled_cffi_api(tmp_path: Path) -> None:
-    source = _write_staging_wheel(tmp_path / "nnrp_py-1.0.0rc3-py3-none-any.whl")
-    cffi_dir = tmp_path / "cffi-api"
-    linux_cffi = cffi_dir / "linux-x86_64" / "nnrp" / "_nnrp_cffi_api_submit_result.abi3.so"
-    linux_cffi.parent.mkdir(parents=True)
-    linux_cffi.write_bytes(b"linux-abi3-cffi")
-
-    built = build_native_wheels(
-        source,
-        tmp_path / "dist",
-        cffi_dir=cffi_dir,
-        require_cffi_api=True,
-        publish_cffi_api_artifacts_only=True,
-    )
-
-    assert [wheel.name for wheel in built] == [
-        "nnrp_py-1.0.0rc3-cp311-abi3-manylinux_2_28_x86_64.whl",
-    ]
-
-
-def test_build_native_wheels_rejects_empty_publishable_cffi_api_set(tmp_path: Path) -> None:
-    source = _write_staging_wheel(tmp_path / "nnrp_py-1.0.0rc3-py3-none-any.whl")
-
-    with pytest.raises(ValueError, match="no platform wheels were built"):
-        build_native_wheels(
-            source,
-            tmp_path / "dist",
-            cffi_dir=tmp_path / "missing",
-            require_cffi_api=True,
-            publish_cffi_api_artifacts_only=True,
-        )
-
-
-def test_build_native_wheels_ignores_missing_cffi_dir_and_rejects_file_path(tmp_path: Path) -> None:
-    assert _cffi_entries_for_artifact(tmp_path / "missing", "linux-x86_64") == {}
-
-    cffi_file = tmp_path / "cffi-api" / "linux-x86_64"
-    cffi_file.parent.mkdir()
-    cffi_file.write_text("not a directory", encoding="utf-8")
-
-    with pytest.raises(ValueError, match="must be a directory"):
-        _cffi_entries_for_artifact(tmp_path / "cffi-api", "linux-x86_64")
-
-
-def test_build_native_wheels_rejects_mixed_cffi_python_abi_tags() -> None:
-    with pytest.raises(ValueError, match="exactly one Python ABI tag"):
-        _python_abi_tags(
-            {
-                "nnrp/_nnrp_cffi_api_submit_result.cpython-311-x86_64-linux-gnu.so": b"py311",
-                "nnrp/_nnrp_cffi_api_submit_result.cp312-win_amd64.pyd": b"py312",
-            }
-        )
+    assert "Root-Is-Purelib: false" in metadata
+    assert "Tag: py3-none-manylinux_2_28_x86_64" in metadata
+    assert "nnrp_py-1.0.0rc4.post5.dist-info/RECORD" in names
 
 
 def test_build_native_wheels_adds_missing_metadata_tag() -> None:
     metadata = _retag_wheel_metadata(
         b"Wheel-Version: 1.0\nRoot-Is-Purelib: true\n",
-        python_tag="cp311",
-        abi_tag="cp311",
+        python_tag="py3",
+        abi_tag="none",
         platform_tag="manylinux_2_28_x86_64",
-    ).decode("utf-8")
+    ).decode()
 
     assert "Root-Is-Purelib: false" in metadata
-    assert "Tag: cp311-cp311-manylinux_2_28_x86_64" in metadata
+    assert "Tag: py3-none-manylinux_2_28_x86_64" in metadata
 
 
 def test_build_native_wheels_clean_removes_stale_outputs(tmp_path: Path) -> None:
-    source = _write_staging_wheel(tmp_path / "nnrp_py-1.0.0rc3-py3-none-any.whl")
+    source = _write_staging_wheel(tmp_path / "nnrp_py-1.0.0rc4.post5-py3-none-any.whl")
     output = tmp_path / "dist"
     stale = output / "stale.whl"
     stale.parent.mkdir()
@@ -260,30 +102,30 @@ def test_build_native_wheels_clean_removes_stale_outputs(tmp_path: Path) -> None
 
 
 def test_build_native_wheels_rejects_missing_native_payload(tmp_path: Path) -> None:
-    wheel = tmp_path / "nnrp_py-1.0.0rc3-py3-none-any.whl"
+    wheel = tmp_path / "nnrp_py-1.0.0rc4.post5-py3-none-any.whl"
     with zipfile.ZipFile(wheel, "w") as archive:
         archive.writestr("nnrp/__init__.py", b"")
-        archive.writestr("nnrp_py-1.0.0rc3.dist-info/WHEEL", b"Tag: py3-none-any\n")
-        archive.writestr("nnrp_py-1.0.0rc3.dist-info/RECORD", b"")
+        archive.writestr("nnrp_py-1.0.0rc4.post5.dist-info/WHEEL", b"Tag: py3-none-any\n")
+        archive.writestr("nnrp_py-1.0.0rc4.post5.dist-info/RECORD", b"")
 
     with pytest.raises(ValueError, match="does not contain native artifacts"):
         build_native_wheels(wheel, tmp_path / "dist")
 
 
 def test_build_native_wheels_rejects_unknown_artifact_platform(tmp_path: Path) -> None:
-    wheel = tmp_path / "nnrp_py-1.0.0rc3-py3-none-any.whl"
+    wheel = tmp_path / "nnrp_py-1.0.0rc4.post5-py3-none-any.whl"
     with zipfile.ZipFile(wheel, "w") as archive:
         archive.writestr("nnrp/native_artifacts/plan9-x86_64/manifest.json", b"{}")
         archive.writestr("nnrp/native_artifacts/plan9-x86_64/libnnrp_ffi.so", b"native")
-        archive.writestr("nnrp_py-1.0.0rc3.dist-info/WHEEL", b"Tag: py3-none-any\n")
-        archive.writestr("nnrp_py-1.0.0rc3.dist-info/RECORD", b"")
+        archive.writestr("nnrp_py-1.0.0rc4.post5.dist-info/WHEEL", b"Tag: py3-none-any\n")
+        archive.writestr("nnrp_py-1.0.0rc4.post5.dist-info/RECORD", b"")
 
     with pytest.raises(ValueError, match="no Python wheel platform tag"):
         build_native_wheels(wheel, tmp_path / "dist")
 
 
 def test_build_native_wheels_rejects_invalid_wheel_shapes(tmp_path: Path) -> None:
-    no_dist_info = tmp_path / "nnrp_py-1.0.0rc3-py3-none-any.whl"
+    no_dist_info = tmp_path / "nnrp_py-1.0.0rc4.post5-py3-none-any.whl"
     with zipfile.ZipFile(no_dist_info, "w") as archive:
         archive.writestr("nnrp/native_artifacts/linux-x86_64/manifest.json", b"{}")
 
@@ -305,7 +147,7 @@ def test_build_native_wheels_cli_prints_outputs(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    source = _write_staging_wheel(tmp_path / "nnrp_py-1.0.0rc3-py3-none-any.whl")
+    source = _write_staging_wheel(tmp_path / "nnrp_py-1.0.0rc4.post5-py3-none-any.whl")
     output = tmp_path / "dist"
     monkeypatch.setattr(
         sys,
@@ -314,7 +156,6 @@ def test_build_native_wheels_cli_prints_outputs(
     )
 
     assert build_native_wheels_main() == 0
-
     captured = capsys.readouterr().out
     assert "manylinux_2_28_x86_64" in captured
     assert "win_amd64" in captured

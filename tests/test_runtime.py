@@ -514,6 +514,7 @@ def test_runtime_object_reference_and_cache_reference_roundtrip() -> None:
         metadata_bytes=0,
     )
     cache_ref = CacheReferenceMetadata(
+        cache_namespace=7,
         cache_key_hi=0x11,
         cache_key_lo=0x22,
         profile_id=7,
@@ -533,10 +534,17 @@ def test_runtime_object_reference_and_cache_reference_roundtrip() -> None:
         MessageType.CACHE_REFERENCE,
         encode_runtime_object_metadata(MessageType.CACHE_REFERENCE, cache_ref),
     ).metadata == cache_ref
+    assert CacheReferenceMetadata.STRUCT.size == 56
+    packed = cache_ref.pack()
+    assert int.from_bytes(packed[0:4], "little") == 7
+    assert int.from_bytes(packed[8:16], "little") == 0x11
+    assert int.from_bytes(packed[16:24], "little") == 0x22
+    assert packed[52:56] == b"\0" * 4
 
 
 def test_cache_miss_remains_typed_metadata() -> None:
     metadata = CacheMissMetadata(
+        cache_namespace=7,
         cache_key_hi=0x33,
         cache_key_lo=0x44,
         miss_reason=CacheMissReason.SCHEMA_MISMATCH,
@@ -549,6 +557,10 @@ def test_cache_miss_remains_typed_metadata() -> None:
 
     assert decoded.metadata == metadata
     assert decoded.tail == b"diag"
+    assert CacheMissMetadata.STRUCT.size == 32
+    assert int.from_bytes(payload[0:4], "little") == 7
+    assert int.from_bytes(payload[8:16], "little") == 0x33
+    assert int.from_bytes(payload[16:24], "little") == 0x44
 
 
 def test_runtime_metadata_helpers_reject_invalid_payloads_and_reserved_bits() -> None:
@@ -560,6 +572,7 @@ def test_runtime_metadata_helpers_reject_invalid_payloads_and_reserved_bits() ->
         encode_runtime_object_metadata(
             MessageType.OBJECT_REF,
             CacheMissMetadata(
+                cache_namespace=0,
                 cache_key_hi=0,
                 cache_key_lo=0,
                 miss_reason=CacheMissReason.UNKNOWN,
@@ -577,7 +590,11 @@ def test_runtime_metadata_helpers_reject_invalid_payloads_and_reserved_bits() ->
             flags=0x04,
         ).pack()
     with pytest.raises(ValueError, match="must be zero"):
-        CacheMissMetadata.unpack(CacheMissMetadata.STRUCT.pack(1, 2, int(CacheMissReason.UNKNOWN), 3, 4, 1))
+        CacheMissMetadata.unpack(CacheMissMetadata.STRUCT.pack(1, 2, int(CacheMissReason.UNKNOWN), 3, 4, 5, 1))
+    with pytest.raises(ValueError, match="must be zero"):
+        CacheReferenceMetadata.unpack(
+            CacheReferenceMetadata.STRUCT.pack(1, 2, int(CacheReuseScope.SESSION), 3, 4, 5, 6, 7, 8, 0, 1)
+        )
     with pytest.raises(ValueError, match="progress.percent_x100"):
         ProgressMetadata(
             operation_id=1,

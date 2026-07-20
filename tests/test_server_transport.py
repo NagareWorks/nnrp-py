@@ -210,6 +210,7 @@ async def test_accept_server_session_hides_packet_plumbing() -> None:
                 await session.send_submit(
                     SubmitRequest(
                         frame_id=303,
+                        operation_id=303,
                         src_width=64,
                         src_height=64,
                         tile_width=32,
@@ -296,6 +297,7 @@ async def test_accept_server_connection_resolves_session_after_probe_or_prefetch
                 await session.send_submit(
                     SubmitRequest(
                         frame_id=404,
+                        operation_id=404,
                         typed_payloads=(TypedPayload.opaque_bytes(b"input"),),
                     )
                 )
@@ -398,6 +400,7 @@ async def test_current_session_round_trips_typed_and_mixed_payloads_without_core
                 await session.send_submit(
                     SubmitRequest(
                         frame_id=304,
+                        operation_id=304,
                         frame_class=1,
                         latency_budget_ms=12,
                         typed_payloads=(
@@ -415,6 +418,7 @@ async def test_current_session_round_trips_typed_and_mixed_payloads_without_core
                 await session.send_submit(
                     SubmitRequest(
                         frame_id=305,
+                        operation_id=305,
                         src_width=32,
                         src_height=32,
                         tile_width=32,

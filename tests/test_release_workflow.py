@@ -14,8 +14,8 @@ def test_release_workflow_manual_ref_defaults_to_main() -> None:
 def test_release_workflow_pins_preview4_rust_native_artifacts() -> None:
     workflow = RELEASE_WORKFLOW.read_text(encoding="utf-8")
 
-    assert "default: 1.0.0-preview.4.7" in workflow
-    assert "vars.NNRP_RS_NATIVE_VERSION || '1.0.0-preview.4.7'" in workflow
+    assert "default: 1.0.0-preview.4.8" in workflow
+    assert "vars.NNRP_RS_NATIVE_VERSION || '1.0.0-preview.4.8'" in workflow
     assert "1.0.0-preview.3.8" not in workflow
 
 
@@ -56,6 +56,15 @@ def test_release_workflow_runs_native_runtime_benchmark_thresholds() -> None:
     assert workflow.index("Verify packaged native artifacts") < workflow.index(
         "Run native runtime benchmark smoke thresholds"
     )
+
+
+def test_release_workflow_creates_tag_only_after_all_release_validation() -> None:
+    workflow = RELEASE_WORKFLOW.read_text(encoding="utf-8")
+
+    assert workflow.count("- name: Create git tag") == 1
+    assert workflow.index("Run native runtime benchmark smoke thresholds") < workflow.index("Create git tag")
+    assert workflow.index("Upload workflow artifacts") < workflow.index("Create git tag")
+    assert workflow.index("Create git tag") < workflow.index("Publish GitHub release")
 
 
 def test_release_workflow_rejects_polluted_source_distributions() -> None:

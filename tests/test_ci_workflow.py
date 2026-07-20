@@ -73,6 +73,10 @@ def test_ci_runs_independent_process_wire_conformance() -> None:
 def test_ci_wire_conformance_declares_preview4_modes_transports_and_capabilities() -> None:
     script = WIRE_E2E_SCRIPT.read_text(encoding="utf-8")
 
+    reset_index = script.index("Remove-Item -LiteralPath $modeDirectory -Recurse -Force")
+    create_index = script.index("New-Item -ItemType Directory -Force -Path $modeDirectory")
+    assert reset_index < create_index
+
     for mode in ("suite_as_client", "suite_as_server", "suite_as_proxy"):
         assert f'"{mode}"' in script
 

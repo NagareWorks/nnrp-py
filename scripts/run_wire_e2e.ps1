@@ -164,6 +164,9 @@ $summaries = @()
 foreach ($mode in $modes) {
   $modeDirectory = Join-Path $artifactRoot $mode
   $certificateDirectory = Join-Path $modeDirectory "certs"
+  if (Test-Path -LiteralPath $modeDirectory) {
+    Remove-Item -LiteralPath $modeDirectory -Recurse -Force
+  }
   New-Item -ItemType Directory -Force -Path $modeDirectory | Out-Null
   New-WireCertificate -Directory $certificateDirectory
 

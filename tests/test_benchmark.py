@@ -1,6 +1,9 @@
 import ctypes
 import json
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 from pathlib import Path
+from threading import Event
 from types import SimpleNamespace
 
 import pytest
@@ -483,15 +486,111 @@ def test_build_benchmark_results_report_can_override_implementation_name() -> No
     assert report["implementation_name"] == "custom-runner"
 
 
+def test_open_native_role_loopback_yields_roles_and_coordinates_close(monkeypatch: pytest.MonkeyPatch) -> None:
+    client_session = object()
+    server_session = object()
+    calls: list[tuple[object, ...]] = []
+
+    class Server:
+        def accept(self, options: object) -> object:
+            calls.append(("accept", options))
+            return server_session
+
+    class Client:
+        def open_session(self, options: object) -> object:
+            calls.append(("open-session", options))
+            return client_session
+
+    server = Server()
+    client = Client()
+
+    @contextmanager
+    def listen(*args: object, **kwargs: object):
+        calls.append(("listen", args, kwargs))
+        yield server
+
+    @contextmanager
+    def connect(*args: object, **kwargs: object):
+        calls.append(("connect", args, kwargs))
+        yield client
+
+    def close_sessions(client_value: object, server_value: object, _executor: ThreadPoolExecutor) -> None:
+        calls.append(("close", client_value, server_value))
+
+    monkeypatch.setattr(benchmark, "_native_role_loopback_endpoint", lambda _transport: "npipe://benchmark")
+    monkeypatch.setattr(benchmark, "listen_native_server", listen)
+    monkeypatch.setattr(benchmark, "connect_native_client_connection", connect)
+    monkeypatch.setattr(benchmark, "_close_native_role_sessions", close_sessions)
+
+    with benchmark._open_native_role_loopback() as roles:
+        assert roles == (client, client_session, server_session)
+
+    assert calls[-1] == ("close", client_session, server_session)
+
+
+def test_close_native_role_sessions_completes_session_close_handshake() -> None:
+    close_started = Event()
+    close_acknowledged = Event()
+    calls: list[str] = []
+
+    class ClientSession:
+        def close(self) -> None:
+            calls.append("client-close-start")
+            close_started.set()
+            assert close_acknowledged.wait(timeout=1)
+            calls.append("client-close-complete")
+
+    class ServerSession:
+        def poll_events(self, *, max_events: int, timeout_ms: int):
+            assert max_events == 8
+            assert timeout_ms == 5_000
+            assert close_started.wait(timeout=1)
+            calls.append("server-receive-close")
+            return (SimpleNamespace(kind=benchmark.EVENT_KIND_SESSION_CLOSED),)
+
+        def close(self) -> None:
+            calls.append("server-close")
+            close_acknowledged.set()
+
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        benchmark._close_native_role_sessions(ClientSession(), ServerSession(), executor)
+
+    assert calls == [
+        "client-close-start",
+        "server-receive-close",
+        "server-close",
+        "client-close-complete",
+    ]
+
+
+def test_close_native_role_sessions_rejects_missing_close_event() -> None:
+    server_closed = Event()
+
+    def close_client() -> None:
+        assert server_closed.wait(timeout=1)
+
+    client_session = SimpleNamespace(close=close_client)
+    server_session = SimpleNamespace(
+        poll_events=lambda **_kwargs: (),
+        close=server_closed.set,
+    )
+
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        with pytest.raises(RuntimeError, match="did not receive SESSION_CLOSE"):
+            benchmark._close_native_role_sessions(client_session, server_session, executor)
+
+    assert server_closed.is_set()
+
+
 def test_benchmark_environment_records_release_candidate_identity(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("NNRP_BENCHMARK_SDK_COMMIT", "0123456789abcdef")
-    monkeypatch.setenv("NNRP_BENCHMARK_RUST_ARTIFACT_VERSION", "1.0.0-preview.4.7")
+    monkeypatch.setenv("NNRP_BENCHMARK_RUST_ARTIFACT_VERSION", "1.0.0-preview.4.8")
     monkeypatch.setenv("NNRP_BENCHMARK_CANDIDATE_WHEEL", "nnrp_py-1.0.0rc4.post5-py3-none-linux.whl")
 
     environment = benchmark._build_environment()
 
     assert environment["sdk_commit"] == "0123456789abcdef"
-    assert environment["nnrp_rs_artifact"] == "1.0.0-preview.4.7"
+    assert environment["nnrp_rs_artifact"] == "1.0.0-preview.4.8"
     assert environment["notes"].startswith(
         "candidate_wheel=nnrp_py-1.0.0rc4.post5-py3-none-linux.whl; sdk_version="
     )

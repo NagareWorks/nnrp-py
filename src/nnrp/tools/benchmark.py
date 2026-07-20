@@ -50,6 +50,7 @@ from nnrp.core.packet import (
     unpack_tile_index_block,
 )
 from nnrp.native import (
+    EVENT_KIND_SESSION_CLOSED,
     NativeArtifactError,
     NativeWouldBlockError,
     load_native_schema_codec,
@@ -459,10 +460,26 @@ def _open_native_role_loopback(transport: str = "ipc") -> Any:
                         )
                     )
                     server_session = accepted.result(timeout=10)
-                    yield client, client_session, server_session
+                    try:
+                        yield client, client_session, server_session
+                    finally:
+                        _close_native_role_sessions(client_session, server_session, executor)
     finally:
         if socket_path is not None:
             socket_path.unlink(missing_ok=True)
+
+
+def _close_native_role_sessions(client_session: Any, server_session: Any, executor: ThreadPoolExecutor) -> None:
+    client_close = executor.submit(client_session.close)
+    try:
+        close_events = server_session.poll_events(max_events=8, timeout_ms=5_000)
+        if not any(event.kind == EVENT_KIND_SESSION_CLOSED for event in close_events):
+            raise RuntimeError("native role loopback server did not receive SESSION_CLOSE")
+    finally:
+        try:
+            server_session.close()
+        finally:
+            client_close.result(timeout=10)
 
 
 def _run_native_event_polling(scenario_id: str, workload: dict[str, Any]) -> dict[str, Any]:

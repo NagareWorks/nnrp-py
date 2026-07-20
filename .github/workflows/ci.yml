@@ -307,6 +307,10 @@ jobs:
             --capability control.degrade_profile
             --capability control.budget_update
           )
+          tls_security=(
+            --transport-security '{"transport":"quic","server_name":"localhost","trusted_certificate_der_path":"certs/server.der","certificate_der_path":"certs/server.der","private_key_pkcs8_der_path":"certs/server-key.der"}'
+            --transport-security '{"transport":"websocket","server_name":"localhost","trusted_certificate_der_path":"certs/server.der","certificate_der_path":"certs/server.der","private_key_pkcs8_der_path":"certs/server-key.der"}'
+          )
 
           for mode in suite_as_client suite_as_server suite_as_proxy; do
             target="artifacts/wire-conformance/target-${mode}.json"
@@ -319,6 +323,7 @@ jobs:
               --target-name "nnrp-py-ci-${mode}" \
               --mode "$mode" \
               "${transports[@]}" \
+              "${tls_security[@]}" \
               "${capabilities[@]}" \
               --output "$target"
 

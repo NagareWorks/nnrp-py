@@ -38,8 +38,11 @@ def _write_staging_wheel(path: Path) -> Path:
             json.dumps({"transport_scope": "tcp", "transport_slots": ["tcp"]}).encode(),
         )
         archive.writestr("nnrp/native_artifacts/windows-x86_64/tcp/nnrp_ffi.dll", b"windows-tcp")
-        archive.writestr("nnrp/native_artifacts/ios-arm64-sim/manifest.json", b"{}")
-        archive.writestr("nnrp/native_artifacts/ios-arm64-sim/libnnrp_ffi.a", b"ios-sim")
+        archive.writestr(
+            "nnrp/native_artifacts/ios-arm64-sim/tcp/manifest.json",
+            json.dumps({"transport_scope": "tcp", "transport_slots": ["tcp"]}).encode(),
+        )
+        archive.writestr("nnrp/native_artifacts/ios-arm64-sim/tcp/libnnrp_ffi.a", b"ios-sim")
         archive.writestr(
             "nnrp_py-1.0.0rc4.post5.dist-info/WHEEL",
             b"Wheel-Version: 1.0\nGenerator: test\nRoot-Is-Purelib: true\nTag: py3-none-any\n",
@@ -59,9 +62,13 @@ def test_build_native_wheels_splits_artifacts_and_retags_platforms(tmp_path: Pat
         "nnrp_py-1.0.0rc4.post5-py3-none-manylinux_2_28_x86_64.whl",
         "nnrp_py-1.0.0rc4.post5-py3-none-win_amd64.whl",
     ]
+    with zipfile.ZipFile(built[0]) as archive:
+        ios_names = set(archive.namelist())
     with zipfile.ZipFile(built[1]) as archive:
         names = set(archive.namelist())
         metadata = archive.read("nnrp_py-1.0.0rc4.post5.dist-info/WHEEL").decode()
+    assert "nnrp/native_artifacts/ios-arm64-sim/tcp/libnnrp_ffi.a" in ios_names
+    assert "nnrp/native_artifacts/ios-arm64-sim/libnnrp_ffi.a" not in ios_names
     assert "nnrp/native_artifacts/linux-x86_64/tcp/libnnrp_ffi.so" in names
     assert "nnrp/native_artifacts/linux-x86_64/quic/libnnrp_ffi.so" in names
     assert "nnrp/native_artifacts/windows-x86_64/tcp/nnrp_ffi.dll" not in names

@@ -397,6 +397,47 @@ def test_target_transport_parsing_rejects_invalid_documents(tmp_path: Path, targ
         wire_target._target_transports(target, target_path=tmp_path / "target.json")
 
 
+def test_target_transport_parsing_reports_missing_security_material(tmp_path: Path) -> None:
+    target = {
+        "wire_conformance": {
+            "transports": [
+                {
+                    "name": "quic",
+                    "endpoint": "127.0.0.1:19092",
+                    "security": {
+                        "server_name": "localhost",
+                        "trusted_certificate_der_path": "missing-trust.der",
+                        "certificate_der_path": "missing-certificate.der",
+                        "private_key_pkcs8_der_path": "missing-key.der",
+                    },
+                }
+            ]
+        }
+    }
+
+    with pytest.raises(
+        ValueError,
+        match=r"wire target quic certificate_der_path was not found: .*missing-certificate\.der",
+    ):
+        wire_target._target_transports(target, target_path=tmp_path / "target.json")
+
+
+def test_security_material_reader_reports_unreadable_path(tmp_path: Path) -> None:
+    unreadable = tmp_path / "certificate.der"
+    unreadable.mkdir()
+
+    with pytest.raises(
+        ValueError,
+        match=r"wire target websocket certificate_der_path could not be read: .*certificate\.der",
+    ):
+        wire_target._read_security_material(
+            tmp_path,
+            {"certificate_der_path": unreadable.name},
+            "certificate_der_path",
+            transport="websocket",
+        )
+
+
 def test_json_and_required_string_helpers(tmp_path: Path) -> None:
     path = tmp_path / "document.json"
     path.write_text(json.dumps({"field": "value"}), encoding="utf-8")

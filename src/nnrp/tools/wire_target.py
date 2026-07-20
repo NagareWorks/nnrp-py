@@ -409,9 +409,19 @@ def _target_transports(
             if not isinstance(security, Mapping):
                 raise ValueError(f"wire target {name} security must be an object")
             base = target_path.parent
-            certificate = (base / _required_string(security, "certificate_der_path")).read_bytes()
-            private_key = (base / _required_string(security, "private_key_pkcs8_der_path")).read_bytes()
-            trust = (base / _required_string(security, "trusted_certificate_der_path")).read_bytes()
+            certificate = _read_security_material(base, security, "certificate_der_path", transport=name)
+            private_key = _read_security_material(
+                base,
+                security,
+                "private_key_pkcs8_der_path",
+                transport=name,
+            )
+            trust = _read_security_material(
+                base,
+                security,
+                "trusted_certificate_der_path",
+                transport=name,
+            )
             server_security = NativeTransportServerSecurity(certificate, private_key)
             client_security = NativeTransportClientSecurity(_required_string(security, "server_name"), trust)
         transports[name] = LiveWireTransport(
@@ -421,6 +431,22 @@ def _target_transports(
             client_security=client_security,
         )
     return transports
+
+
+def _read_security_material(
+    base: Path,
+    security: Mapping[str, Any],
+    field: str,
+    *,
+    transport: str,
+) -> bytes:
+    path = base / _required_string(security, field)
+    try:
+        return path.read_bytes()
+    except FileNotFoundError as error:
+        raise ValueError(f"wire target {transport} {field} was not found: {path}") from error
+    except OSError as error:
+        raise ValueError(f"wire target {transport} {field} could not be read: {path}") from error
 
 
 def _provider_endpoint(transport: str, endpoint: str) -> str:

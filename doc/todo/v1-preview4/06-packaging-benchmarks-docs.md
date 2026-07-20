@@ -8,11 +8,11 @@
   - [x] QUIC.
   - [x] IPC.
   - [x] WebSocket.
-- [x] Include cffi API fast path where supported.
-- [x] Keep ctypes diagnostic execution available for environments without the cffi API fast path.
+- [x] Bind production ABI 3 role entrypoints directly through ctypes without a generated CFFI sidecar.
+- [x] Keep client/server hot paths coarse at submit, event-batch, result, and runtime-frame boundaries.
 - [x] Reject universal wheels for native preview4 releases.
 - [x] Verify wheel contents per platform.
-- [x] Require Rust ABI `1.12.1` in the release workflow.
+- [x] Require Rust ABI `3.0.0` in the release workflow.
 
 ## Benchmarks
 
@@ -22,7 +22,8 @@
 - [x] Add runtime object declare/ref/release benchmark.
 - [x] Add IPC loopback benchmark.
 - [x] Add WebSocket loopback benchmark.
-- [x] Compare cffi API and ctypes on the same plan.
+- [x] Measure real IPC carrier adoption and bidirectional client/server role execution on the production ABI.
+- [x] Count actual client and server FFI entrypoint calls per completed operation.
 - [x] Compare preview4 native hot paths against preview3 baselines.
 
 ## Documentation

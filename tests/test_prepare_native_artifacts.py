@@ -25,7 +25,7 @@ def _write_package(
     os_name: str,
     arch: str,
     library: str,
-    transport_scope: str = "all",
+    transport_scope: str = "tcp",
 ) -> Path:
     package_dir = root / name
     package_dir.mkdir(parents=True)
@@ -33,16 +33,14 @@ def _write_package(
     (package_dir / "manifest.json").write_text(
         json.dumps(
             {
-                "package": "nnrp-ffi",
+                "package": f"nnrp-ffi-transport-{transport_scope}",
                 "os": os_name,
                 "arch": arch,
                 "library_kind": "dynamic",
                 "library": library,
                 "libraries": [library],
                 "transport_scope": transport_scope,
-                "transport_slots": (
-                    [transport_scope] if transport_scope != "all" else ["tcp", "quic", "ipc", "websocket"]
-                ),
+                "transport_slots": [transport_scope],
             }
         ),
         encoding="utf-8",
@@ -126,7 +124,7 @@ def test_prepare_native_artifacts_normalizes_ios_simulator_arch(tmp_path: Path) 
 
     prepare_native_artifacts([package_dir], output)
 
-    assert output.joinpath("ios-arm64-sim", "libnnrp_ffi.a").read_bytes() == b"native"
+    assert output.joinpath("ios-arm64-sim", "tcp", "libnnrp_ffi.a").read_bytes() == b"native"
 
 
 def test_prepare_native_artifacts_installs_release_zip_packages(tmp_path: Path) -> None:
@@ -145,14 +143,21 @@ def test_prepare_native_artifacts_installs_release_zip_packages(tmp_path: Path) 
     output = tmp_path / "out"
     prepare_native_artifacts([archive_path], output)
 
-    assert output.joinpath("windows-x86_64", "nnrp_ffi.dll").read_bytes() == b"native"
+    assert output.joinpath("windows-x86_64", "tcp", "nnrp_ffi.dll").read_bytes() == b"native"
 
 
 def test_prepare_native_artifacts_rejects_missing_manifest_library(tmp_path: Path) -> None:
     package_dir = tmp_path / "bad"
     package_dir.mkdir()
     (package_dir / "manifest.json").write_text(
-        json.dumps({"os": "linux", "arch": "x86_64", "library": "libnnrp_ffi.so"}),
+        json.dumps(
+            {
+                "os": "linux",
+                "arch": "x86_64",
+                "library": "libnnrp_ffi.so",
+                "transport_scope": "tcp",
+            }
+        ),
         encoding="utf-8",
     )
 
@@ -170,7 +175,30 @@ def test_prepare_native_artifacts_clean_removes_previous_output(tmp_path: Path) 
     prepare_native_artifacts([package_dir], output, clean=True)
 
     assert not stale.exists()
-    assert output.joinpath("macos-x86_64", "libnnrp_ffi.dylib").is_file()
+    assert output.joinpath("macos-x86_64", "tcp", "libnnrp_ffi.dylib").is_file()
+
+
+@pytest.mark.parametrize("transport_scope", [None, "all"])
+def test_prepare_native_artifacts_rejects_missing_or_aggregate_transport_scope(
+    tmp_path: Path,
+    transport_scope: str | None,
+) -> None:
+    package_dir = tmp_path / "legacy"
+    package_dir.mkdir()
+    manifest = {
+        "package": "nnrp-ffi",
+        "os": "linux",
+        "arch": "x86_64",
+        "library": "libnnrp_ffi.so",
+        "libraries": ["libnnrp_ffi.so"],
+    }
+    if transport_scope is not None:
+        manifest["transport_scope"] = transport_scope
+    (package_dir / "libnnrp_ffi.so").write_bytes(b"native")
+    (package_dir / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="transport[_ ]scope"):
+        prepare_native_artifacts([package_dir], tmp_path / "out")
 
 
 def test_prepare_native_artifacts_rejects_invalid_inputs(tmp_path: Path) -> None:
@@ -200,7 +228,14 @@ def test_prepare_native_artifacts_rejects_invalid_manifest_shapes(tmp_path: Path
         prepare_native_artifacts([package_dir], tmp_path / "out")
 
     (package_dir / "manifest.json").write_text(
-        json.dumps({"os": "linux", "arch": "x86_64", "library": "not-nnrp.so"}),
+        json.dumps(
+            {
+                "os": "linux",
+                "arch": "x86_64",
+                "library": "not-nnrp.so",
+                "transport_scope": "tcp",
+            }
+        ),
         encoding="utf-8",
     )
     with pytest.raises(ValueError, match="supported nnrp-ffi"):
@@ -220,4 +255,4 @@ def test_prepare_native_artifacts_cli_prints_installed_paths(
 
     captured = capsys.readouterr()
     assert "android-arm" in captured.out
-    assert output.joinpath("android-arm", "libnnrp_ffi.so").is_file()
+    assert output.joinpath("android-arm", "tcp", "libnnrp_ffi.so").is_file()

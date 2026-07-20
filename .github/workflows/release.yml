@@ -13,7 +13,7 @@ on:
       rust_native_version:
         description: nnrp-rs native artifact version to embed in wheels
         required: true
-        default: 1.0.0-preview.4.4
+        default: 1.0.0-preview.4.6
       create_tag:
         description: Create and push the resolved release tag before publishing
         required: true
@@ -30,7 +30,7 @@ on:
         type: boolean
         default: false
       python_version:
-        description: Python version used to build abi3 cffi API wheel extensions
+        description: Python version used for release tooling and validation
         required: false
         default: '3.11'
 
@@ -38,132 +38,7 @@ permissions:
   contents: write
 
 jobs:
-  build-cffi-api:
-    name: Build cffi API (${{ matrix.name }})
-    runs-on: ${{ matrix.os }}
-    env:
-      NNRP_PY_RELEASE_PYTHON_VERSION: ${{ github.event_name == 'workflow_dispatch' && inputs.python_version || vars.NNRP_PY_RELEASE_PYTHON_VERSION || '3.11' }}
-      CIBW_ARCHS: ${{ matrix.cibw_archs }}
-      CIBW_PLATFORM: ${{ matrix.cibw_platform }}
-      CIBW_BUILD_FRONTEND: build
-      CIBW_BUILD_OVERRIDE: ${{ matrix.cibw_build }}
-      CIBW_SKIP: "pp* *musllinux*"
-      CIBW_TEST_SKIP: "*"
-      CIBW_MANYLINUX_I686_IMAGE: quay.io/pypa/manylinux_2_28_i686
-      CIBW_MANYLINUX_X86_64_IMAGE: quay.io/pypa/manylinux_2_28_x86_64
-      CIBW_MANYLINUX_AARCH64_IMAGE: quay.io/pypa/manylinux_2_28_aarch64
-      CIBW_MANYLINUX_ARMV7L_IMAGE: quay.io/pypa/manylinux_2_31_armv7l
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - name: linux-x86
-            os: ubuntu-latest
-            cibw_platform: linux
-            cibw_archs: x86_64 i686
-            optional: false
-          - name: linux-arm
-            os: ubuntu-latest
-            cibw_platform: linux
-            cibw_archs: aarch64 armv7l
-            optional: false
-          - name: windows
-            os: windows-latest
-            cibw_platform: windows
-            cibw_archs: AMD64 x86 ARM64
-            optional: false
-          - name: macos
-            os: macos-14
-            cibw_platform: macos
-            cibw_archs: x86_64 arm64
-            optional: false
-          - name: android
-            os: ubuntu-latest
-            cibw_platform: android
-            cibw_build: cp313-*
-            cibw_archs: x86_64 arm64_v8a
-            optional: true
-          - name: ios
-            os: macos-14
-            cibw_platform: ios
-            cibw_build: cp313-*
-            cibw_archs: arm64_iphoneos arm64_iphonesimulator x86_64_iphonesimulator
-            optional: true
-
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v5
-        with:
-          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.ref || github.ref }}
-
-      - name: Setup Python
-        uses: actions/setup-python@v6
-        with:
-          python-version: ${{ env.NNRP_PY_RELEASE_PYTHON_VERSION }}
-
-      - name: Install build dependencies
-        shell: bash
-        run: |
-          set -euo pipefail
-          python -m pip install --upgrade pip
-          python -m pip install -e ".[dev]" cibuildwheel
-
-      - name: Resolve version
-        id: version
-        shell: bash
-        run: python scripts/resolve_version.py show --github-output --run-number ""
-
-      - name: Write cffi API build project
-        shell: bash
-        run: |
-          set -euo pipefail
-          abi3_tag="cp${NNRP_PY_RELEASE_PYTHON_VERSION//./}"
-          python scripts/write_cffi_api_build_project.py \
-            --output artifacts/cffi-api-build \
-            --package-version "${{ steps.version.outputs.package_version }}" \
-            --abi3-python-tag "$abi3_tag"
-
-      - name: Setup Linux ARM emulation
-        if: matrix.name == 'linux-arm'
-        uses: docker/setup-qemu-action@v3
-        with:
-          platforms: arm64,arm
-
-      - name: Build cffi API wheels
-        id: build_cffi
-        continue-on-error: ${{ matrix.optional }}
-        timeout-minutes: 30
-        shell: bash
-        run: |
-          set -euo pipefail
-          if [ -n "${CIBW_BUILD_OVERRIDE}" ]; then
-            export CIBW_BUILD="${CIBW_BUILD_OVERRIDE}"
-          else
-            export CIBW_BUILD="cp${NNRP_PY_RELEASE_PYTHON_VERSION//./}-*"
-          fi
-          python -m cibuildwheel artifacts/cffi-api-build --output-dir artifacts/cffi-api-wheels
-
-      - name: Extract cffi API extensions
-        if: steps.build_cffi.outcome == 'success'
-        id: extract_cffi
-        shell: bash
-        run: >
-          python scripts/extract_cffi_api_wheels.py
-          --wheel-dir artifacts/cffi-api-wheels
-          --output artifacts/cffi-api
-          --clean
-
-      - name: Upload cffi API extensions
-        if: steps.extract_cffi.outcome == 'success'
-        uses: actions/upload-artifact@v6
-        with:
-          name: nnrp-py-cffi-api-${{ matrix.name }}
-          path: artifacts/cffi-api/**
-          if-no-files-found: error
-          retention-days: 14
-
   package:
-    needs: build-cffi-api
     runs-on: ubuntu-latest
     environment:
       name: release
@@ -173,7 +48,7 @@ jobs:
     env:
       PYPI_PUBLISH_MODE: ${{ vars.PYPI_PUBLISH_MODE || 'disabled' }}
       PYPI_API_TOKEN: ${{ secrets.PYPI_API_TOKEN }}
-      NNRP_RS_NATIVE_VERSION: ${{ github.event_name == 'workflow_dispatch' && inputs.rust_native_version || vars.NNRP_RS_NATIVE_VERSION || '1.0.0-preview.4.4' }}
+      NNRP_RS_NATIVE_VERSION: ${{ github.event_name == 'workflow_dispatch' && inputs.rust_native_version || vars.NNRP_RS_NATIVE_VERSION || '1.0.0-preview.4.6' }}
       NNRP_PY_RELEASE_PYTHON_VERSION: ${{ github.event_name == 'workflow_dispatch' && inputs.python_version || vars.NNRP_PY_RELEASE_PYTHON_VERSION || '3.11' }}
 
     steps:
@@ -282,26 +157,6 @@ jobs:
           --transport ipc
           --transport websocket
 
-      - name: Download cffi API fast-path modules
-        uses: actions/download-artifact@v7
-        with:
-          pattern: nnrp-py-cffi-api-*
-          path: artifacts/cffi-api
-          merge-multiple: true
-
-      - name: Run native runtime benchmark smoke thresholds
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          mkdir -p artifacts/benchmark
-          python -m nnrp.tools.benchmark \
-            --plan doc/benchmarks/native-runtime-benchmark-plan.json \
-            --output artifacts/benchmark/native-runtime-benchmark-results.json
-          python scripts/check_benchmark_thresholds.py \
-            --results artifacts/benchmark/native-runtime-benchmark-results.json \
-            --thresholds doc/benchmarks/native-runtime-smoke-thresholds.json
-
       - name: Build source distribution without native payloads
         shell: bash
         run: |
@@ -322,11 +177,7 @@ jobs:
 
           python scripts/build_native_wheels.py \
             --wheel artifacts/staged-wheel/*.whl \
-            --dist dist \
-            --cffi-dir artifacts/cffi-api \
-            --require-cffi-api \
-            --publish-cffi-api-artifacts-only \
-            --abi3-python-tag "$NNRP_PY_RELEASE_PYTHON_VERSION"
+            --dist dist
 
       - name: Verify packaged native artifacts
         run: >
@@ -336,11 +187,33 @@ jobs:
           --reject-universal-native
           --require-single-platform
           --verify-platform-tag
-          --require-cffi-api
-          --require-compiled-cffi-api
           --require-split-transports
           --require-preview4-native-artifacts
-          --require-abi-version 1.12.1
+          --require-abi-version 3.0.0
+
+      - name: Run native runtime benchmark smoke thresholds
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          candidate_wheel="$(find dist -maxdepth 1 -type f -name '*-manylinux_2_28_x86_64.whl' -print -quit)"
+          if [ -z "$candidate_wheel" ]; then
+            echo "The release did not build a Linux x86_64 candidate wheel for benchmark validation."
+            exit 1
+          fi
+
+          python -m pip install --force-reinstall --no-deps "$candidate_wheel"
+          export NNRP_BENCHMARK_CANDIDATE_WHEEL="$(basename "$candidate_wheel")"
+          export NNRP_BENCHMARK_RUST_ARTIFACT_VERSION="$NNRP_RS_NATIVE_VERSION"
+          export NNRP_BENCHMARK_SDK_COMMIT="$GITHUB_SHA"
+
+          mkdir -p artifacts/benchmark
+          python -m nnrp.tools.benchmark \
+            --plan doc/benchmarks/native-runtime-benchmark-plan.json \
+            --output artifacts/benchmark/native-runtime-benchmark-results.json
+          python scripts/check_benchmark_thresholds.py \
+            --results artifacts/benchmark/native-runtime-benchmark-results.json \
+            --thresholds doc/benchmarks/native-runtime-smoke-thresholds.json
 
       - name: Upload workflow artifacts
         uses: actions/upload-artifact@v6

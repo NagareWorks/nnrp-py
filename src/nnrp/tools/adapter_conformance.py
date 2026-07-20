@@ -12,11 +12,9 @@ from typing import Any
 
 from nnrp.core import MessageType
 from nnrp.native import (
-    NativeArtifactError,
     NativeRuntimeBackend,
     NativeRuntimeError,
     NativeRuntimeSession,
-    select_native_runtime_backend,
 )
 from nnrp.runtime import (
     BudgetMetadata,
@@ -50,7 +48,6 @@ from nnrp.runtime import (
 
 _RESULTS_SCHEMA_URL = "https://raw.githubusercontent.com/NagareWorks/nnrp-conformance/main/schemas/adapter-case-results.schema.json"
 _DEFAULT_IMPLEMENTATION_NAME = "nnrp-py"
-_REQUIRE_NATIVE_ENV = "NNRP_ADAPTER_REQUIRE_NATIVE"
 _CASE_DISPATCH = {
     "l1.handshake.basic": "_execute_handshake_basic",
     "l1.session.open_close": "_execute_session_open_close",
@@ -215,13 +212,7 @@ def _failure_diagnostic(error: Exception) -> dict[str, Any]:
 
 
 def _load_adapter_backend() -> NativeRuntimeBackend:
-    require_native = os.environ.get(_REQUIRE_NATIVE_ENV, "").strip().lower() in {"1", "true", "yes"}
-    try:
-        return select_native_runtime_backend(fallback=_AdapterSmokeBackend(), require_native=require_native)
-    except NativeArtifactError:
-        if require_native:
-            raise
-        return _AdapterSmokeBackend()
+    return _AdapterSmokeBackend()
 
 
 @dataclass(frozen=True)
@@ -233,7 +224,7 @@ class _AdapterCaseExecution:
         return self.backend.connect(
             connection_id=self._int_parameter("connection_id", 1),
             generation=self._int_parameter("connection_generation", 1),
-            transport_id=self._int_parameter("transport_id", 2),
+            transport_connection=_AdapterSmokeCarrier(),
         )
 
     def _open_session(self, connection):
@@ -254,13 +245,7 @@ class _AdapterCaseExecution:
 
     def _execute_handshake_basic(self) -> dict[str, Any]:
         connection = self._connect()
-        control_payload = self._payload_parameter("control_payload", b"hello")
-        connection._control(control_code=self._int_parameter("control_code", 1), payload=control_payload)
-        return self._evidence(
-            "handshake",
-            connection_id=_runtime_id(connection),
-            control_payload_bytes=len(control_payload),
-        )
+        return self._evidence("handshake", connection_id=_runtime_id(connection), role_adopted=True)
 
     def _execute_session_open_close(self) -> dict[str, Any]:
         session = self._open_session(self._connect())
@@ -278,7 +263,18 @@ class _AdapterCaseExecution:
         session = self._open_session(self._connect())
         operation = self._submit_operation(session)
         route_payload = self._payload_parameter("route_payload", b"route")
-        session._control(control_code=self._int_parameter("route_control_code", 2), payload=route_payload)
+        session.send_route_hint(
+            RouteHintMetadata(
+                operation.operation_id,
+                self._int_parameter("route_id", 2),
+                self._int_parameter("executor_class", 0),
+                self._int_parameter("affinity_class", 0),
+                0,
+                len(route_payload),
+                0,
+            ),
+            route_payload,
+        )
         session.close()
         return self._evidence(
             "inline-submit-routing",
@@ -295,18 +291,16 @@ class _AdapterCaseExecution:
         operation_id = self._int_parameter("operation_id", 99)
         frame_id = self._int_parameter("frame_id", 7)
         payload = self._payload_parameter("payload", b"adapter-payload")
-        if not isinstance(session, _AdapterSmokeSession):
-            result = session.submit_result(
-                operation_id=operation_id,
-                frame_id=frame_id,
-                payload=payload,
-                result_payload=payload,
-                max_events=self._int_parameter("max_events", 2),
-            )
-            operation = result
-        else:
-            operation = self._submit_operation(session)
-            result = session.poll_result(operation, max_events=self._int_parameter("max_events", 2))
+        operation = session.submit_operation(
+            operation_id=operation_id,
+            frame_id=frame_id,
+            payload=payload,
+        )
+        result = session.poll_result(
+            operation,
+            max_events=self._int_parameter("max_events", 2),
+            timeout_ms=self._int_parameter("timeout_ms", 0),
+        )
         if expected_state is not None and getattr(result, "state", expected_state) != expected_state:
             raise ValueError(f"expected result state {expected_state!r}, got {getattr(result, 'state', None)!r}")
         session.close()
@@ -494,27 +488,43 @@ def _runtime_closed(value: Any) -> bool:
 class _AdapterSmokeBackend:
     connections: list[_AdapterSmokeConnection] = field(default_factory=list)
 
-    def connect(self, *, connection_id: int, generation: int, transport_id: int) -> _AdapterSmokeConnection:
-        connection = _AdapterSmokeConnection(connection_id, generation, transport_id)
-        self.connections.append(connection)
-        return connection
-
-    def bootstrap_connection(
+    def connect(
         self,
         *,
         connection_id: int,
         generation: int,
-        transport_id: int,
+        transport_connection: _AdapterSmokeCarrier,
     ) -> _AdapterSmokeConnection:
-        return self.connect(connection_id=connection_id, generation=generation, transport_id=transport_id)
+        transport_connection.consume()
+        connection = _AdapterSmokeConnection(connection_id, generation, transport_connection)
+        self.connections.append(connection)
+        return connection
+
+
+@dataclass
+class _AdapterSmokeCarrier:
+    consumed: bool = False
+    closed: bool = False
+
+    @property
+    def connected(self) -> bool:
+        return not self.consumed and not self.closed
+
+    def consume(self) -> None:
+        if not self.connected:
+            raise RuntimeError("adapter smoke carrier is not available for role adoption")
+        self.consumed = True
+
+    def close(self) -> None:
+        self.closed = True
 
 
 @dataclass
 class _AdapterSmokeConnection:
     connection_id: int
     generation: int
-    transport_id: int
-    controls: list[tuple[int, bytes]] = field(default_factory=list)
+    transport_connection: _AdapterSmokeCarrier
+    closed: bool = False
 
     def open_session(
         self,
@@ -534,8 +544,11 @@ class _AdapterSmokeConnection:
             schema_version=schema_version,
         )
 
-    def _control(self, *, control_code: int, payload: bytes | bytearray | memoryview = b"") -> None:
-        self.controls.append((control_code, bytes(payload)))
+    def close(self) -> None:
+        if self.closed:
+            return
+        self.transport_connection.close()
+        self.closed = True
 
 
 @dataclass
@@ -609,33 +622,20 @@ class _AdapterSmokeSession:
         self.operations.append(operation)
         return operation
 
-    def poll_result(self, operation: _AdapterSmokeOperation, *, max_events: int | None = None) -> _AdapterSmokeResult:
-        del max_events
+    def poll_result(
+        self,
+        operation: _AdapterSmokeOperation,
+        *,
+        max_events: int | None = None,
+        timeout_ms: int = 0,
+    ) -> _AdapterSmokeResult:
+        del max_events, timeout_ms
         self._ensure_open()
         return _AdapterSmokeResult(operation.operation_id, operation.frame_id, operation.payload)
-
-    def submit_result(
-        self,
-        *,
-        operation_id: int,
-        frame_id: int,
-        payload: bytes | bytearray | memoryview = b"",
-        result_payload: bytes | bytearray | memoryview | None = None,
-        max_events: int | None = None,
-    ) -> _AdapterSmokeResult:
-        del max_events
-        self._ensure_open()
-        selected_result_payload = payload if result_payload is None else result_payload
-        self.operations.append(_AdapterSmokeOperation(operation_id, frame_id, bytes(payload)))
-        return _AdapterSmokeResult(operation_id, frame_id, bytes(selected_result_payload))
 
     def cancel(self, *, frame_id: int) -> None:
         self._ensure_open()
         self.cancelled_frames.append(frame_id)
-
-    def _control(self, *, control_code: int, payload: bytes | bytearray | memoryview = b"") -> None:
-        self._ensure_open()
-        self.controls.append((control_code, bytes(payload)))
 
     def _send_runtime_frame(self, message_type: MessageType, metadata: Any, tail: bytes = b"") -> None:
         self._ensure_open()

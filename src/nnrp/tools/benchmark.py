@@ -4,25 +4,29 @@ from __future__ import annotations
 
 import argparse
 import gc
-import importlib.util
+import importlib.metadata
 import json
 import os
 import platform
+import socket
 import statistics
 import sys
+import tempfile
 import time
 import tracemalloc
 from collections.abc import Callable, Sequence
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
+from nnrp.client.native import NativeClientSessionOpenOptions, connect_native_client_connection
 from nnrp.core.enums import HeaderFlags, MessageType, WireFormat
 from nnrp.core.header import HEADER_LENGTH, NnrpHeader
 from nnrp.core.messages.control import (
     ClientHelloMetadata,
-    ResultHintMetadata,
     ServerHelloAckMetadata,
-    TransportProbeAckMetadata,
 )
 from nnrp.core.messages.data import InputProfile, TensorDType, TensorLayout, TileIndexMode
 from nnrp.core.packet import (
@@ -30,23 +34,16 @@ from nnrp.core.packet import (
     TensorSectionData,
     build_frame_submit_packet,
     build_result_push_packet,
-    build_transport_probe_ack_packet,
-    build_transport_probe_packet,
     pack_tensor_section_data,
     pack_tile_index_block,
     unpack_tensor_body,
     unpack_tile_index_block,
 )
 from nnrp.native import (
-    FFI_STATUS_WOULD_BLOCK,
     NativeArtifactError,
-    NativeStatus,
     NativeWouldBlockError,
-    default_artifact_root,
-    load_native_client,
     load_native_schema_codec,
     probe_native_artifact,
-    resolve_native_artifact,
 )
 from nnrp.runtime import (
     CacheMissMetadata,
@@ -83,19 +80,20 @@ from nnrp.schema import (
     unpack_typed_payload_descriptor,
     validate_typed_payload_binding,
 )
+from nnrp.server import NativeServerAcceptOptions, listen_native_server
 
 _RESULTS_SCHEMA_URL = (
     "https://raw.githubusercontent.com/NagareWorks/nnrp-conformance/main/schemas/benchmark-results.schema.json"
 )
 _DEFAULT_IMPLEMENTATION_NAME = "nnrp-py"
 _DEFAULT_SKIP_MESSAGE = "This benchmark scenario is not implemented in the current Python baseline runner."
-_NATIVE_SUBMIT_RESULT_ENTRYPOINTS = (
-    "client_submit_result_compact",
-    "client_submit_result",
+_NATIVE_ROLE_ENTRYPOINTS = (
     "client_submit",
-    "client_complete_operation",
-    "client_await_event",
     "client_await_events",
+    "client_cancel",
+    "server_await_events",
+    "server_send_result",
+    "runtime_frame_send",
 )
 
 
@@ -378,28 +376,81 @@ def _run_native_schema_descriptor_roundtrip(scenario_id: str, workload: dict[str
     return _measured_latency_result(scenario_id, samples)
 
 
+def _native_role_loopback_endpoint(transport: str) -> str:
+    if transport == "websocket":
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as reserved:
+            reserved.bind(("127.0.0.1", 0))
+            port = reserved.getsockname()[1]
+        return f"ws://127.0.0.1:{port}/nnrp"
+    if transport != "ipc":
+        raise NativeArtifactError(f"native role benchmark does not define a loopback endpoint for {transport}")
+    suffix = uuid4().hex
+    if os.name == "nt":
+        return f"npipe://nnrp-py-benchmark-{suffix}"
+    socket_path = Path(tempfile.gettempdir()) / f"nnrp-py-benchmark-{suffix}.sock"
+    return f"unix://{socket_path.as_posix()}"
+
+
+@contextmanager
+def _open_native_role_loopback(transport: str = "ipc") -> Any:
+    provider_endpoint = _native_role_loopback_endpoint(transport)
+    socket_path = Path(provider_endpoint.removeprefix("unix://")) if provider_endpoint.startswith("unix://") else None
+    if socket_path is not None:
+        socket_path.unlink(missing_ok=True)
+    try:
+        with listen_native_server(
+            "nnrp://benchmark.local",
+            provider_endpoint=provider_endpoint,
+            transport=transport,
+            require_native=True,
+        ) as server:
+            with ThreadPoolExecutor(max_workers=1, thread_name_prefix="nnrp-benchmark-accept") as executor:
+                accepted = executor.submit(
+                    server.accept,
+                    NativeServerAcceptOptions(
+                        session_handle_id=3,
+                        session_generation=1,
+                        timeout_ms=5_000,
+                    ),
+                )
+                with connect_native_client_connection(
+                    "nnrp://benchmark.local",
+                    provider_endpoint=provider_endpoint,
+                    transport=transport,
+                    require_native=True,
+                ) as client:
+                    client_session = client.open_session(
+                        NativeClientSessionOpenOptions(
+                            requested_session_id=3,
+                            session_generation=1,
+                        )
+                    )
+                    server_session = accepted.result(timeout=10)
+                    yield client, client_session, server_session
+    finally:
+        if socket_path is not None:
+            socket_path.unlink(missing_ok=True)
+
+
 def _run_native_event_polling(scenario_id: str, workload: dict[str, Any]) -> dict[str, Any]:
     iterations = _positive_int(workload.get("iterations"), default=100_000)
     warmup_iterations = _non_negative_int(workload.get("warmup_iterations"), default=min(10_000, iterations))
     max_events = _positive_int(workload.get("max_events"), default=8)
     try:
-        connection = load_native_client().bootstrap_connection(
-            connection_id=1,
-            generation=1,
-            transport_id=2,
-        )
+        with _open_native_role_loopback() as (client, _client_session, _server_session):
+            connection = client.connection
+            _drain_native_setup_events(connection)
+
+            def operation() -> None:
+                connection.poll_events_batch(max_events=max_events)
+
+            for _ in range(warmup_iterations):
+                operation()
+
+            samples = _measure_microseconds(operation, iterations)
+            return _measured_latency_result(scenario_id, samples)
     except NativeArtifactError as error:
-        return _skip_result(scenario_id, f"native client unavailable: {error}")
-
-    def operation() -> None:
-        connection.poll_events_batch(max_events=max_events)
-
-    for _ in range(warmup_iterations):
-        operation()
-
-    samples = _measure_microseconds(operation, iterations)
-    connection.close()
-    return _measured_latency_result(scenario_id, samples)
+        return _skip_result(scenario_id, f"native IPC role loopback unavailable: {error}")
 
 
 def _run_native_batch_event_polling_throughput(scenario_id: str, workload: dict[str, Any]) -> dict[str, Any]:
@@ -408,75 +459,66 @@ def _run_native_batch_event_polling_throughput(scenario_id: str, workload: dict[
     max_events = _positive_int(workload.get("max_events"), default=8)
     profile = _bool(workload.get("profile"), default=False)
     try:
-        connection = load_native_client().bootstrap_connection(
-            connection_id=1,
-            generation=1,
-            transport_id=2,
-        )
+        with _open_native_role_loopback() as (client, _client_session, _server_session):
+            connection = client.connection
+            _drain_native_setup_events(connection)
+
+            def operation() -> None:
+                connection.poll_events_batch(max_events=max_events)
+
+            for _ in range(warmup_iterations):
+                operation()
+
+            metrics = _measure_throughput_metrics(operation, duration_seconds, profile=profile)
+            return _measured_throughput_result(scenario_id, metrics)
     except NativeArtifactError as error:
-        return _skip_result(scenario_id, f"native client unavailable: {error}")
-
-    def operation() -> None:
-        connection.poll_events_batch(max_events=max_events)
-
-    try:
-        for _ in range(warmup_iterations):
-            operation()
-
-        metrics = _measure_throughput_metrics(operation, duration_seconds, profile=profile)
-        return _measured_throughput_result(scenario_id, metrics)
-    finally:
-        connection.close()
+        return _skip_result(scenario_id, f"native IPC role loopback unavailable: {error}")
 
 
-def _run_native_submit_result_loop(scenario_id: str, workload: dict[str, Any]) -> dict[str, Any]:
+def _run_native_role_submit_result_loop(scenario_id: str, workload: dict[str, Any]) -> dict[str, Any]:
     duration_seconds = _positive_float(workload.get("duration_seconds"), default=10.0)
     warmup_iterations = _non_negative_int(workload.get("warmup_iterations"), default=1_000)
     payload_bytes = _positive_int(workload.get("payload_bytes"), default=1024)
     profile = _bool(workload.get("profile"), default=False)
-    try:
-        connection = load_native_client().connect(
-            connection_id=1,
-            generation=1,
-            transport_id=2,
-        )
-    except NativeArtifactError as error:
-        return _skip_result(scenario_id, f"native client unavailable: {error}")
-
-    session = connection.open_session(
-        requested_session_id=1,
-        generation=1,
-        profile_id=0,
-        schema_id=0,
-        schema_version=0,
-    )
-    _drain_native_setup_events(connection)
     payload = b"x" * payload_bytes
     counter = 0
-
-    def operation() -> None:
-        nonlocal counter
-        counter += 1
-        session.submit_result(
-            operation_id=counter,
-            frame_id=counter,
-            payload=payload,
-            result_payload=payload,
-            max_events=2,
-        )
-
     try:
-        for _ in range(warmup_iterations):
-            operation()
+        with _open_native_role_loopback() as (client, session, server_session):
+            _drain_native_setup_events(client.connection)
+            counters = _install_native_role_counters(session, server_session)
 
-        metrics = _measure_throughput_metrics(operation, duration_seconds, profile=profile, include_completed=True)
-        _add_native_submit_result_call_metrics(metrics, int(metrics["completed_operations"]))
-        metrics["native_binding_mode"] = _native_binding_mode(session)
-        return _measured_throughput_result(scenario_id, metrics)
-    except NativeWouldBlockError as error:
-        return _skip_result(scenario_id, f"native submit/result loop unavailable: {error}")
-    finally:
-        connection.close()
+            def operation() -> None:
+                nonlocal counter
+                counter += 1
+                submitted = session.submit_operation(
+                    operation_id=counter,
+                    frame_id=counter,
+                    payload=payload,
+                )
+                received = server_session.receive_submit(timeout_ms=5_000)
+                if received.frame_id != counter:
+                    raise RuntimeError("native role loopback received the wrong frame")
+                received.send_result(payload)
+                result = session.poll_result(submitted, max_events=4, timeout_ms=5_000)
+                if result.frame_id != counter or result.payload != payload:
+                    raise RuntimeError("native role loopback returned the wrong result")
+
+            try:
+                for _ in range(warmup_iterations):
+                    operation()
+                _reset_native_role_counters(counters)
+                metrics = _measure_throughput_metrics(
+                    operation,
+                    duration_seconds,
+                    profile=profile,
+                    include_completed=True,
+                )
+                _add_native_role_counter_metrics(counters, metrics, int(metrics["completed_operations"]))
+                return _measured_throughput_result(scenario_id, metrics)
+            finally:
+                _restore_native_role_counters(counters)
+    except NativeArtifactError as error:
+        return _skip_result(scenario_id, f"native IPC role loopback unavailable: {error}")
 
 
 def _run_native_submit_cancel_loop(scenario_id: str, workload: dict[str, Any]) -> dict[str, Any]:
@@ -484,48 +526,39 @@ def _run_native_submit_cancel_loop(scenario_id: str, workload: dict[str, Any]) -
     warmup_iterations = _non_negative_int(workload.get("warmup_iterations"), default=1_000)
     payload_bytes = _positive_int(workload.get("payload_bytes"), default=1024)
     profile = _bool(workload.get("profile"), default=False)
-    try:
-        connection = load_native_client().connect(
-            connection_id=1,
-            generation=1,
-            transport_id=2,
-        )
-    except NativeArtifactError as error:
-        return _skip_result(scenario_id, f"native client unavailable: {error}")
-
-    session = connection.open_session(
-        requested_session_id=1,
-        generation=1,
-        profile_id=0,
-        schema_id=0,
-        schema_version=0,
-    )
-    _drain_native_setup_events(connection)
     payload = b"x" * payload_bytes
     counter = 0
-
-    def operation() -> None:
-        nonlocal counter
-        counter += 1
-        submitted = session.submit_operation(
-            operation_id=counter,
-            frame_id=counter,
-            payload=payload,
-        )
-        submitted.cancel()
-
     try:
-        for _ in range(warmup_iterations):
-            operation()
+        with _open_native_role_loopback() as (client, session, server_session):
+            _drain_native_setup_events(client.connection)
+            counters = _install_native_role_counters(session, server_session)
 
-        metrics = _measure_throughput_metrics(operation, duration_seconds, profile=profile, include_completed=True)
-        _add_native_submit_cancel_call_metrics(metrics, int(metrics["completed_operations"]))
-        metrics["native_binding_mode"] = _native_binding_mode(session)
-        return _measured_throughput_result(scenario_id, metrics)
-    except NativeWouldBlockError as error:
-        return _skip_result(scenario_id, f"native submit/cancel loop unavailable: {error}")
-    finally:
-        connection.close()
+            def operation() -> None:
+                nonlocal counter
+                counter += 1
+                submitted = session.submit_operation(operation_id=counter, frame_id=counter, payload=payload)
+                received = server_session.receive_submit(timeout_ms=5_000)
+                if received.frame_id != counter:
+                    raise RuntimeError("native role loopback received the wrong frame")
+                submitted.cancel()
+                server_session.poll_events(max_events=2, timeout_ms=5_000)
+
+            try:
+                for _ in range(warmup_iterations):
+                    operation()
+                _reset_native_role_counters(counters)
+                metrics = _measure_throughput_metrics(
+                    operation,
+                    duration_seconds,
+                    profile=profile,
+                    include_completed=True,
+                )
+                _add_native_role_counter_metrics(counters, metrics, int(metrics["completed_operations"]))
+                return _measured_throughput_result(scenario_id, metrics)
+            finally:
+                _restore_native_role_counters(counters)
+    except NativeArtifactError as error:
+        return _skip_result(scenario_id, f"native IPC role loopback unavailable: {error}")
 
 
 def _run_native_progress_partial_polling_loop(scenario_id: str, workload: dict[str, Any]) -> dict[str, Any]:
@@ -534,216 +567,82 @@ def _run_native_progress_partial_polling_loop(scenario_id: str, workload: dict[s
     payload_bytes = _positive_int(workload.get("payload_bytes"), default=1024)
     max_events = _positive_int(workload.get("max_events"), default=2)
     profile = _bool(workload.get("profile"), default=False)
+    payload = b"x" * payload_bytes
+    counter = 0
     try:
-        connection = load_native_client().connect(
-            connection_id=1,
-            generation=1,
-            transport_id=2,
-        )
+        with _open_native_role_loopback() as (client, session, server_session):
+            _drain_native_setup_events(client.connection)
+            counters = _install_native_role_counters(session, server_session)
+
+            def operation() -> None:
+                nonlocal counter
+                counter += 1
+                submitted = session.submit_operation(operation_id=counter, frame_id=counter, payload=payload)
+                received = server_session.receive_submit(timeout_ms=5_000)
+                server_session.send_progress(
+                    ProgressMetadata(counter, 1, 1, 5_000, payload_bytes, payload_bytes * 2),
+                    b"progress",
+                )
+                server_session.send_partial_result(
+                    PartialResultMetadata(counter, 2, payload_bytes, 1, payload_bytes, 0),
+                    payload,
+                )
+                events = client.connection.poll_events_batch(max_events=max_events)
+                message_types = {event.message_type for event in events}
+                if (
+                    int(MessageType.PROGRESS) not in message_types
+                    or int(MessageType.PARTIAL_RESULT) not in message_types
+                ):
+                    raise RuntimeError("native role loopback did not deliver progress and partial-result events")
+                received.send_result(payload)
+                result = session.poll_result(submitted, max_events=max_events, timeout_ms=5_000)
+                if result.payload != payload:
+                    raise RuntimeError("native role loopback returned the wrong terminal result")
+
+            try:
+                for _ in range(warmup_iterations):
+                    operation()
+                _reset_native_role_counters(counters)
+                metrics = _measure_throughput_metrics(
+                    operation,
+                    duration_seconds,
+                    profile=profile,
+                    include_completed=True,
+                )
+                _add_native_role_counter_metrics(counters, metrics, int(metrics["completed_operations"]))
+                return _measured_throughput_result(scenario_id, metrics)
+            finally:
+                _restore_native_role_counters(counters)
     except NativeArtifactError as error:
-        return _skip_result(scenario_id, f"native client unavailable: {error}")
-
-    session = connection.open_session(
-        requested_session_id=1,
-        generation=1,
-        profile_id=0,
-        schema_id=0,
-        schema_version=0,
-    )
-    _drain_native_setup_events(connection)
-    payload = b"x" * payload_bytes
-    result_hint = ResultHintMetadata(retry_after_ms=1).pack()
-    counter = 0
-
-    def operation() -> None:
-        nonlocal counter
-        counter += 1
-        submitted = session.submit_operation(
-            operation_id=counter,
-            frame_id=counter,
-            payload=payload,
-        )
-        session.send_result_hint(result_hint)
-        hints = connection.poll_result_hints(max_events=max_events)
-        if not hints:
-            raise NativeWouldBlockError(
-                NativeStatus(FFI_STATUS_WOULD_BLOCK),
-                "native progress/partial polling loop result hint was not available",
-            )
-        if submitted.operation_id != counter:
-            raise RuntimeError("native progress/partial polling loop operation mismatch")
-
-    try:
-        for _ in range(warmup_iterations):
-            operation()
-
-        metrics = _measure_throughput_metrics(operation, duration_seconds, profile=profile, include_completed=True)
-        _add_native_progress_partial_call_metrics(metrics, int(metrics["completed_operations"]))
-        metrics["native_binding_mode"] = _native_binding_mode(session)
-        return _measured_throughput_result(scenario_id, metrics)
-    except NativeWouldBlockError as error:
-        return _skip_result(scenario_id, f"native progress/partial polling loop unavailable: {error}")
-    finally:
-        connection.close()
+        return _skip_result(scenario_id, f"native IPC role loopback unavailable: {error}")
 
 
-def _run_native_submit_result_cffi_api_loop(scenario_id: str, workload: dict[str, Any]) -> dict[str, Any]:
-    duration_seconds = _positive_float(workload.get("duration_seconds"), default=10.0)
-    warmup_iterations = _non_negative_int(workload.get("warmup_iterations"), default=1_000)
-    payload_bytes = _positive_int(workload.get("payload_bytes"), default=1024)
-    batch_size = _positive_int(workload.get("batch_size"), default=1024)
-    profile = _bool(workload.get("profile"), default=False)
-    try:
-        artifact_path = resolve_native_artifact(default_artifact_root())
-        ffi, cffi_api = _load_cffi_api_submit_result_module()
-        connection = load_native_client(artifact_path).connect(
-            connection_id=1,
-            generation=1,
-            transport_id=2,
-        )
-    except (ImportError, NativeArtifactError, OSError, RuntimeError, Exception) as error:
-        return _skip_result(scenario_id, f"native cffi api submit/result loop unavailable: {error}")
-
-    session = connection.open_session(
-        requested_session_id=1,
-        generation=1,
-        profile_id=0,
-        schema_id=0,
-        schema_version=0,
-    )
-    _drain_native_setup_events(connection)
-    native_session = session.handle.handle
-    payload = b"x" * payload_bytes
-    payload_view = ffi.from_buffer(payload)
-    artifact_path_bytes = os.fsencode(artifact_path)
-    out_result = ffi.new("NnrpPyCompactResult *")
-    out_completed = ffi.new("size_t *")
-    counter = 0
-    has_batch = hasattr(cffi_api, "nnrp_py_client_submit_result_compact_batch")
-
-    def single_operation() -> int:
-        nonlocal counter
-        counter += 1
-        status = cffi_api.nnrp_py_client_submit_result_compact(
-            artifact_path_bytes,
-            native_session.kind,
-            native_session.id,
-            native_session.generation,
-            native_session.flags,
-            counter,
-            counter,
-            payload_view,
-            payload_bytes,
-            out_result,
-        )
-        if status != 0 or out_result.status_code != 0 or not out_result.has_result:
-            raise RuntimeError(
-                f"cffi api submit/result failed: wrapper_status={status} "
-                f"ffi_status={out_result.status_code} has_result={int(out_result.has_result)}"
-            )
-        return 1
-
-    def batch_operation() -> int:
-        nonlocal counter
-        operation_id_start = counter + 1
-        status = cffi_api.nnrp_py_client_submit_result_compact_batch(
-            artifact_path_bytes,
-            native_session.kind,
-            native_session.id,
-            native_session.generation,
-            native_session.flags,
-            operation_id_start,
-            operation_id_start,
-            1,
-            payload_view,
-            payload_bytes,
-            2,
-            batch_size,
-            out_result,
-            out_completed,
-        )
-        completed = int(out_completed[0])
-        counter += completed
-        if status != 0 or out_result.status_code != 0 or completed != batch_size or not out_result.has_result:
-            raise RuntimeError(
-                f"cffi api submit/result batch failed: wrapper_status={status} "
-                f"ffi_status={out_result.status_code} completed={completed} has_result={int(out_result.has_result)}"
-            )
-        return completed
-
-    operation = batch_operation if has_batch else single_operation
-
-    try:
-        for _ in range(max(1, (warmup_iterations + batch_size - 1) // batch_size) if has_batch else warmup_iterations):
-            operation()
-
-        metrics = _measure_counted_throughput_metrics(operation, duration_seconds, profile=profile)
-        if has_batch:
-            metrics["native_ffi_calls_per_op"] = 1.0 / batch_size
-            metrics["native_ffi_client_submit_result_compact_batch_calls_per_op"] = 1.0 / batch_size
-            metrics["native_ffi_client_submit_result_compact_calls_per_op"] = 0.0
-            metrics["native_batch_size"] = batch_size
-        else:
-            metrics["native_ffi_calls_per_op"] = 1.0
-            metrics["native_ffi_client_submit_result_compact_calls_per_op"] = 1.0
-            metrics["native_ffi_client_submit_result_compact_batch_calls_per_op"] = 0.0
-        metrics["native_binding_mode"] = "cffi_api"
-        return _measured_throughput_result(scenario_id, metrics)
-    except RuntimeError as error:
-        return _skip_result(scenario_id, f"native cffi api submit/result loop unavailable: {error}")
-    finally:
-        connection.close()
-
-
-def _run_native_submit_result_allocation_smoke(scenario_id: str, workload: dict[str, Any]) -> dict[str, Any]:
+def _run_native_role_submit_result_allocation_smoke(scenario_id: str, workload: dict[str, Any]) -> dict[str, Any]:
     iterations = _positive_int(workload.get("iterations"), default=1_000)
     warmup_iterations = _non_negative_int(workload.get("warmup_iterations"), default=min(100, iterations))
     payload_bytes = _positive_int(workload.get("payload_bytes"), default=1024)
-    try:
-        connection = load_native_client().connect(
-            connection_id=1,
-            generation=1,
-            transport_id=2,
-        )
-    except NativeArtifactError as error:
-        return _skip_result(scenario_id, f"native client unavailable: {error}")
-
-    session = connection.open_session(
-        requested_session_id=1,
-        generation=1,
-        profile_id=0,
-        schema_id=0,
-        schema_version=0,
-    )
-    _drain_native_setup_events(connection)
     payload = b"x" * payload_bytes
     counter = 0
-
-    def operation() -> None:
-        nonlocal counter
-        counter += 1
-        session.submit_result(
-            operation_id=counter,
-            frame_id=counter,
-            payload=payload,
-            result_payload=payload,
-            max_events=2,
-        )
-
     try:
-        for _ in range(warmup_iterations):
-            operation()
+        with _open_native_role_loopback() as (_client, session, server_session):
 
-        metrics = _measure_allocation_smoke(operation, iterations)
-        return {
-            "id": scenario_id,
-            "outcome": "measured",
-            "metrics": metrics,
-        }
-    except NativeWouldBlockError as error:
-        return _skip_result(scenario_id, f"native submit/result allocation smoke unavailable: {error}")
-    finally:
-        connection.close()
+            def operation() -> None:
+                nonlocal counter
+                counter += 1
+                submitted = session.submit_operation(operation_id=counter, frame_id=counter, payload=payload)
+                received = server_session.receive_submit(timeout_ms=5_000)
+                received.send_result(payload)
+                session.poll_result(submitted, max_events=4, timeout_ms=5_000)
+
+            for _ in range(warmup_iterations):
+                operation()
+            return {
+                "id": scenario_id,
+                "outcome": "measured",
+                "metrics": _measure_allocation_smoke(operation, iterations),
+            }
+    except NativeArtifactError as error:
+        return _skip_result(scenario_id, f"native IPC role loopback unavailable: {error}")
 
 
 def _drain_native_setup_events(connection: Any) -> None:
@@ -778,7 +677,7 @@ class _NativeEntrypointCallCounter:
 
     @classmethod
     def try_install(cls, entrypoints: Any) -> _NativeEntrypointCallCounter:
-        counter = cls(entrypoints, _NATIVE_SUBMIT_RESULT_ENTRYPOINTS) if entrypoints is not None else cls(None, ())
+        counter = cls(entrypoints, _NATIVE_ROLE_ENTRYPOINTS) if entrypoints is not None else cls(None, ())
         counter.install()
         return counter
 
@@ -790,13 +689,16 @@ class _NativeEntrypointCallCounter:
         for name in self._counts:
             self._counts[name] = 0
 
-    def add_metrics(self, metrics: dict[str, float | int], completed_operations: int) -> None:
+    def add_metrics(self, metrics: dict[str, Any], completed_operations: int) -> None:
         if completed_operations <= 0 or not self._counts:
             return
         total_calls = sum(self._counts.values())
-        metrics["native_ffi_calls_per_op"] = total_calls / completed_operations
+        metrics["native_ffi_calls_per_op"] = float(metrics.get("native_ffi_calls_per_op", 0.0)) + (
+            total_calls / completed_operations
+        )
         for name, count in self._counts.items():
-            metrics[f"native_ffi_{name}_calls_per_op"] = count / completed_operations
+            metric_name = f"native_ffi_{name}_calls_per_op"
+            metrics[metric_name] = float(metrics.get(metric_name, 0.0)) + (count / completed_operations)
 
     def restore(self) -> None:
         for name, original in self._originals.items():
@@ -810,384 +712,35 @@ class _NativeEntrypointCallCounter:
         return counted
 
 
-def _add_native_submit_result_call_metrics(metrics: dict[str, float | int], completed_operations: int) -> None:
-    if completed_operations <= 0:
-        return
-    metrics["native_ffi_calls_per_op"] = 1.0
-    metrics["native_ffi_client_submit_result_compact_calls_per_op"] = 1.0
-    metrics["native_ffi_client_submit_result_calls_per_op"] = 0.0
-    metrics["native_ffi_client_submit_calls_per_op"] = 0.0
-    metrics["native_ffi_client_complete_operation_calls_per_op"] = 0.0
-    metrics["native_ffi_client_await_event_calls_per_op"] = 0.0
-    metrics["native_ffi_client_await_events_calls_per_op"] = 0.0
-    metrics.setdefault("native_binding_mode", "unknown")
+def _install_native_role_counters(*owners: Any) -> tuple[_NativeEntrypointCallCounter, ...]:
+    counters: list[_NativeEntrypointCallCounter] = []
+    seen_entrypoints: set[int] = set()
+    for owner in owners:
+        entrypoints = getattr(owner, "entrypoints", None)
+        if entrypoints is None or id(entrypoints) in seen_entrypoints:
+            continue
+        seen_entrypoints.add(id(entrypoints))
+        counters.append(_NativeEntrypointCallCounter.try_install(entrypoints))
+    return tuple(counters)
 
 
-def _add_native_submit_cancel_call_metrics(metrics: dict[str, float | int], completed_operations: int) -> None:
-    if completed_operations <= 0:
-        return
-    metrics["native_ffi_calls_per_op"] = 2.0
-    metrics["native_ffi_client_submit_calls_per_op"] = 1.0
-    metrics["native_ffi_client_cancel_calls_per_op"] = 1.0
-    metrics["native_ffi_client_submit_result_compact_calls_per_op"] = 0.0
-    metrics["native_ffi_client_submit_result_calls_per_op"] = 0.0
-    metrics["native_ffi_client_complete_operation_calls_per_op"] = 0.0
-    metrics["native_ffi_client_await_event_calls_per_op"] = 0.0
-    metrics["native_ffi_client_await_events_calls_per_op"] = 0.0
-    metrics.setdefault("native_binding_mode", "unknown")
+def _reset_native_role_counters(counters: Sequence[_NativeEntrypointCallCounter]) -> None:
+    for counter in counters:
+        counter.reset()
 
 
-def _add_native_progress_partial_call_metrics(metrics: dict[str, float | int], completed_operations: int) -> None:
-    if completed_operations <= 0:
-        return
-    metrics["native_ffi_calls_per_op"] = 3.0
-    metrics["native_ffi_client_submit_calls_per_op"] = 1.0
-    metrics["native_ffi_client_send_result_hint_calls_per_op"] = 1.0
-    metrics["native_ffi_client_await_event_calls_per_op"] = 0.0
-    metrics["native_ffi_client_await_events_calls_per_op"] = 1.0
-    metrics["native_ffi_client_submit_result_compact_calls_per_op"] = 0.0
-    metrics["native_ffi_client_submit_result_calls_per_op"] = 0.0
-    metrics["native_ffi_client_complete_operation_calls_per_op"] = 0.0
-    metrics["native_ffi_client_cancel_calls_per_op"] = 0.0
-    metrics.setdefault("native_binding_mode", "unknown")
+def _add_native_role_counter_metrics(
+    counters: Sequence[_NativeEntrypointCallCounter],
+    metrics: dict[str, Any],
+    completed_operations: int,
+) -> None:
+    for counter in counters:
+        counter.add_metrics(metrics, completed_operations)
 
 
-def _native_binding_mode(owner: Any) -> str:
-    entrypoints = getattr(owner, "entrypoints", None)
-    mode = getattr(entrypoints, "binding_mode", None)
-    return mode if isinstance(mode, str) and mode else "unknown"
-
-
-def _load_cffi_api_submit_result_module() -> tuple[Any, Any]:  # pragma: no cover
-    try:
-        from cffi import FFI
-    except ImportError as exc:
-        raise ImportError("cffi is not installed") from exc
-
-    module_name = "_nnrp_cffi_api_submit_result"
-    build_dir = Path("artifacts") / "cffi-api"
-    build_dir.mkdir(parents=True, exist_ok=True)
-    existing = next(build_dir.glob(f"{module_name}*.pyd"), None)
-    if existing is None:
-        existing = next(build_dir.glob(f"{module_name}*.so"), None)
-    if existing is None:
-        existing = _build_cffi_api_submit_result_module(FFI, module_name, build_dir)
-
-    module = _load_compiled_cffi_api_module(module_name, existing)
-    if not hasattr(module.lib, "nnrp_py_client_submit_result_compact_batch"):
-        existing.unlink(missing_ok=True)
-        existing = _build_cffi_api_submit_result_module(FFI, module_name, build_dir)
-        module = _load_compiled_cffi_api_module(module_name, existing)
-    return module.ffi, module.lib
-
-
-def _build_cffi_api_submit_result_module(ffi_factory: Callable[[], Any], module_name: str, build_dir: Path) -> Path:
-    builder = ffi_factory()
-    builder.cdef(
-        """
-        typedef struct NnrpPyCompactResult {
-            unsigned int status_code;
-            unsigned int error_family;
-            unsigned int protocol_error_code;
-            unsigned int detail_code;
-            unsigned char has_result;
-            unsigned int event_kind;
-            unsigned int result_state;
-            unsigned long long operation_id;
-            unsigned int frame_id;
-            size_t payload_len;
-        } NnrpPyCompactResult;
-
-        int nnrp_py_client_submit_result_compact(
-            const char *library_path,
-            unsigned int session_kind,
-            unsigned long long session_id,
-            unsigned int session_generation,
-            unsigned int session_flags,
-            unsigned long long operation_id,
-            unsigned int frame_id,
-            const unsigned char *payload,
-            size_t payload_len,
-            NnrpPyCompactResult *out_result
-        );
-
-        int nnrp_py_client_submit_result_compact_batch(
-            const char *library_path,
-            unsigned int session_kind,
-            unsigned long long session_id,
-            unsigned int session_generation,
-            unsigned int session_flags,
-            unsigned long long operation_id_start,
-            unsigned int frame_id_start,
-            unsigned int frame_id_stride,
-            const unsigned char *payload,
-            size_t payload_len,
-            size_t max_events,
-            size_t iterations,
-            NnrpPyCompactResult *out_result,
-            size_t *out_completed
-        );
-        """
-    )
-    builder.set_source(module_name, _CFFI_API_SUBMIT_RESULT_SOURCE)
-    return Path(builder.compile(tmpdir=str(build_dir), verbose=False))
-
-
-def _load_compiled_cffi_api_module(module_name: str, existing: Path) -> Any:
-    spec = importlib.util.spec_from_file_location(module_name, existing)
-    if spec is None or spec.loader is None:
-        raise RuntimeError(f"failed to load compiled cffi api module: {existing}")
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[module_name] = module
-    spec.loader.exec_module(module)
-    return module
-
-
-_CFFI_API_SUBMIT_RESULT_SOURCE = r"""
-#include <stdint.h>
-#include <stddef.h>
-#include <string.h>
-
-#ifdef _WIN32
-#include <windows.h>
-static void *nnrp_py_load_symbol(const char *library_path, const char *symbol_name) {
-    static HMODULE library = NULL;
-    if (library == NULL) {
-        library = LoadLibraryA(library_path);
-        if (library == NULL) {
-            return NULL;
-        }
-    }
-    return (void *)GetProcAddress(library, symbol_name);
-}
-#else
-#include <dlfcn.h>
-static void *nnrp_py_load_symbol(const char *library_path, const char *symbol_name) {
-    static void *library = NULL;
-    if (library == NULL) {
-        library = dlopen(library_path, RTLD_NOW | RTLD_LOCAL);
-        if (library == NULL) {
-            return NULL;
-        }
-    }
-    return dlsym(library, symbol_name);
-}
-#endif
-
-typedef struct NnrpFfiStatus {
-    uint32_t status_code;
-    uint32_t error_family;
-    uint32_t protocol_error_code;
-    uint32_t detail_code;
-} NnrpFfiStatus;
-
-typedef struct NnrpHandle {
-    uint32_t kind;
-    uint64_t id;
-    uint32_t generation;
-    uint32_t flags;
-} NnrpHandle;
-
-typedef struct NnrpBufferView {
-    const uint8_t *ptr;
-    size_t len;
-} NnrpBufferView;
-
-typedef struct NnrpFfiDiagnostic {
-    NnrpFfiStatus status;
-    uint64_t related_connection_id;
-    uint32_t related_session_id;
-    uint64_t related_operation_id;
-    uint32_t related_frame_id;
-} NnrpFfiDiagnostic;
-
-typedef struct NnrpClientSubmitResultRequest {
-    NnrpHandle session;
-    uint64_t operation_id;
-    uint32_t frame_id;
-    NnrpBufferView submit_payload;
-    NnrpBufferView result_payload;
-    size_t max_events;
-} NnrpClientSubmitResultRequest;
-
-typedef struct NnrpClientSubmitResultBatchRequest {
-    NnrpHandle session;
-    uint64_t operation_id_start;
-    uint32_t frame_id_start;
-    uint32_t frame_id_stride;
-    NnrpBufferView submit_payload;
-    NnrpBufferView result_payload;
-    size_t max_events;
-    size_t iterations;
-} NnrpClientSubmitResultBatchRequest;
-
-typedef struct NnrpCompactResult {
-    NnrpFfiStatus status;
-    uint8_t has_result;
-    uint32_t event_kind;
-    uint32_t result_state;
-    NnrpHandle operation;
-    uint64_t operation_id;
-    uint32_t frame_id;
-    NnrpBufferView payload;
-    NnrpFfiDiagnostic diagnostic;
-} NnrpCompactResult;
-
-typedef struct NnrpPyCompactResult {
-    unsigned int status_code;
-    unsigned int error_family;
-    unsigned int protocol_error_code;
-    unsigned int detail_code;
-    unsigned char has_result;
-    unsigned int event_kind;
-    unsigned int result_state;
-    unsigned long long operation_id;
-    unsigned int frame_id;
-    size_t payload_len;
-} NnrpPyCompactResult;
-
-typedef NnrpFfiStatus (*nnrp_client_submit_result_compact_fn)(
-    NnrpClientSubmitResultRequest request,
-    NnrpCompactResult *out_result
-);
-
-typedef NnrpFfiStatus (*nnrp_client_submit_result_compact_batch_fn)(
-    NnrpClientSubmitResultBatchRequest request,
-    NnrpCompactResult *out_last_result,
-    size_t *out_completed
-);
-
-int nnrp_py_client_submit_result_compact(
-    const char *library_path,
-    unsigned int session_kind,
-    unsigned long long session_id,
-    unsigned int session_generation,
-    unsigned int session_flags,
-    unsigned long long operation_id,
-    unsigned int frame_id,
-    const unsigned char *payload,
-    size_t payload_len,
-    NnrpPyCompactResult *out_result
-) {
-    if (library_path == NULL || out_result == NULL) {
-        return -1;
-    }
-    nnrp_client_submit_result_compact_fn submit_result =
-        (nnrp_client_submit_result_compact_fn)nnrp_py_load_symbol(library_path, "nnrp_client_submit_result_compact");
-    if (submit_result == NULL) {
-        return -2;
-    }
-
-    NnrpClientSubmitResultRequest request;
-    memset(&request, 0, sizeof(request));
-    request.session.kind = (uint32_t)session_kind;
-    request.session.id = (uint64_t)session_id;
-    request.session.generation = (uint32_t)session_generation;
-    request.session.flags = (uint32_t)session_flags;
-    request.operation_id = (uint64_t)operation_id;
-    request.frame_id = (uint32_t)frame_id;
-    request.submit_payload.ptr = payload;
-    request.submit_payload.len = payload_len;
-    request.result_payload.ptr = payload;
-    request.result_payload.len = payload_len;
-    request.max_events = 2;
-
-    NnrpCompactResult native_result;
-    memset(&native_result, 0, sizeof(native_result));
-    NnrpFfiStatus status = submit_result(request, &native_result);
-    out_result->status_code = status.status_code;
-    out_result->error_family = status.error_family;
-    out_result->protocol_error_code = status.protocol_error_code;
-    out_result->detail_code = status.detail_code;
-    if (status.status_code != 0) {
-        out_result->has_result = 0;
-        return 0;
-    }
-
-    out_result->status_code = native_result.status.status_code;
-    out_result->error_family = native_result.status.error_family;
-    out_result->protocol_error_code = native_result.status.protocol_error_code;
-    out_result->detail_code = native_result.status.detail_code;
-    out_result->has_result = native_result.has_result;
-    out_result->event_kind = native_result.event_kind;
-    out_result->result_state = native_result.result_state;
-    out_result->operation_id = native_result.operation_id;
-    out_result->frame_id = native_result.frame_id;
-    out_result->payload_len = native_result.payload.len;
-    return 0;
-}
-
-int nnrp_py_client_submit_result_compact_batch(
-    const char *library_path,
-    unsigned int session_kind,
-    unsigned long long session_id,
-    unsigned int session_generation,
-    unsigned int session_flags,
-    unsigned long long operation_id_start,
-    unsigned int frame_id_start,
-    unsigned int frame_id_stride,
-    const unsigned char *payload,
-    size_t payload_len,
-    size_t max_events,
-    size_t iterations,
-    NnrpPyCompactResult *out_result,
-    size_t *out_completed
-) {
-    if (library_path == NULL || out_result == NULL || out_completed == NULL) {
-        return -1;
-    }
-    nnrp_client_submit_result_compact_batch_fn submit_result_batch =
-        (nnrp_client_submit_result_compact_batch_fn)nnrp_py_load_symbol(
-            library_path,
-            "nnrp_client_submit_result_compact_batch"
-        );
-    if (submit_result_batch == NULL) {
-        return -2;
-    }
-
-    NnrpClientSubmitResultBatchRequest request;
-    memset(&request, 0, sizeof(request));
-    request.session.kind = (uint32_t)session_kind;
-    request.session.id = (uint64_t)session_id;
-    request.session.generation = (uint32_t)session_generation;
-    request.session.flags = (uint32_t)session_flags;
-    request.operation_id_start = (uint64_t)operation_id_start;
-    request.frame_id_start = (uint32_t)frame_id_start;
-    request.frame_id_stride = (uint32_t)frame_id_stride;
-    request.submit_payload.ptr = payload;
-    request.submit_payload.len = payload_len;
-    request.result_payload.ptr = payload;
-    request.result_payload.len = payload_len;
-    request.max_events = max_events;
-    request.iterations = iterations;
-
-    NnrpCompactResult native_result;
-    memset(&native_result, 0, sizeof(native_result));
-    size_t native_completed = 0;
-    NnrpFfiStatus status = submit_result_batch(request, &native_result, &native_completed);
-    *out_completed = native_completed;
-    out_result->status_code = status.status_code;
-    out_result->error_family = status.error_family;
-    out_result->protocol_error_code = status.protocol_error_code;
-    out_result->detail_code = status.detail_code;
-    if (status.status_code != 0) {
-        out_result->has_result = 0;
-        return 0;
-    }
-
-    out_result->status_code = native_result.status.status_code;
-    out_result->error_family = native_result.status.error_family;
-    out_result->protocol_error_code = native_result.status.protocol_error_code;
-    out_result->detail_code = native_result.status.detail_code;
-    out_result->has_result = native_result.has_result;
-    out_result->event_kind = native_result.event_kind;
-    out_result->result_state = native_result.result_state;
-    out_result->operation_id = native_result.operation_id;
-    out_result->frame_id = native_result.frame_id;
-    out_result->payload_len = native_result.payload.len;
-    return 0;
-}
-"""
+def _restore_native_role_counters(counters: Sequence[_NativeEntrypointCallCounter]) -> None:
+    for counter in reversed(counters):
+        counter.restore()
 
 
 def _run_native_artifact_probe(scenario_id: str, workload: dict[str, Any]) -> dict[str, Any]:
@@ -1329,31 +882,23 @@ def _run_native_object_metadata_copy_snapshot(scenario_id: str, workload: dict[s
     payload_bytes = _positive_int(workload.get("payload_bytes"), default=1024)
     payload = b"x" * payload_bytes
     try:
-        connection = load_native_client().connect(
-            connection_id=1,
-            generation=1,
-            transport_id=2,
-        )
+        with _open_native_role_loopback() as (client, _client_session, _server_session):
+            connection = client.connection
+
+            def operation() -> None:
+                buffer = connection.acquire_object_metadata_copy(payload)
+                try:
+                    snapshot = buffer.to_bytes()
+                    if snapshot != payload:
+                        raise RuntimeError("native object metadata copy benchmark snapshot mismatch")
+                finally:
+                    buffer.close()
+
+            for _ in range(warmup_iterations):
+                operation()
+            return _measured_latency_result(scenario_id, _measure_microseconds(operation, iterations))
     except NativeArtifactError as error:
-        return _skip_result(scenario_id, f"native client unavailable: {error}")
-
-    def operation() -> None:
-        buffer = connection.acquire_object_metadata_copy(payload)
-        try:
-            snapshot = buffer.to_bytes()
-            if snapshot != payload:
-                raise RuntimeError("native object metadata copy benchmark snapshot mismatch")
-        finally:
-            buffer.close()
-
-    try:
-        for _ in range(warmup_iterations):
-            operation()
-
-        samples = _measure_microseconds(operation, iterations)
-        return _measured_latency_result(scenario_id, samples)
-    finally:
-        connection.close()
+        return _skip_result(scenario_id, f"native IPC role loopback unavailable: {error}")
 
 
 def _run_native_object_metadata_borrowed_view(scenario_id: str, workload: dict[str, Any]) -> dict[str, Any]:
@@ -1362,36 +907,28 @@ def _run_native_object_metadata_borrowed_view(scenario_id: str, workload: dict[s
     payload_bytes = _positive_int(workload.get("payload_bytes"), default=1024)
     payload = b"x" * payload_bytes
     try:
-        connection = load_native_client().connect(
-            connection_id=1,
-            generation=1,
-            transport_id=2,
-        )
+        with _open_native_role_loopback() as (client, _client_session, _server_session):
+            connection = client.connection
+
+            def operation() -> None:
+                buffer = connection.acquire_object_metadata_copy(payload)
+                try:
+                    with buffer.borrow_view() as view:
+                        if view.nbytes != payload_bytes:
+                            raise RuntimeError("native object metadata borrow benchmark size mismatch")
+                        byte_view = view.cast("B")
+                        if payload_bytes > 0 and byte_view[0] != payload[0]:
+                            raise RuntimeError("native object metadata borrow benchmark payload mismatch")
+                        if not view.readonly:
+                            raise RuntimeError("native object metadata borrow benchmark expected readonly view")
+                finally:
+                    buffer.close()
+
+            for _ in range(warmup_iterations):
+                operation()
+            return _measured_latency_result(scenario_id, _measure_microseconds(operation, iterations))
     except NativeArtifactError as error:
-        return _skip_result(scenario_id, f"native client unavailable: {error}")
-
-    def operation() -> None:
-        buffer = connection.acquire_object_metadata_copy(payload)
-        try:
-            with buffer.borrow_view() as view:
-                if view.nbytes != payload_bytes:
-                    raise RuntimeError("native object metadata borrow benchmark size mismatch")
-                byte_view = view.cast("B")
-                if payload_bytes > 0 and byte_view[0] != payload[0]:
-                    raise RuntimeError("native object metadata borrow benchmark payload mismatch")
-                if not view.readonly:
-                    raise RuntimeError("native object metadata borrow benchmark expected readonly view")
-        finally:
-            buffer.close()
-
-    try:
-        for _ in range(warmup_iterations):
-            operation()
-
-        samples = _measure_microseconds(operation, iterations)
-        return _measured_latency_result(scenario_id, samples)
-    finally:
-        connection.close()
+        return _skip_result(scenario_id, f"native IPC role loopback unavailable: {error}")
 
 
 def _run_transport_loopback(scenario_id: str, workload: dict[str, Any]) -> dict[str, Any]:
@@ -1399,29 +936,46 @@ def _run_transport_loopback(scenario_id: str, workload: dict[str, Any]) -> dict[
     warmup_iterations = _non_negative_int(workload.get("warmup_iterations"), default=1_000)
     profile = _bool(workload.get("profile"), default=False)
     payload_bytes = _positive_int(workload.get("probe_payload_bytes"), default=32 * 1024)
-    probe = build_transport_probe_packet(
-        metadata=_transport_probe_metadata(probe_id=7, probe_payload_bytes=payload_bytes),
-        body=b"x" * payload_bytes,
-        trace_id=19,
-    ).pack()
-    ack = build_transport_probe_ack_packet(
-        metadata=TransportProbeAckMetadata(probe_id=7, reserved=0, server_recv_ts_us=123456),
-        trace_id=19,
-    ).pack()
+    transport = _require_string(workload, "transport")
+    payload = b"x" * payload_bytes
+    counter = 0
+    try:
+        with _open_native_role_loopback(transport) as (client, session, server_session):
+            _drain_native_setup_events(client.connection)
+            counters = _install_native_role_counters(session, server_session)
 
-    def operation() -> None:
-        decoded_probe = NnrpPacket.unpack(probe)
-        decoded_ack = NnrpPacket.unpack(ack)
-        if decoded_probe.header.msg_type is not MessageType.TRANSPORT_PROBE:
-            raise RuntimeError("transport benchmark decoded wrong probe type")
-        if decoded_ack.header.msg_type is not MessageType.TRANSPORT_PROBE_ACK:
-            raise RuntimeError("transport benchmark decoded wrong ack type")
+            def operation() -> None:
+                nonlocal counter
+                counter += 1
+                submitted = session.submit_operation(
+                    operation_id=counter,
+                    frame_id=counter,
+                    payload=payload,
+                )
+                received = server_session.receive_submit(timeout_ms=5_000)
+                if received.frame_id != counter:
+                    raise RuntimeError("native transport loopback received the wrong frame")
+                received.send_result(payload)
+                result = session.poll_result(submitted, max_events=4, timeout_ms=5_000)
+                if result.frame_id != counter or result.payload != payload:
+                    raise RuntimeError("native transport loopback returned the wrong result")
 
-    for _ in range(warmup_iterations):
-        operation()
-
-    metrics = _measure_throughput_metrics(operation, duration_seconds, profile=profile)
-    return _measured_throughput_result(scenario_id, metrics)
+            try:
+                for _ in range(warmup_iterations):
+                    operation()
+                _reset_native_role_counters(counters)
+                metrics = _measure_throughput_metrics(
+                    operation,
+                    duration_seconds,
+                    profile=profile,
+                    include_completed=True,
+                )
+                _add_native_role_counter_metrics(counters, metrics, int(metrics["completed_operations"]))
+                return _measured_throughput_result(scenario_id, metrics)
+            finally:
+                _restore_native_role_counters(counters)
+    except NativeArtifactError as error:
+        return _skip_result(scenario_id, f"native {transport} role loopback unavailable: {error}")
 
 
 def _build_submit_result_packets() -> tuple[bytes, bytes]:
@@ -1527,16 +1081,6 @@ def _build_server_ack_metadata() -> ServerHelloAckMetadata:
     )
 
 
-def _transport_probe_metadata(*, probe_id: int, probe_payload_bytes: int):
-    from nnrp.core.messages.control import TransportProbeMetadata
-
-    return TransportProbeMetadata(
-        probe_id=probe_id,
-        probe_payload_bytes=probe_payload_bytes,
-        client_send_ts_us=123000,
-    )
-
-
 def _measure_microseconds(operation: Callable[[], None], iterations: int) -> list[float]:
     samples: list[float] = []
     for _ in range(iterations):
@@ -1581,39 +1125,6 @@ def _measure_throughput_metrics(
     if include_completed:
         metrics["completed_operations"] = completed
     return metrics
-
-
-def _measure_counted_throughput_metrics(
-    operation: Callable[[], int],
-    duration_seconds: float,
-    *,
-    profile: bool,
-) -> dict[str, float | int]:
-    if profile:
-        gc.collect()
-        tracemalloc.start()
-        process_start = time.process_time()
-    deadline = time.perf_counter() + duration_seconds
-    completed = 0
-    try:
-        while time.perf_counter() < deadline:
-            completed += operation()
-        if not profile:
-            return {
-                "throughput_ops_per_sec": completed / duration_seconds,
-                "completed_operations": completed,
-            }
-        _, peak_bytes = tracemalloc.get_traced_memory()
-    finally:
-        if profile:
-            tracemalloc.stop()
-    process_seconds = time.process_time() - process_start
-    return {
-        "throughput_ops_per_sec": completed / duration_seconds,
-        "completed_operations": completed,
-        "cpu_percent": (process_seconds / duration_seconds) * 100,
-        "peak_memory_bytes": int(peak_bytes),
-    }
 
 
 def _measure_allocation_smoke(operation: Callable[[], None], iterations: int) -> dict[str, float]:
@@ -1676,11 +1187,19 @@ def _skip_result(scenario_id: str, message: str = _DEFAULT_SKIP_MESSAGE) -> dict
 
 
 def _build_environment() -> dict[str, str]:
+    candidate = os.environ.get("NNRP_BENCHMARK_CANDIDATE_WHEEL", "source-tree")
+    try:
+        sdk_version = importlib.metadata.version("nnrp-py")
+    except importlib.metadata.PackageNotFoundError:
+        sdk_version = "unknown"
     return {
+        "sdk_commit": os.environ.get("NNRP_BENCHMARK_SDK_COMMIT") or os.environ.get("GITHUB_SHA", "unknown"),
+        "nnrp_rs_artifact": os.environ.get("NNRP_BENCHMARK_RUST_ARTIFACT_VERSION", "unknown"),
         "host_runtime": platform.python_version(),
         "os": platform.system().lower() or "unknown",
         "arch": platform.machine().lower() or "unknown",
         "cpu": platform.processor() or platform.machine() or "unknown",
+        "notes": f"candidate_wheel={candidate}; sdk_version={sdk_version}",
     }
 
 
@@ -1745,11 +1264,10 @@ _SCENARIO_RUNNERS: dict[str, Callable[[str, dict[str, Any]], dict[str, Any]]] = 
     "native_event_polling": _run_native_event_polling,
     "native_batch_event_polling_throughput": _run_native_batch_event_polling_throughput,
     "native_artifact_probe": _run_native_artifact_probe,
-    "native_submit_result_loop": _run_native_submit_result_loop,
+    "native_role_submit_result_loop": _run_native_role_submit_result_loop,
     "native_submit_cancel_loop": _run_native_submit_cancel_loop,
     "native_progress_partial_polling_loop": _run_native_progress_partial_polling_loop,
-    "native_submit_result_cffi_api_loop": _run_native_submit_result_cffi_api_loop,
-    "native_submit_result_allocation_smoke": _run_native_submit_result_allocation_smoke,
+    "native_role_submit_result_allocation_smoke": _run_native_role_submit_result_allocation_smoke,
     "runtime_probe": _run_runtime_probe,
     "runtime_control_metadata_encode_decode": _run_runtime_control_metadata_encode_decode,
     "runtime_object_metadata_encode_decode": _run_runtime_object_metadata_encode_decode,

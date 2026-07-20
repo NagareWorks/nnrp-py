@@ -2,7 +2,7 @@
 
 ## Rust Artifact Baseline
 
-- [x] Pin Rust artifact `1.0.0-preview.4.4` and ABI `1.12.1` used by Python.
+- [x] Pin Rust artifact `1.0.0-preview.4.6` and ABI `3.0.x` used by Python.
 - [x] Probe preview4 protocol version before accepting native artifacts.
 - [x] Probe ABI version before enabling preview4 native paths.
 - [x] Probe transport slots.
@@ -60,6 +60,6 @@
 ## Internal Ownership
 
 - [x] Keep native loading in one internal backend module.
-- [x] Keep cffi API detection in the backend selector.
-- [x] Keep ctypes execution available only as an explicit development or diagnostic path when cffi API artifacts are unavailable.
-- [x] Keep diagnostic execution paths labeled as lower-performance non-default paths.
+- [x] Keep production carrier and role adoption in the ABI 3 `ctypes` backend.
+- [x] Remove the retired compact-result and CFFI side paths instead of preserving a preview3 compatibility route.
+- [x] Keep explicit fallback backends limited to tests and diagnostics; production host helpers adopt real Rust roles.

@@ -9,9 +9,10 @@ from pathlib import Path
 from types import TracebackType
 from typing import Any
 
-from nnrp.core import MessageType
+from nnrp.core import MessageType, TransportPolicy
 from nnrp.native import (
     FFI_STATUS_WOULD_BLOCK,
+    NativeArtifactError,
     NativeCreditUpdateCallback,
     NativePayloadFamilyCallback,
     NativePlatform,
@@ -23,8 +24,19 @@ from nnrp.native import (
     NativeRuntimeResult,
     NativeRuntimeSession,
     NativeStatus,
+    NativeTransportClientSecurity,
+    NativeTransportEndpoint,
+    NativeTransportProbeSample,
     NativeWouldBlockError,
+    NnrpEndpoint,
+    discover_native_transport_providers,
+    load_native_transport_binding,
+    parse_native_transport_endpoint,
+    parse_nnrp_endpoint,
+    resolve_native_transport_endpoint,
+    resolve_native_transport_provider,
     select_native_runtime_backend,
+    select_native_transport_provider,
 )
 from nnrp.runtime import (
     BudgetMetadata,
@@ -47,7 +59,6 @@ _MAX_CANCELLED_RESULT_SUPPRESSIONS_PER_SESSION = 4096
 class NativeClientSessionOptions:
     connection_id: int = 1
     connection_generation: int = 1
-    transport_id: int = 1
     requested_session_id: int = 1
     session_generation: int = 1
     profile_id: int = 0
@@ -59,7 +70,6 @@ class NativeClientSessionOptions:
 class NativeClientConnectionOptions:
     connection_id: int = 1
     connection_generation: int = 1
-    transport_id: int = 1
 
 
 @dataclass(frozen=True, slots=True)
@@ -124,11 +134,12 @@ class NativeClientConnection:
         operation: NativeRuntimeOperation,
         *,
         max_events: int | None = None,
+        timeout_ms: int = 0,
     ) -> NativeRuntimeResult:
         self._ensure_open()
         if self._is_cancelled_result(session, operation_id=operation.operation_id, frame_id=operation.frame_id):
             raise NativeWouldBlockError(NativeStatus(FFI_STATUS_WOULD_BLOCK))
-        result = session.poll_result(operation, max_events=max_events)
+        result = session.poll_result(operation, max_events=max_events, timeout_ms=timeout_ms)
         if self._is_cancelled_result(session, operation_id=result.operation_id, frame_id=result.frame_id):
             raise NativeWouldBlockError(NativeStatus(FFI_STATUS_WOULD_BLOCK))
         return result
@@ -217,20 +228,12 @@ class NativeClientConnection:
         operation_id: int,
         frame_id: int,
         payload: bytes | bytearray | memoryview = b"",
-        result_payload: bytes | bytearray | memoryview | None = None,
         parent_operation_id: int | None = None,
         operation_group_id: int | None = None,
         max_events: int | None = None,
+        timeout_ms: int = 0,
     ) -> NativeRuntimeResult:
         self._ensure_open()
-        if parent_operation_id is None and operation_group_id is None:
-            return session.submit_result(
-                operation_id=operation_id,
-                frame_id=frame_id,
-                payload=payload,
-                result_payload=result_payload,
-                max_events=max_events,
-            )
         operation = session.submit_operation(
             operation_id=operation_id,
             frame_id=frame_id,
@@ -238,7 +241,7 @@ class NativeClientConnection:
             parent_operation_id=parent_operation_id,
             operation_group_id=operation_group_id,
         )
-        return self.poll_result(session, operation, max_events=max_events)
+        return self.poll_result(session, operation, max_events=max_events, timeout_ms=timeout_ms)
 
     def cancel_operation(self, operation: NativeRuntimeOperation) -> None:
         self._ensure_open()
@@ -247,18 +250,6 @@ class NativeClientConnection:
         if session_id is not None:
             self._remember_cancelled_frame_by_handle(session_id, operation.frame_id)
             self._remember_cancelled_operation_by_handle(session_id, operation.operation_id)
-
-    def complete_operation(
-        self,
-        operation: NativeRuntimeOperation,
-        payload: bytes | bytearray | memoryview = b"",
-    ) -> None:
-        self._ensure_open()
-        operation.complete(payload)
-
-    def drop_operation(self, operation: NativeRuntimeOperation) -> None:
-        self._ensure_open()
-        operation.drop()
 
     def operation_scope(
         self,
@@ -273,18 +264,6 @@ class NativeClientConnection:
         self._ensure_open()
         session.cancel(frame_id=frame_id)
         self._remember_cancelled_frame(session, frame_id)
-
-    def send_flow_update(self, session: NativeRuntimeSession, *, frame_id: int) -> None:
-        self._ensure_open()
-        session.send_flow_update(frame_id=frame_id)
-
-    def send_result_hint(
-        self,
-        session: NativeRuntimeSession,
-        payload: bytes | bytearray | memoryview = b"",
-    ) -> None:
-        self._ensure_open()
-        session.send_result_hint(payload)
 
     def cancel_runtime_operation(
         self,
@@ -541,20 +520,11 @@ class NativeClientConnection:
     def close(self) -> None:
         if self._closed:
             return
-        if hasattr(self.connection, "close"):
-            try:
-                self.connection.close()
-            finally:
-                self._cancelled_frames.clear()
-                self._cancelled_operations.clear()
-        else:
-            try:
-                for session in reversed(self._sessions):
-                    if not getattr(session, "_closed", False):
-                        session.close()
-            finally:
-                self._cancelled_frames.clear()
-                self._cancelled_operations.clear()
+        try:
+            self.connection.close()
+        finally:
+            self._cancelled_frames.clear()
+            self._cancelled_operations.clear()
         self._sessions.clear()
         self._closed = True
 
@@ -741,32 +711,174 @@ def select_client_native_backend(
     )
 
 
+def _select_client_transport(
+    endpoint: NnrpEndpoint,
+    *,
+    provider_endpoint: NativeTransportEndpoint | None,
+    transport_policy: TransportPolicy | str | int,
+    transport: str | None,
+    security: NativeTransportClientSecurity | None,
+    artifact_path: Path | str | None,
+    root: Path | str | None,
+    native_platform: NativePlatform | None,
+    library: Any | None,
+) -> str:
+    if transport is not None:
+        provider = resolve_native_transport_provider(transport, root=root, native_platform=native_platform)
+        select_native_transport_provider(
+            transport_policy,
+            root=root,
+            native_platform=native_platform,
+            supported_transports=(provider.name,),
+        )
+        if provider_endpoint is not None and provider_endpoint.transport_name != provider.name:
+            raise NativeArtifactError(
+                f"{provider.name} provider cannot use {provider_endpoint.transport_name} carrier endpoint"
+            )
+        return provider.name
+
+    supported = (
+        {provider_endpoint.transport_name}
+        if provider_endpoint is not None
+        else {"tcp", "quic"}
+    )
+    try:
+        return select_native_transport_provider(
+            transport_policy,
+            root=root,
+            native_platform=native_platform,
+            supported_transports=tuple(supported),
+        ).selected_transport_name
+    except NativeArtifactError as selection_error:
+        if not selection_error.candidates or not any(
+            candidate.rejection_reason is not None and candidate.rejection_reason.value == "probe-missing"
+            for candidate in selection_error.candidates
+        ):
+            raise
+
+    samples: list[NativeTransportProbeSample] = []
+    for provider in discover_native_transport_providers(root, native_platform):
+        if provider.name not in supported:
+            continue
+        carrier_endpoint = resolve_native_transport_endpoint(
+            endpoint,
+            provider.name,
+            provider_endpoint=provider_endpoint,
+        )
+        binding = load_native_transport_binding(
+            provider.name,
+            artifact_path=artifact_path,
+            root=root,
+            native_platform=native_platform,
+            library=library,
+        )
+        try:
+            metrics = binding._probe(carrier_endpoint, security, 3, 64, 0, 1_000)
+        except Exception:
+            samples.append(
+                NativeTransportProbeSample(
+                    provider_id=provider.metadata.id,
+                    transport_name=provider.name,
+                    elapsed_us=1,
+                    failed=True,
+                )
+            )
+            continue
+        successful_samples = max(1, int(metrics.success_count))
+        for _ in range(successful_samples):
+            samples.append(
+                NativeTransportProbeSample(
+                    provider_id=provider.metadata.id,
+                    transport_name=provider.name,
+                    elapsed_us=1_000_000,
+                    rtt_us=metrics.median_rtt_us,
+                    bytes_received=metrics.median_throughput_bytes_per_sec,
+                )
+            )
+        for _ in range(max(0, int(metrics.sample_count) - successful_samples)):
+            samples.append(
+                NativeTransportProbeSample(
+                    provider_id=provider.metadata.id,
+                    transport_name=provider.name,
+                    elapsed_us=1,
+                    failed=True,
+                )
+            )
+    return select_native_transport_provider(
+        transport_policy,
+        root=root,
+        native_platform=native_platform,
+        supported_transports=tuple(supported),
+        probe_samples=samples,
+    ).selected_transport_name
+
+
 @contextmanager
 def connect_native_client_connection(
-    artifact_path: Path | str | None = None,
+    endpoint: str | NnrpEndpoint,
     *,
+    provider_endpoint: str | NativeTransportEndpoint | None = None,
+    transport_policy: TransportPolicy | str | int = TransportPolicy.AUTO,
+    transport: str | None = None,
+    security: NativeTransportClientSecurity | None = None,
+    artifact_path: Path | str | None = None,
     root: Path | str | None = None,
     native_platform: NativePlatform | None = None,
     library: Any | None = None,
-    backend: NativeRuntimeBackend | None = None,
     fallback: NativeRuntimeBackend | None = None,
     require_native: bool = False,
     options: NativeClientConnectionOptions | None = None,
 ) -> Iterator[NativeClientConnection]:
+    application_endpoint = endpoint if isinstance(endpoint, NnrpEndpoint) else parse_nnrp_endpoint(endpoint)
+    carrier_override = (
+        provider_endpoint
+        if isinstance(provider_endpoint, NativeTransportEndpoint)
+        else parse_native_transport_endpoint(provider_endpoint)
+        if provider_endpoint is not None
+        else None
+    )
     resolved_options = options or NativeClientConnectionOptions()
-    resolved_backend = backend or select_client_native_backend(
-        artifact_path,
+    transport_name = _select_client_transport(
+        application_endpoint,
+        provider_endpoint=carrier_override,
+        transport_policy=transport_policy,
+        transport=transport,
+        security=security,
+        artifact_path=artifact_path,
         root=root,
         native_platform=native_platform,
         library=library,
-        fallback=fallback,
-        require_native=require_native,
     )
-    connection = resolved_backend.connect(
-        connection_id=resolved_options.connection_id,
-        generation=resolved_options.connection_generation,
-        transport_id=resolved_options.transport_id,
+    carrier_endpoint = resolve_native_transport_endpoint(
+        application_endpoint,
+        transport_name,
+        provider_endpoint=carrier_override,
     )
+    binding = load_native_transport_binding(
+        transport_name,
+        artifact_path=artifact_path,
+        root=root,
+        native_platform=native_platform,
+        library=library,
+    )
+    carrier = binding._connect(carrier_endpoint, security, 0, 0)
+    try:
+        connection = (
+            fallback.connect(
+                connection_id=resolved_options.connection_id,
+                generation=resolved_options.connection_generation,
+                transport_connection=carrier,
+            )
+            if fallback is not None and not require_native
+            else binding.adopt_client(
+                carrier,
+                connection_id=resolved_options.connection_id,
+                generation=resolved_options.connection_generation,
+            )
+        )
+    except BaseException:
+        carrier._close()
+        raise
     client_connection = NativeClientConnection(connection)
     try:
         yield client_connection
@@ -776,12 +888,16 @@ def connect_native_client_connection(
 
 @contextmanager
 def connect_native_client_session(
-    artifact_path: Path | str | None = None,
+    endpoint: str | NnrpEndpoint,
     *,
+    provider_endpoint: str | NativeTransportEndpoint | None = None,
+    transport_policy: TransportPolicy | str | int = TransportPolicy.AUTO,
+    transport: str | None = None,
+    security: NativeTransportClientSecurity | None = None,
+    artifact_path: Path | str | None = None,
     root: Path | str | None = None,
     native_platform: NativePlatform | None = None,
     library: Any | None = None,
-    backend: NativeRuntimeBackend | None = None,
     fallback: NativeRuntimeBackend | None = None,
     require_native: bool = False,
     options: NativeClientSessionOptions | None = None,
@@ -790,7 +906,6 @@ def connect_native_client_session(
     connection_options = NativeClientConnectionOptions(
         connection_id=resolved_options.connection_id,
         connection_generation=resolved_options.connection_generation,
-        transport_id=resolved_options.transport_id,
     )
     session_options = NativeClientSessionOpenOptions(
         requested_session_id=resolved_options.requested_session_id,
@@ -800,11 +915,15 @@ def connect_native_client_session(
         schema_version=resolved_options.schema_version,
     )
     with connect_native_client_connection(
-        artifact_path,
+        endpoint,
+        provider_endpoint=provider_endpoint,
+        transport_policy=transport_policy,
+        transport=transport,
+        security=security,
+        artifact_path=artifact_path,
         root=root,
         native_platform=native_platform,
         library=library,
-        backend=backend,
         fallback=fallback,
         require_native=require_native,
         options=connection_options,

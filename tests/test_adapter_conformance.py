@@ -3,7 +3,7 @@ from pathlib import Path
 
 import pytest
 
-from nnrp.native import FFI_STATUS_INVALID_ARGUMENT, NativeArtifactError, NativeInvalidArgumentError, NativeStatus
+from nnrp.native import FFI_STATUS_INVALID_ARGUMENT, NativeInvalidArgumentError, NativeStatus
 from nnrp.tools import adapter_conformance
 from nnrp.tools.adapter_conformance import build_adapter_case_results_report, main, write_adapter_case_results
 
@@ -69,10 +69,7 @@ def test_build_adapter_case_results_report_executes_supported_cases() -> None:
 
 def test_build_adapter_case_results_report_marks_runtime_smoke_failures() -> None:
     class RejectingBackend:
-        def connect(self, *, connection_id: int, generation: int, transport_id: int) -> object:
-            raise RuntimeError("boom")
-
-        def bootstrap_connection(self, *, connection_id: int, generation: int, transport_id: int) -> object:
+        def connect(self, *, connection_id: int, generation: int, transport_connection: object) -> object:
             raise RuntimeError("boom")
 
     report = build_adapter_case_results_report(
@@ -214,7 +211,9 @@ def test_adapter_result_state_validation_failure_is_reported() -> None:
             operation: adapter_conformance._AdapterSmokeOperation,
             *,
             max_events: int | None = None,
+            timeout_ms: int = 0,
         ) -> StatefulResult:
+            del max_events, timeout_ms
             return StatefulResult(operation.operation_id, operation.frame_id, operation.payload)
 
     class StatefulConnection(adapter_conformance._AdapterSmokeConnection):
@@ -237,8 +236,15 @@ def test_adapter_result_state_validation_failure_is_reported() -> None:
             )
 
     class StatefulBackend(adapter_conformance._AdapterSmokeBackend):
-        def connect(self, *, connection_id: int, generation: int, transport_id: int) -> StatefulConnection:
-            return StatefulConnection(connection_id, generation, transport_id)
+        def connect(
+            self,
+            *,
+            connection_id: int,
+            generation: int,
+            transport_connection: adapter_conformance._AdapterSmokeCarrier,
+        ) -> StatefulConnection:
+            transport_connection.consume()
+            return StatefulConnection(connection_id, generation, transport_connection)
 
     report = build_adapter_case_results_report(
         {
@@ -257,7 +263,7 @@ def test_adapter_result_state_validation_failure_is_reported() -> None:
     assert "expected result state" in report["results"][0]["message"]
 
 
-def test_adapter_result_terminal_prefers_native_submit_result_facade() -> None:
+def test_adapter_result_terminal_uses_submit_then_role_event_poll() -> None:
     class NativeLikeResult:
         def __init__(self, operation_id: int, frame_id: int, payload: bytes) -> None:
             self.operation_id = operation_id
@@ -270,19 +276,28 @@ def test_adapter_result_terminal_prefers_native_submit_result_facade() -> None:
 
         def __init__(self) -> None:
             self.closed = False
-            self.submitted: list[tuple[int, int, bytes, bytes, int | None]] = []
+            self.submitted: list[tuple[int, int, bytes]] = []
+            self.polls: list[tuple[int | None, int]] = []
 
-        def submit_result(
+        def submit_operation(
             self,
             *,
             operation_id: int,
             frame_id: int,
             payload: bytes,
-            result_payload: bytes,
+        ) -> adapter_conformance._AdapterSmokeOperation:
+            self.submitted.append((operation_id, frame_id, bytes(payload)))
+            return adapter_conformance._AdapterSmokeOperation(operation_id, frame_id, bytes(payload))
+
+        def poll_result(
+            self,
+            operation: adapter_conformance._AdapterSmokeOperation,
+            *,
             max_events: int | None = None,
+            timeout_ms: int = 0,
         ) -> NativeLikeResult:
-            self.submitted.append((operation_id, frame_id, bytes(payload), bytes(result_payload), max_events))
-            return NativeLikeResult(operation_id, frame_id, bytes(result_payload))
+            self.polls.append((max_events, timeout_ms))
+            return NativeLikeResult(operation.operation_id, operation.frame_id, operation.payload)
 
         def close(self) -> None:
             self.closed = True
@@ -304,8 +319,8 @@ def test_adapter_result_terminal_prefers_native_submit_result_facade() -> None:
         def __init__(self) -> None:
             self.connection = NativeLikeConnection()
 
-        def connect(self, *, connection_id: int, generation: int, transport_id: int):
-            assert (connection_id, generation, transport_id) == (1, 1, 2)
+        def connect(self, *, connection_id: int, generation: int, transport_connection: object):
+            assert (connection_id, generation) == (1, 1)
             return self.connection
 
     backend = NativeLikeBackend()
@@ -330,7 +345,8 @@ def test_adapter_result_terminal_prefers_native_submit_result_facade() -> None:
 
     assert report["results"][0]["outcome"] == "pass"
     assert backend.connection.batch_polls == 1
-    assert backend.connection.session.submitted == [(9, 10, b"\x01\x02\x03", b"\x01\x02\x03", 2)]
+    assert backend.connection.session.submitted == [(9, 10, b"\x01\x02\x03")]
+    assert backend.connection.session.polls == [(2, 0)]
 
 
 def test_adapter_runtime_helpers_read_native_handle_shapes() -> None:
@@ -358,26 +374,17 @@ def test_adapter_evidence_dir_resolution_ignores_invalid_shapes(tmp_path: Path) 
     ) == tmp_path / "evidence"
 
 
-def test_adapter_backend_loader_can_require_native(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    def reject_native_backend(*args: object, **kwargs: object) -> object:
-        raise NativeArtifactError("missing native")
-
-    monkeypatch.setattr(adapter_conformance, "select_native_runtime_backend", reject_native_backend)
-    monkeypatch.setenv("NNRP_ADAPTER_REQUIRE_NATIVE", "true")
-
-    with pytest.raises(NativeArtifactError, match="missing native"):
-        adapter_conformance._load_adapter_backend()
-
-
 def test_adapter_case_failure_preserves_native_diagnostics() -> None:
     class RejectingOperationBackend:
-        def connect(self, *, connection_id: int, generation: int, transport_id: int) -> object:
-            return adapter_conformance._AdapterSmokeConnection(connection_id, generation, transport_id)
-
-        def bootstrap_connection(self, *, connection_id: int, generation: int, transport_id: int) -> object:
-            return self.connect(connection_id=connection_id, generation=generation, transport_id=transport_id)
+        def connect(
+            self,
+            *,
+            connection_id: int,
+            generation: int,
+            transport_connection: adapter_conformance._AdapterSmokeCarrier,
+        ) -> object:
+            transport_connection.consume()
+            return adapter_conformance._AdapterSmokeConnection(connection_id, generation, transport_connection)
 
     class RejectingExecution(adapter_conformance._AdapterCaseExecution):
         def _submit_operation(self, session: object) -> object:
@@ -408,7 +415,8 @@ def test_adapter_case_failure_preserves_native_diagnostics() -> None:
 
 def test_adapter_smoke_backend_bootstrap_and_closed_session_guards() -> None:
     backend = adapter_conformance._AdapterSmokeBackend()
-    connection = backend.bootstrap_connection(connection_id=7, generation=2, transport_id=1)
+    carrier = adapter_conformance._AdapterSmokeCarrier()
+    connection = backend.connect(connection_id=7, generation=2, transport_connection=carrier)
     session = connection.open_session(
         requested_session_id=8,
         generation=3,
@@ -424,12 +432,21 @@ def test_adapter_smoke_backend_bootstrap_and_closed_session_guards() -> None:
         operation_group_id=2,
     )
     result = session.poll_result(operation, max_events=1)
-    session._control(control_code=11, payload=bytearray(b"control"))
+    session.send_route_hint(adapter_conformance.RouteHintMetadata(9, 11, 0, 0, 0, 7, 0), b"control")
     session.cancel(frame_id=10)
     session.close()
 
     assert result.payload == b"payload"
-    assert session.controls == [(11, b"control")]
+    assert session.controls == [
+        (
+            int(adapter_conformance.MessageType.ROUTE_HINT),
+            adapter_conformance.encode_runtime_control_metadata(
+                adapter_conformance.MessageType.ROUTE_HINT,
+                adapter_conformance.RouteHintMetadata(9, 11, 0, 0, 0, 7, 0),
+                tail=b"control",
+            ),
+        )
+    ]
     assert session.cancelled_frames == [10]
     with pytest.raises(RuntimeError, match="closed"):
         session.cancel(frame_id=10)

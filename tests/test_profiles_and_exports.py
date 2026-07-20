@@ -376,7 +376,6 @@ def test_preview4_host_runtime_api_keeps_request_options_off_packet_helpers() ->
     assert set(NativeClientConnectionOptions.__annotations__) == {
         "connection_id",
         "connection_generation",
-        "transport_id",
     }
     assert set(NativeClientSessionOpenOptions.__annotations__) == {
         "requested_session_id",

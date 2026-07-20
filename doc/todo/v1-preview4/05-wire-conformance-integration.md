@@ -19,9 +19,9 @@
 
 ## Live Endpoint Harness
 
-- [x] Add test harness entrypoint for suite-as-client scenarios.
-- [x] Add test harness entrypoint for suite-as-server scenarios.
-- [x] Add test harness entrypoint for proxy scenarios where available.
+- [ ] Add test harness entrypoint for suite-as-client scenarios.
+- [ ] Add test harness entrypoint for suite-as-server scenarios.
+- [ ] Add test harness entrypoint for proxy scenarios where available.
 - [x] Write wire result reports with observed frames.
 - [x] Write evidence files for frame logs and timing.
 

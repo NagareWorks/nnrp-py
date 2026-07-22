@@ -247,7 +247,7 @@ jobs:
   wire-conformance:
     runs-on: ubuntu-latest
     env:
-      NNRP_RS_NATIVE_VERSION: 1.0.0-preview.4.10
+      NNRP_RS_NATIVE_VERSION: 1.0.0-preview.4.13
 
     steps:
       - name: Checkout

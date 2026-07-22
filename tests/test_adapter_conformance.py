@@ -110,6 +110,8 @@ def test_build_adapter_case_results_report_executes_all_preview4_runtime_cases()
         "l1.control.route-execution-hint",
         "l1.control.cache-reference",
         "l1.control.degrade-budget",
+        "l1.control.supersede",
+        "l1.control.recoverable-error",
     ]
 
     report = build_adapter_case_results_report(

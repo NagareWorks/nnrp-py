@@ -6,6 +6,7 @@ from nnrp import (
     CacheInvalidationReason,
     CacheLeaseDescriptor,
     CacheLeaseOutcome,
+    CacheLeaseOwnerScope,
     CacheLeaseResult,
     CacheObjectIdentity,
     CacheObjectKind,
@@ -44,9 +45,11 @@ class FakeCacheBackend:
         self.calls.append(("touch", (identity, ttl_ms)))
         lease = CacheLeaseDescriptor(
             identity=identity,
-            owner_session_id=1,
-            lease_epoch=2,
-            expires_at_ms=100,
+            object_version=1,
+            lease_id=2,
+            owner_scope=CacheLeaseOwnerScope.SESSION,
+            owner_id=1,
+            granted_at_ms=100,
             ttl_ms=ttl_ms or 0,
         )
         return CacheLeaseResult(identity=identity, outcome=CacheLeaseOutcome.RENEWED, lease=lease)
@@ -79,13 +82,28 @@ def test_cache_lease_result_models_expiry_renewal_and_identity_matching() -> Non
     identity = CacheObjectIdentity(
         cache_namespace=1, object_kind=CacheObjectKind.TOOL_SCHEMA, cache_key_hi=1, cache_key_lo=2
     )
-    lease = CacheLeaseDescriptor(identity=identity, owner_session_id=9, lease_epoch=1, expires_at_ms=1000, ttl_ms=250)
-    renewed = lease.as_renewed(lease_epoch=2, expires_at_ms=1250)
+    lease = CacheLeaseDescriptor(
+        identity=identity,
+        object_version=7,
+        lease_id=1,
+        owner_scope=CacheLeaseOwnerScope.SESSION,
+        owner_id=9,
+        granted_at_ms=750,
+        ttl_ms=250,
+    )
+    renewed = lease.as_renewed(object_version=8, lease_id=2, granted_at_ms=1000)
     result = CacheLeaseResult(identity=identity, outcome=CacheLeaseOutcome.RENEWED, lease=renewed)
 
     assert lease.is_expired(999) is False
     assert lease.is_expired(1000) is True
-    assert renewed.lease_epoch == 2
+    assert lease.expires_at_ms == 1000
+    assert lease.owner_scope is CacheLeaseOwnerScope.SESSION
+    lease.validate_version(7)
+    with pytest.raises(ValueError, match="version_mismatch"):
+        lease.validate_version(8)
+    assert renewed.object_version == 8
+    assert renewed.lease_id == 2
+    assert renewed.expires_at_ms == 1250
     assert renewed.ttl_ms == lease.ttl_ms
     assert result.succeeded is True
 
@@ -94,6 +112,26 @@ def test_cache_lease_result_models_expiry_renewal_and_identity_matching() -> Non
     )
     with pytest.raises(ValueError, match="lease identity"):
         CacheLeaseResult(identity=other, outcome=CacheLeaseOutcome.VALID, lease=lease)
+
+
+def test_cache_lease_expiration_saturates_and_object_kind_uses_u32() -> None:
+    identity = CacheObjectIdentity(cache_namespace=1, object_kind=0xFFFFFFFF, cache_key_hi=2, cache_key_lo=3)
+    lease = CacheLeaseDescriptor(
+        identity=identity,
+        object_version=4,
+        lease_id=5,
+        owner_scope=CacheLeaseOwnerScope.OPERATION,
+        owner_id=6,
+        granted_at_ms=0xFFFFFFFFFFFFFFF0,
+        ttl_ms=0xFFFFFFFF,
+    )
+
+    assert lease.expires_at_ms == 0xFFFFFFFFFFFFFFFF
+    assert lease.is_expired(0xFFFFFFFFFFFFFFFE) is False
+    assert lease.is_expired(0xFFFFFFFFFFFFFFFF) is True
+
+    with pytest.raises(ValueError, match="uint32"):
+        CacheObjectIdentity(cache_namespace=1, object_kind=0x1_0000_0000, cache_key_hi=2, cache_key_lo=3)
 
 
 def test_cache_dependency_invalidation_freezes_affected_snapshot_without_policy_callbacks() -> None:

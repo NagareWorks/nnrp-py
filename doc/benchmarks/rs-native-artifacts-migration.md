@@ -19,11 +19,11 @@ The production path does not ship the retired compact-result ABI or a compiled C
 
 ## Pinned Native Contract
 
-The current Python package consumes `nnrp-rs` native artifact version `1.0.0-preview.4.13`.
+The current Python package consumes `nnrp-rs` native artifact version `1.0.0-preview.4.15`.
 
 This artifact contract includes:
 
-1. `nnrp_runtime_capabilities` and ABI version `3.0.x`.
+1. `nnrp_runtime_capabilities` and ABI version `4.0.x`.
 2. Protocol version `1/0`.
 3. Carrier open/listen/accept and client/server role-adoption entrypoints.
 4. Client submit/cancel/poll and server receive/result entrypoints.
@@ -56,7 +56,7 @@ transport-slot meaning requires a new pin and a complete rerun of this plan.
 The executable plan is `doc/benchmarks/native-runtime-benchmark-plan.json`; call-shape and smoke gates are in
 `doc/benchmarks/native-runtime-smoke-thresholds.json`.
 
-## ABI 3 Release Validation
+## ABI 4 Release Validation
 
 The release run must populate a result artifact for these production paths:
 
@@ -69,7 +69,7 @@ The release run must populate a result artifact for these production paths:
 | IPC provider loopback | IPC provider artifact with adopted client/server roles | 4 calls/op |
 | WebSocket provider loopback | WebSocket provider artifact with adopted client/server roles | 4 calls/op |
 
-No ABI 3 release numbers are recorded here before the candidate wheel is measured. The generated JSON result is the
+No ABI 4 release numbers are recorded here before the candidate wheel is measured. The generated JSON result is the
 release evidence; this document records the stable procedure and interpretation boundary.
 
 Run the gate with:
@@ -98,12 +98,12 @@ not be used as evidence that the current production role path passed release val
 | Preview4 WebSocket provider smoke | 2026-06-22 | `c1bc3e2` | `1.0.0-preview.4.0`, ABI 1.11.0 | Windows amd64, Python 3.13.5 | 57326.2 ops/s |
 
 The old batch figures measured wrapper amortization, not a bidirectional client/server operation. They are useful
-historical data but are not directly comparable to the ABI 3 role submit/result scenario.
+historical data but are not directly comparable to the ABI 4 role submit/result scenario.
 
 ## Release Acceptance Checklist
 
 1. Native artifact pin matches the Rust release consumed by wheel construction.
-2. Every platform wheel contains the expected ABI 3 transport-scoped artifacts and no retired compact/CFFI runtime.
+2. Every platform wheel contains the expected ABI 4 transport-scoped artifacts and no retired compact/CFFI runtime.
 3. The sdist contains no prebuilt native artifacts.
 4. The role submit/result, submit/cancel, and progress/partial paths satisfy their exact FFI call-shape gates.
 5. IPC and WebSocket provider scenarios run against their provider artifacts.

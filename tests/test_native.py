@@ -12,7 +12,7 @@ from types import SimpleNamespace
 import pytest
 
 import nnrp.native as native_module
-from nnrp.cache import CacheLeaseOutcome, CacheObjectIdentity
+from nnrp.cache import CacheLeaseOutcome, CacheLeaseOwnerScope, CacheObjectIdentity
 from nnrp.core import MessageType
 from nnrp.core.messages.control import (
     CacheInvalidateMetadata,
@@ -239,7 +239,7 @@ class FakeLibrary:
     def __init__(
         self,
         *,
-        abi_major: int = 3,
+        abi_major: int = 4,
         abi_minor: int = 0,
         abi_patch: int = 0,
         protocol_major: int = 1,
@@ -684,7 +684,10 @@ class FakeRuntimeLibrary(FakeEntrypointLibrary):
                 result.object_id = _NnrpCacheObjectId(namespace, object_kind, key_hi, key_lo)
                 result.object_version = 1
                 result.lease_id = lease_handle.id
-                result.expires_at_ms = 0
+                result.owner_scope = int(CacheLeaseOwnerScope.SESSION)
+                result.ttl_ms = 0
+                result.owner_id = 41
+                result.granted_at_ms = 0
                 self._cache_leases.pop(key, None)
                 return self.status
         return _NnrpFfiStatus(FFI_STATUS_INVALID_HANDLE, 0, 0, 0)
@@ -722,7 +725,14 @@ class FakeRuntimeLibrary(FakeEntrypointLibrary):
         result.object_id = request.object_id
         result.object_version = request.expected_version or 1
         result.lease_id = lease.id
-        result.expires_at_ms = request.now_ms + (request.ttl_ms or 30_000)
+        result.owner_scope = {
+            HANDLE_KIND_CONNECTION: int(CacheLeaseOwnerScope.CONNECTION),
+            HANDLE_KIND_SESSION: int(CacheLeaseOwnerScope.SESSION),
+            HANDLE_KIND_OPERATION: int(CacheLeaseOwnerScope.OPERATION),
+        }[request.owner.kind]
+        result.ttl_ms = request.ttl_ms or 30_000
+        result.owner_id = request.owner.id
+        result.granted_at_ms = request.now_ms
 
     def _session_recovery_request_validate(self, session_open_metadata: _NnrpBufferView) -> _NnrpFfiStatus:
         if not _read_buffer_view(session_open_metadata):
@@ -913,7 +923,7 @@ class ExpiringCacheRuntimeLibrary(FakeRuntimeLibrary):
     def _cache_query(self, request: _NnrpCacheLeaseRequest, out_result: object) -> _NnrpFfiStatus:
         result = _cache_result_target(out_result)
         self._populate_cache_result(result, request, outcome=2)
-        result.expires_at_ms = request.now_ms
+        result.ttl_ms = 0
         return _NnrpFfiStatus(FFI_STATUS_PROTOCOL_ERROR, ERROR_FAMILY_CACHE, 0x30002, 0)
 
 
@@ -2287,7 +2297,7 @@ def test_probe_native_artifact_accepts_matching_protocol(tmp_path: Path) -> None
     result = probe_native_artifact(artifact, library=FakeLibrary())
 
     assert result.artifact_path == artifact
-    assert result.abi_major == 3
+    assert result.abi_major == 4
     assert result.abi_minor == 0
     assert result.abi_patch == 0
     assert result.protocol_major == 1
@@ -3059,7 +3069,16 @@ def test_native_cache_backend_routes_lease_ops_through_ffi(tmp_path: Path) -> No
     assert query.lease is not None
     assert query.object_version is not None
     assert query.object_version.object_version == 9
+    assert query.lease.object_version == 9
+    assert query.lease.lease_id == 800
+    assert query.lease.owner_scope is CacheLeaseOwnerScope.SESSION
+    assert query.lease.owner_id == 41
+    assert query.lease.granted_at_ms == 1000
+    assert query.lease.ttl_ms == 30_000
+    assert query.lease.expires_at_ms == 31_000
     assert touch.lease is not None
+    assert touch.lease.granted_at_ms == 1000
+    assert touch.lease.ttl_ms == 750
     assert prefetched[0].identity == identity
     assert released.outcome is CacheLeaseOutcome.RELEASED
     assert missing.outcome is CacheLeaseOutcome.MISSING
@@ -3071,6 +3090,16 @@ def test_native_cache_backend_routes_lease_ops_through_ffi(tmp_path: Path) -> No
     assert _NnrpCacheObjectId.object_kind.offset == 4
     assert _NnrpCacheObjectId.cache_key_hi.offset == 8
     assert _NnrpCacheObjectId.cache_key_lo.offset == 16
+    assert ctypes.sizeof(_NnrpCacheLeaseResult) == 96
+    assert _NnrpCacheLeaseResult.outcome_code.offset == 0
+    assert _NnrpCacheLeaseResult.lease_handle.offset == 8
+    assert _NnrpCacheLeaseResult.object_id.offset == 32
+    assert _NnrpCacheLeaseResult.object_version.offset == 56
+    assert _NnrpCacheLeaseResult.lease_id.offset == 64
+    assert _NnrpCacheLeaseResult.owner_scope.offset == 72
+    assert _NnrpCacheLeaseResult.ttl_ms.offset == 76
+    assert _NnrpCacheLeaseResult.owner_id.offset == 80
+    assert _NnrpCacheLeaseResult.granted_at_ms.offset == 88
     assert library.nnrp_cache_touch.calls[0][0].ttl_ms == 750
 
 
@@ -3100,6 +3129,8 @@ def test_native_cache_backend_preserves_expired_lease_result_from_protocol_statu
     assert result.outcome is CacheLeaseOutcome.EXPIRED
     assert result.lease is not None
     assert result.lease.is_expired(5000) is True
+    assert result.lease.granted_at_ms == 5000
+    assert result.lease.ttl_ms == 0
     assert result.object_version is not None
     assert result.object_version.object_version == 9
 

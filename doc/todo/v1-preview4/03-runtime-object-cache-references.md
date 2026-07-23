@@ -25,9 +25,9 @@
 
 ## Cache References
 
-- [x] Add cache reference model.
-  - [x] Cache key.
-  - [x] Optional lease ID.
+- [x] Add cache reference and canonical local lease models.
+  - [x] Cache key and `u32` object kind.
+  - [x] Canonical lease/version/owner/grant/TTL fields and optional wire lease ID.
   - [x] Schema/profile anchor.
   - [x] Producer trace.
 - [x] Add cache miss model.

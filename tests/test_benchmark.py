@@ -584,15 +584,15 @@ def test_close_native_role_sessions_rejects_missing_close_event() -> None:
 
 def test_benchmark_environment_records_release_candidate_identity(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("NNRP_BENCHMARK_SDK_COMMIT", "0123456789abcdef")
-    monkeypatch.setenv("NNRP_BENCHMARK_RUST_ARTIFACT_VERSION", "1.0.0-preview.4.13")
-    monkeypatch.setenv("NNRP_BENCHMARK_CANDIDATE_WHEEL", "nnrp_py-1.0.0rc4.post7-py3-none-linux.whl")
+    monkeypatch.setenv("NNRP_BENCHMARK_RUST_ARTIFACT_VERSION", "1.0.0-preview.4.15")
+    monkeypatch.setenv("NNRP_BENCHMARK_CANDIDATE_WHEEL", "nnrp_py-1.0.0rc4.post8-py3-none-linux.whl")
 
     environment = benchmark._build_environment()
 
     assert environment["sdk_commit"] == "0123456789abcdef"
-    assert environment["nnrp_rs_artifact"] == "1.0.0-preview.4.13"
+    assert environment["nnrp_rs_artifact"] == "1.0.0-preview.4.15"
     assert environment["notes"].startswith(
-        "candidate_wheel=nnrp_py-1.0.0rc4.post7-py3-none-linux.whl; sdk_version="
+        "candidate_wheel=nnrp_py-1.0.0rc4.post8-py3-none-linux.whl; sdk_version="
     )
 
 

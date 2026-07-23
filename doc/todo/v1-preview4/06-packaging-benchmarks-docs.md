@@ -8,11 +8,11 @@
   - [x] QUIC.
   - [x] IPC.
   - [x] WebSocket.
-- [x] Bind production ABI 3 role entrypoints directly through ctypes without a generated CFFI sidecar.
+- [x] Bind production ABI 4 role entrypoints directly through ctypes without a generated CFFI sidecar.
 - [x] Keep client/server hot paths coarse at submit, event-batch, result, and runtime-frame boundaries.
 - [x] Reject universal wheels for native preview4 releases.
 - [x] Verify wheel contents per platform.
-- [x] Require Rust ABI `3.0.0` in the release workflow.
+- [x] Require Rust ABI `4.0.0` in the release workflow.
 
 ## Benchmarks
 

@@ -8,7 +8,7 @@ graph mutation; cache ownership and validation stay in the native runtime.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from enum import StrEnum
+from enum import IntEnum, StrEnum
 from typing import Protocol
 
 from nnrp.core import CacheObjectKind
@@ -31,6 +31,12 @@ class CacheInvalidationReason(StrEnum):
     SCHEMA_MISMATCH = "schema_mismatch"
 
 
+class CacheLeaseOwnerScope(IntEnum):
+    CONNECTION = 0
+    SESSION = 1
+    OPERATION = 2
+
+
 @dataclass(frozen=True, slots=True)
 class CacheObjectIdentity:
     cache_namespace: int
@@ -40,7 +46,7 @@ class CacheObjectIdentity:
 
     def __post_init__(self) -> None:
         _validate_u32("cache_namespace", self.cache_namespace)
-        _validate_u16("object_kind", int(self.object_kind))
+        _validate_u32("object_kind", int(self.object_kind))
         _validate_u64("cache_key_hi", self.cache_key_hi)
         _validate_u64("cache_key_lo", self.cache_key_lo)
 
@@ -56,27 +62,51 @@ class CacheObjectIdentity:
 @dataclass(frozen=True, slots=True)
 class CacheLeaseDescriptor:
     identity: CacheObjectIdentity
-    owner_session_id: int
-    lease_epoch: int
-    expires_at_ms: int
-    ttl_ms: int = 0
+    object_version: int
+    lease_id: int
+    owner_scope: CacheLeaseOwnerScope | int
+    owner_id: int
+    granted_at_ms: int
+    ttl_ms: int
 
     def __post_init__(self) -> None:
-        _validate_u32("owner_session_id", self.owner_session_id)
-        _validate_u64("lease_epoch", self.lease_epoch)
-        _validate_u64("expires_at_ms", self.expires_at_ms)
+        _validate_u64("object_version", self.object_version)
+        _validate_u64("lease_id", self.lease_id)
+        object.__setattr__(self, "owner_scope", CacheLeaseOwnerScope(self.owner_scope))
+        _validate_u64("owner_id", self.owner_id)
+        _validate_u64("granted_at_ms", self.granted_at_ms)
         _validate_u32("ttl_ms", self.ttl_ms)
+
+    @property
+    def expires_at_ms(self) -> int:
+        return min(self.granted_at_ms + self.ttl_ms, 0xFFFFFFFFFFFFFFFF)
 
     def is_expired(self, now_ms: int) -> bool:
         _validate_u64("now_ms", now_ms)
         return now_ms >= self.expires_at_ms
 
-    def as_renewed(self, *, lease_epoch: int, expires_at_ms: int, ttl_ms: int | None = None) -> CacheLeaseDescriptor:
+    def validate_version(self, expected_version: int) -> None:
+        _validate_u64("expected_version", expected_version)
+        if expected_version != self.object_version:
+            raise ValueError(
+                f"version_mismatch: lease covers object version {self.object_version}, got {expected_version}"
+            )
+
+    def as_renewed(
+        self,
+        *,
+        object_version: int,
+        lease_id: int,
+        granted_at_ms: int,
+        ttl_ms: int | None = None,
+    ) -> CacheLeaseDescriptor:
         return CacheLeaseDescriptor(
             identity=self.identity,
-            owner_session_id=self.owner_session_id,
-            lease_epoch=lease_epoch,
-            expires_at_ms=expires_at_ms,
+            object_version=object_version,
+            lease_id=lease_id,
+            owner_scope=self.owner_scope,
+            owner_id=self.owner_id,
+            granted_at_ms=granted_at_ms,
             ttl_ms=self.ttl_ms if ttl_ms is None else ttl_ms,
         )
 
@@ -210,11 +240,6 @@ def cache_release(backend: CacheRuntimeBackend, identity: CacheObjectIdentity) -
     return backend.release_cache(identity)
 
 
-def _validate_u16(name: str, value: int) -> None:
-    if not isinstance(value, int) or value < 0 or value > 0xFFFF:
-        raise ValueError(f"{name} must be a uint16 value")
-
-
 def _validate_u32(name: str, value: int) -> None:
     if not isinstance(value, int) or value < 0 or value > 0xFFFFFFFF:
         raise ValueError(f"{name} must be a uint32 value")
@@ -230,6 +255,7 @@ __all__ = [
     "CacheInvalidation",
     "CacheInvalidationReason",
     "CacheLeaseDescriptor",
+    "CacheLeaseOwnerScope",
     "CacheLeaseOutcome",
     "CacheLeaseResult",
     "CacheObjectIdentity",

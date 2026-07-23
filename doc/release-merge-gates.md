@@ -68,7 +68,7 @@ Before publishing native wheels, the release PR must include:
 1. The pinned `nnrp-rs` artifact version.
 2. The platform wheel matrix and embedded artifact tags.
 3. Wheel inspection output proving each wheel embeds exactly one matching platform artifact set.
-4. Wheel inspection output proving each wheel embeds the ABI 3 transport-scoped artifacts for its platform tag.
+4. Wheel inspection output proving each wheel embeds the ABI 4 transport-scoped artifacts for its platform tag.
 5. Wheel inspection output proving each wheel embeds TCP, QUIC, IPC, and WebSocket provider artifacts, not an all-in-one transport artifact.
 6. Post-migration benchmark results captured on the release artifact through real client/server roles.
 7. Confirmation that the sdist remains free of prebuilt native libraries unless release policy changed.
@@ -79,6 +79,6 @@ Reviewer reject conditions:
 1. A platform wheel embeds a mismatched OS or architecture artifact.
 2. A native release publishes a `py3-none-any` wheel.
 3. Post-migration benchmark rows remain `TBD` for the platform being released.
-4. A native wheel contains retired compact-result or CFFI runtime modules instead of the ABI 3 role surface.
+4. A native wheel contains retired compact-result or CFFI runtime modules instead of the ABI 4 role surface.
 5. GitHub Release assets hide wheel files inside a repository-owned zip instead of attaching the wheels directly.
 6. A native wheel embeds a `transport_scope = all` artifact after split provider artifacts are required.

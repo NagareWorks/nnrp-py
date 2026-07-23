@@ -57,7 +57,7 @@ from nnrp.runtime.types import _FixedRuntimeMetadata
 
 EXPECTED_PROTOCOL_MAJOR = 1
 EXPECTED_PROTOCOL_WIRE_FORMAT = 0
-EXPECTED_ABI_MAJOR = 3
+EXPECTED_ABI_MAJOR = 4
 EXPECTED_ABI_MINOR = 0
 TRANSPORT_SLOT_QUIC = 0x00000001
 TRANSPORT_SLOT_TCP = 0x00000002
@@ -1188,7 +1188,10 @@ class _NnrpCacheLeaseResult(ctypes.Structure):
         ("object_id", _NnrpCacheObjectId),
         ("object_version", ctypes.c_uint64),
         ("lease_id", ctypes.c_uint64),
-        ("expires_at_ms", ctypes.c_uint64),
+        ("owner_scope", ctypes.c_uint32),
+        ("ttl_ms", ctypes.c_uint32),
+        ("owner_id", ctypes.c_uint64),
+        ("granted_at_ms", ctypes.c_uint64),
     ]
 
 
@@ -3336,7 +3339,7 @@ class NativeCacheLeaseBackend:
         return self._cache_result_from_ffi(result)
 
     def _cache_result_from_ffi(self, result: _NnrpCacheLeaseResult) -> Any:
-        converted = _cache_lease_result_from_ffi(result, owner_session_id=self.owner.id)
+        converted = _cache_lease_result_from_ffi(result)
         if result.lease_handle.kind == HANDLE_KIND_CACHE_LEASE:
             self._lease_handles[_cache_identity_key(converted.identity)] = NativeCacheLeaseHandle.from_ffi(
                 result.lease_handle
@@ -6050,8 +6053,8 @@ def _cache_identity_from_ffi(object_id: _NnrpCacheObjectId) -> Any:
     )
 
 
-def _cache_lease_result_from_ffi(result: _NnrpCacheLeaseResult, *, owner_session_id: int) -> Any:
-    from nnrp.cache import CacheLeaseDescriptor, CacheLeaseResult, CacheObjectVersion
+def _cache_lease_result_from_ffi(result: _NnrpCacheLeaseResult) -> Any:
+    from nnrp.cache import CacheLeaseDescriptor, CacheLeaseOwnerScope, CacheLeaseResult, CacheObjectVersion
 
     identity = _cache_identity_from_ffi(result.object_id)
     outcome = _CACHE_LEASE_OUTCOME_BY_CODE.get(int(result.outcome_code))
@@ -6060,12 +6063,15 @@ def _cache_lease_result_from_ffi(result: _NnrpCacheLeaseResult, *, owner_session
 
     lease = None
     object_version = None
-    if result.lease_id != 0 or result.expires_at_ms != 0:
+    if result.lease_handle.kind == HANDLE_KIND_CACHE_LEASE:
         lease = CacheLeaseDescriptor(
             identity=identity,
-            owner_session_id=int(owner_session_id),
-            lease_epoch=int(result.lease_id),
-            expires_at_ms=int(result.expires_at_ms),
+            object_version=int(result.object_version),
+            lease_id=int(result.lease_id),
+            owner_scope=CacheLeaseOwnerScope(int(result.owner_scope)),
+            owner_id=int(result.owner_id),
+            granted_at_ms=int(result.granted_at_ms),
+            ttl_ms=int(result.ttl_ms),
         )
     if result.object_version != 0:
         object_version = CacheObjectVersion(identity=identity, object_version=int(result.object_version))

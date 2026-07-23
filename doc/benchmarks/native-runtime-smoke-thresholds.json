@@ -1,6 +1,6 @@
 {
   "$schema": "./native-runtime-smoke-thresholds.schema.json",
-  "description": "Post-artifact thresholds for real IPC carrier and adopted client/server role execution. Call-shape gates prevent benchmark-only or synthetic result paths from replacing production ABI 3 boundaries.",
+  "description": "Post-artifact thresholds for real IPC carrier and adopted client/server role execution. Call-shape gates prevent benchmark-only or synthetic result paths from replacing production ABI 4 boundaries.",
   "thresholds": [
     {
       "id": "l4.native.role_submit_result.throughput",

@@ -6,6 +6,7 @@ from nnrp.cache import (
     CacheInvalidationReason,
     CacheLeaseDescriptor,
     CacheLeaseOutcome,
+    CacheLeaseOwnerScope,
     CacheLeaseResult,
     CacheObjectIdentity,
     CacheObjectVersion,
@@ -332,6 +333,7 @@ __all__ = [
     "CacheInvalidationReason",
     "CacheLeaseDescriptor",
     "CacheLeaseOutcome",
+    "CacheLeaseOwnerScope",
     "CacheLeaseResult",
     "CacheObjectIdentity",
     "CacheObjectVersion",
@@ -549,4 +551,4 @@ __all__ = [
     "unpack_tile_index_block",
 ]
 
-__version__ = "1.0.0rc4.post7"
+__version__ = "1.0.0rc4.post8"

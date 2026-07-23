@@ -62,7 +62,7 @@ def test_ci_runs_independent_process_wire_conformance() -> None:
     workflow = _read_ci_workflow()
 
     assert "wire-conformance:" in workflow
-    assert "NNRP_RS_NATIVE_VERSION: 1.0.0-preview.4.13" in workflow
+    assert "NNRP_RS_NATIVE_VERSION: 1.0.0-preview.4.15" in workflow
     for transport in ("tcp", "quic", "ipc", "websocket"):
         assert f'nnrp-ffi-transport-{transport}-native-linux-x86_64-${{NNRP_RS_NATIVE_VERSION}}.zip' in workflow
     assert "prepare_native_artifacts.py --clean artifacts/native-downloads/*.zip" in workflow

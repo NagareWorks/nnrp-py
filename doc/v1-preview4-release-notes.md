@@ -25,13 +25,15 @@ benchmark documents and are not used as preview4 release criteria.
   partial-result object references.
 - Cache reference, cache miss, and cache invalidation metadata stay typed protocol events rather than generic transport
   failures.
+- Cache lease results preserve the canonical object version, lease identity, owner scope/id, grant timestamp, and TTL
+  returned by Rust ABI 4; Python derives expiration with saturating `u64` arithmetic and validates object versions.
 - Python snapshots object metadata and partial-result payloads unless a native lifetime guard explicitly owns the
   borrowed view.
 
 ## Transport Providers
 
 - Rust preview4 artifacts are transport scoped and expose TCP, QUIC, IPC, and WebSocket capability slots.
-- Python `1.0.0rc4.post7` consumes Rust `1.0.0-preview.4.13` and exposes the frozen provider cost, preference,
+- Python `1.0.0rc4.post8` consumes Rust `1.0.0-preview.4.15` and exposes the frozen provider cost, preference,
   frame-limit, limitation, probe-metrics, and ordered candidate models without a Python-specific weighted score.
 - Multi-provider selection follows the cross-SDK deterministic comparator and reports every eligible or rejected
   candidate; probe samples bind to the stable provider id carried by the owning artifact.
@@ -42,7 +44,7 @@ benchmark documents and are not used as preview4 release criteria.
   through each transport artifact. Release smoke tests exchange packets in both directions over IPC and WebSocket.
 - Carrier ownership transfers to the Rust client or server role only after adoption succeeds. Failed adoption leaves the
   Python carrier wrapper responsible for deterministic cleanup.
-- The host API uses ABI 3 role lifecycles for submit, receive, result delivery, cancellation, and polling. The retired
+- The host API uses ABI 4 role lifecycles for submit, receive, result delivery, cancellation, and polling. The retired
   compact-result and compiled CFFI side paths are not shipped as an alternate runtime.
 
 ## Conformance
@@ -54,7 +56,7 @@ benchmark documents and are not used as preview4 release criteria.
 
 ## Release Gates
 
-- Python `1.0.0rc4.post7` pins Rust `1.0.0-preview.4.13` and requires ABI `3.0.x`.
+- Python `1.0.0rc4.post8` pins Rust `1.0.0-preview.4.15` and requires ABI `4.0.x`.
 - Source distributions exclude release workspace artifacts and are validated for payload boundaries and size before
   publication.
 - Preview4 native wheels must embed preview4-shaped Rust artifact metadata.

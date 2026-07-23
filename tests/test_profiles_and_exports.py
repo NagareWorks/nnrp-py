@@ -8,6 +8,7 @@ from nnrp import (
     RUNTIME_CONTROL_FEATURE_FLAGS,
     RUNTIME_OBJECT_FEATURE_FLAGS,
     CacheLeaseDescriptor,
+    CacheLeaseOwnerScope,
     CacheObjectIdentity,
     NativeRuntimeClient,
     NativeRuntimeFeatureFlag,
@@ -418,6 +419,7 @@ def test_current_typed_models_are_exported() -> None:
     assert ResultRouter.__name__ == "ResultRouter"
     assert CacheObjectIdentity.__name__ == "CacheObjectIdentity"
     assert CacheLeaseDescriptor.__name__ == "CacheLeaseDescriptor"
+    assert CacheLeaseOwnerScope.SESSION == 1
     assert SchemaDescriptorHeader.__name__ == "SchemaDescriptorHeader"
     assert SchemaRegistryCatalog.__name__ == "SchemaRegistryCatalog"
     assert Preview3TypedPayloadDescriptor.__name__ == "Preview3TypedPayloadDescriptor"

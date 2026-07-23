@@ -99,7 +99,7 @@ The native helpers provide:
 
 By default the native loader searches `nnrp/native_artifacts/<os>-<arch>/` inside the installed package. Set `NNRP_NATIVE_ARTIFACT_ROOT` when testing an external artifact tree. Pass `require_native=True` in host code that must fail fast instead of using an explicitly supplied test or diagnostic fallback.
 
-The production binding is the ABI 3 carrier/role surface exposed through `ctypes`. A provider artifact opens the TCP, QUIC, IPC, or WebSocket carrier, then transfers that carrier to the Rust client or server role. Submit, cancellation, server receive/result delivery, and event polling remain coarse role calls; the Python package does not ship a second compact-result runtime or a compiled CFFI side path.
+The production binding is the ABI 4 carrier/role surface exposed through `ctypes`. A provider artifact opens the TCP, QUIC, IPC, or WebSocket carrier, then transfers that carrier to the Rust client or server role. Submit, cancellation, server receive/result delivery, and event polling remain coarse role calls; the Python package does not ship a second compact-result runtime or a compiled CFFI side path.
 
 Polled native events and results expose Python-owned `bytes` payload snapshots. The current Python API does not expose borrowed result buffers, so a result object remains stable even if the native runtime reuses its poll buffer after the call returns.
 
@@ -212,9 +212,8 @@ if not support.available:
 	print(support.skip_reason)
 ```
 
-TCP and QUIC keep their own native provider slots. IPC and WebSocket endpoint models are available for preview4
-diagnostics and conformance manifests; live connect/listen smoke tests require the corresponding preview4 Rust
-provider artifact to expose those entrypoints.
+TCP, QUIC, IPC, and WebSocket keep their own native provider slots. Each installed transport artifact owns its carrier
+implementation, and live connect/listen paths invoke that provider rather than treating the package as a feature flag.
 
 Cache leases and schema validation follow the same host/runtime split. Python code passes stable identifiers, descriptors, and payload views into the native runtime; lease policy, schema matching, and diagnostics remain owned by Rust:
 
@@ -235,9 +234,10 @@ with connect_native_client_connection(
 	session = connection.open_session(NativeClientSessionOpenOptions(requested_session_id=42))
 
 	cache = session.cache_backend(now_ms=10_000, ttl_ms=30_000)
-	identity = CacheObjectIdentity(namespace=1, object_kind=1, key_hi=0, key_lo=7)
+	identity = CacheObjectIdentity(cache_namespace=1, object_kind=1, cache_key_hi=0, cache_key_lo=7)
 	lease = cache_query(cache, identity)
-	if lease.succeeded:
+	if lease.succeeded and lease.lease is not None and lease.object_version is not None:
+		lease.lease.validate_version(lease.object_version.object_version)
 		cache_touch(cache, identity, ttl_ms=60_000)
 
 	registry = connection.schema_registry()
@@ -304,7 +304,7 @@ assert descriptor.stream_semantics is StreamSemantics.APPEND
 
 `StandardProfile.UNSPECIFIED` stays distinct from `StandardProfile.TENSOR`; structured-event and tool-delta remain payload families interpreted through schema/profile bindings rather than standalone standard profiles.
 
-`CacheObjectIdentity`, `CacheLeaseDescriptor`, and `SchemaRegistryCatalog` are host-side value wrappers for native/runtime results and diagnostics. Cache query/touch/prefetch/release helpers delegate to a backend object and do not accept local lease policy callbacks or profile body decoders; those decisions remain owned by Rust and the conformance baseline.
+`CacheObjectIdentity`, `CacheLeaseDescriptor`, and `SchemaRegistryCatalog` are host-side value wrappers for native/runtime results and diagnostics. `CacheLeaseDescriptor` preserves the native object version, lease id, owner scope/id, grant timestamp, and TTL; `expires_at_ms`, `is_expired()`, and `validate_version()` provide the frozen local validation semantics. Cache query/touch/prefetch/release helpers delegate to a backend object and do not accept local lease policy callbacks or profile body decoders; those decisions remain owned by Rust and the conformance baseline.
 
 Native connections also expose async iterators and callback dispatch helpers for `structured_event`, `tool_delta`, and workflow-state payload families. These helpers wrap result/control events from the native pump and preserve Python-owned payload snapshots; profile-private body decoding still belongs to schema/profile handlers rather than the iterator or callback itself.
 

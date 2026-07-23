@@ -19,7 +19,6 @@ class Preview4ControlCapability(StrEnum):
     DEGRADE_PROFILE = "control.degrade_profile"
     BUDGET_UPDATE = "control.budget_update"
     RECOVERABLE_ERROR = "control.recoverable_error"
-    RETRY_AFTER = "control.retry_after"
 
 
 class Preview4ObjectCapability(StrEnum):

@@ -3,6 +3,7 @@
   "protocol_version": "nnrp-1-preview4",
   "supports": [
     "control.cancel_abort",
+    "control.supersede",
     "control.priority_update",
     "control.deadline_expire",
     "control.progress_partial",
@@ -13,6 +14,7 @@
     "control.result_drop_reason",
     "control.degrade_profile",
     "control.budget_update",
+    "control.recoverable_error",
     "object.lifecycle",
     "object.delta",
     "object.cost",

@@ -25,9 +25,9 @@ def test_preview4_control_capability_tokens_match_frozen_catalog() -> None:
         "control.degrade_profile",
         "control.budget_update",
         "control.recoverable_error",
-        "control.retry_after",
     )
     assert Preview4ControlCapability.RESULT_DROP_REASON == "control.result_drop_reason"
+    assert "control.retry_after" not in PREVIEW4_CONTROL_CAPABILITY_TOKENS
 
 
 def test_preview4_object_capability_and_transport_tokens_match_frozen_catalog() -> None:

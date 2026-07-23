@@ -14,6 +14,7 @@ from nnrp.core import FrameSubmitMetadata, MessageType
 from nnrp.native import (
     NativeRuntimeBackend,
     NativeRuntimeError,
+    NativeRuntimeServerSession,
     NativeRuntimeSession,
 )
 from nnrp.runtime import (
@@ -34,12 +35,14 @@ from nnrp.runtime import (
     PartialResultMetadata,
     PressureMetadata,
     ProgressMetadata,
+    RecoverableErrorMetadata,
     ResultDropReasonCode,
     ResultDropReasonMetadata,
     RouteHintMetadata,
     RuntimeObjectKind,
     RuntimeRole,
     SchedulingMetadata,
+    SupersedeMetadata,
     TraceContextMetadata,
     decode_runtime_control_metadata,
     encode_runtime_control_metadata,
@@ -64,6 +67,8 @@ _CASE_DISPATCH = {
     "l1.control.route-execution-hint": "_execute_runtime_route_execution_hint",
     "l1.control.cache-reference": "_execute_runtime_cache_reference",
     "l1.control.degrade-budget": "_execute_runtime_degrade_budget",
+    "l1.control.supersede": "_execute_runtime_supersede",
+    "l1.control.recoverable-error": "_execute_runtime_recoverable_error",
 }
 
 
@@ -402,6 +407,30 @@ class _AdapterCaseExecution:
         session.update_budget(BudgetMetadata(10, 20, 30, 40, 50, 0))
         return self._evidence("runtime-degrade-budget", session_id=_runtime_id(session), operation_id=10)
 
+    def _execute_runtime_supersede(self) -> dict[str, Any]:
+        session = self._open_session(self._connect())
+        session.supersede(
+            SupersedeMetadata(10, 11, 1, ResultDropReasonCode.SUPERSEDED, 0, 0),
+        )
+        return self._evidence(
+            "runtime-supersede",
+            session_id=_runtime_id(session),
+            old_operation_id=10,
+            new_operation_id=11,
+        )
+
+    def _execute_runtime_recoverable_error(self) -> dict[str, Any]:
+        session = self._open_session(self._connect())
+        session.send_recoverable_error(
+            RecoverableErrorMetadata(20, 1, 2, RuntimeRole.RUNTIME, 0, 100, 1, 2, 3, 0),
+        )
+        return self._evidence(
+            "runtime-recoverable-error",
+            session_id=_runtime_id(session),
+            error_code=20,
+            retry_after_ms=100,
+        )
+
     def _drain_setup_events(self, connection: Any) -> None:
         poll_events_batch = getattr(connection, "poll_events_batch", None)
         if callable(poll_events_batch):
@@ -587,9 +616,11 @@ class _AdapterSmokeSession:
     update_budget = NativeRuntimeSession.update_budget
     negotiate_capabilities = NativeRuntimeSession.negotiate_capabilities
     degrade_profile = NativeRuntimeSession.degrade_profile
+    supersede = NativeRuntimeSession.supersede
     send_route_hint = NativeRuntimeSession.send_route_hint
     send_execution_hint = NativeRuntimeSession.send_execution_hint
     send_trace_context = NativeRuntimeSession.send_trace_context
+    send_recoverable_error = NativeRuntimeServerSession.send_recoverable_error
     declare_object = NativeRuntimeSession.declare_object
     reference_object = NativeRuntimeSession.reference_object
     release_object = NativeRuntimeSession.release_object

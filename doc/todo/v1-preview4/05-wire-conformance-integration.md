@@ -39,3 +39,19 @@
 - [x] Add Python tests for wire result report generation.
 - [x] Add negative tests for unsupported transport declarations.
 - [x] Add negative tests for missing result frames.
+
+## Host Route E2E
+
+- [ ] Run suite-owned multi-route client scenarios.
+  - [ ] Cover at least two resolved providers under Auto/Prefer.
+  - [ ] Cover forced unresolved and security-incompatible routes without fallback.
+  - [ ] Verify the Rust runtime adopts only the selected carrier.
+- [ ] Run suite-owned multi-listener server scenarios.
+  - [ ] Accept a real session through each of two simultaneously bound providers.
+  - [ ] Verify the actual bound endpoint of every listener.
+  - [ ] Verify active transport identity per accepted session.
+  - [ ] Verify atomic rollback after an injected bind failure.
+  - [ ] Verify a terminal listener failure closes the logical set instead of shrinking it.
+- [ ] Run the route-local security matrix for plain TCP, TCP TLS, QUIC, IPC, WS, and WSS.
+- [ ] Verify known-but-uninstalled routes and combined failures use exact rejection precedence.
+- [ ] Fail CI when any claimed host-route scenario is skipped or adapter-only.

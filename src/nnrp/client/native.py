@@ -2,13 +2,23 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterator
+from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 from types import TracebackType
-from typing import Any
+from typing import Any, Literal, cast
 
+from nnrp._native_routes import (
+    apply_host_rejection,
+    forced_transport_name,
+    normalize_provider_routes,
+    normalize_transport_policy,
+    ordered_candidates,
+    policy_allows,
+    selection_error,
+    unavailable_candidate,
+)
 from nnrp.core import FrameSubmitMetadata, MessageType, TransportPolicy
 from nnrp.native import (
     FFI_STATUS_WOULD_BLOCK,
@@ -20,6 +30,7 @@ from nnrp.native import (
     NativeRuntimeResult,
     NativeRuntimeSession,
     NativeStatus,
+    NativeTransportCandidateDiagnostic,
     NativeTransportClientSecurity,
     NativeTransportEndpoint,
     NativeTransportProbeSample,
@@ -27,10 +38,8 @@ from nnrp.native import (
     NnrpEndpoint,
     discover_native_transport_providers,
     load_native_transport_binding,
-    parse_native_transport_endpoint,
     parse_nnrp_endpoint,
     resolve_native_transport_endpoint,
-    resolve_native_transport_provider,
     select_native_runtime_backend,
     select_native_transport_provider,
 )
@@ -70,6 +79,20 @@ class NativeClientConnectionOptions:
 
 
 @dataclass(frozen=True, slots=True)
+class NativeClientProviderRoute:
+    provider_endpoint: str | NativeTransportEndpoint | None = None
+    security: NativeTransportClientSecurity | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class _ResolvedClientRoute:
+    endpoint: NativeTransportEndpoint | None
+    security: NativeTransportClientSecurity | None
+    route_resolved: bool
+    security_satisfied: bool
+
+
+@dataclass(frozen=True, slots=True)
 class NativeClientSessionOpenOptions:
     requested_session_id: int = 1
     session_generation: int = 1
@@ -92,7 +115,7 @@ class NativeClientOperationScope:
         exc_type: type[BaseException] | None,
         exc_value: BaseException | None,
         traceback: TracebackType | None,
-    ) -> bool:
+    ) -> Literal[False]:
         self.close(cancel=exc_type is not None and self.cancel_on_error)
         return False
 
@@ -465,7 +488,7 @@ class NativeClientConnection:
             return int(nested_handle.id)
         handle = getattr(session, "handle", None)
         if hasattr(handle, "id"):
-            return int(handle.id)
+            return int(cast(Any, handle).id)
         requested_session_id = getattr(session, "requested_session_id", None)
         if requested_session_id is not None:
             return int(requested_session_id)
@@ -638,60 +661,141 @@ def select_client_native_backend(
     )
 
 
+def _client_route_security_satisfied(
+    endpoint: NnrpEndpoint,
+    *,
+    transport_name: str,
+    provider_endpoint: NativeTransportEndpoint | None,
+    security: NativeTransportClientSecurity | None,
+) -> bool:
+    if transport_name == "quic":
+        return security is not None
+    if transport_name == "websocket" and provider_endpoint is not None and provider_endpoint.secure:
+        return security is not None
+    if not endpoint.secure:
+        return True
+    if transport_name == "tcp":
+        return security is not None
+    if transport_name == "websocket":
+        return provider_endpoint is not None and provider_endpoint.secure and security is not None
+    return False
+
+
+def _resolve_client_routes(
+    endpoint: NnrpEndpoint,
+    provider_routes: Mapping[str, NativeClientProviderRoute],
+    transport_names: set[str],
+) -> dict[str, _ResolvedClientRoute]:
+    resolved: dict[str, _ResolvedClientRoute] = {}
+    for transport_name in transport_names:
+        route = provider_routes.get(transport_name, NativeClientProviderRoute())
+        try:
+            carrier_endpoint = resolve_native_transport_endpoint(
+                endpoint,
+                transport_name,
+                provider_endpoint=route.provider_endpoint,
+            )
+        except (NativeArtifactError, ValueError):
+            carrier_endpoint = None
+        resolved[transport_name] = _ResolvedClientRoute(
+            endpoint=carrier_endpoint,
+            security=route.security,
+            route_resolved=carrier_endpoint is not None,
+            security_satisfied=_client_route_security_satisfied(
+                endpoint,
+                transport_name=transport_name,
+                provider_endpoint=carrier_endpoint,
+                security=route.security,
+            ),
+        )
+    return resolved
+
+
+def _client_candidate_diagnostics(
+    *,
+    policy: TransportPolicy,
+    transport_names: set[str],
+    providers_by_name: Mapping[str, Any],
+    routes: Mapping[str, _ResolvedClientRoute],
+    native_candidates: tuple[NativeTransportCandidateDiagnostic, ...],
+) -> tuple[NativeTransportCandidateDiagnostic, ...]:
+    native_by_name = {candidate.transport_name: candidate for candidate in native_candidates}
+    diagnostics: dict[str, NativeTransportCandidateDiagnostic] = {}
+    for transport_name in transport_names:
+        candidate = native_by_name.get(transport_name, unavailable_candidate(transport_name))
+        route = routes[transport_name]
+        diagnostics[transport_name] = apply_host_rejection(
+            candidate,
+            policy_allowed=policy_allows(policy, transport_name),
+            local_available=transport_name in providers_by_name,
+            peer_supported=candidate.peer_supported,
+            within_limits=candidate.within_limits,
+            route_resolved=route.route_resolved,
+            security_satisfied=route.security_satisfied,
+        )
+    return ordered_candidates(diagnostics)
+
+
 def _select_client_transport(
     endpoint: NnrpEndpoint,
     *,
-    provider_endpoint: NativeTransportEndpoint | None,
+    provider_routes: Mapping[str, NativeClientProviderRoute] | None,
     transport_policy: TransportPolicy | str | int,
-    transport: str | None,
-    security: NativeTransportClientSecurity | None,
     artifact_path: Path | str | None,
     root: Path | str | None,
     native_platform: NativePlatform | None,
     library: Any | None,
-) -> str:
-    if transport is not None:
-        provider = resolve_native_transport_provider(transport, root=root, native_platform=native_platform)
-        select_native_transport_provider(
-            transport_policy,
-            root=root,
-            native_platform=native_platform,
-            supported_transports=(provider.name,),
-        )
-        if provider_endpoint is not None and provider_endpoint.transport_name != provider.name:
-            raise NativeArtifactError(
-                f"{provider.name} provider cannot use {provider_endpoint.transport_name} carrier endpoint"
-            )
-        return provider.name
-
-    supported = (
-        {provider_endpoint.transport_name}
-        if provider_endpoint is not None
-        else {"tcp", "quic"}
-    )
+) -> tuple[str, _ResolvedClientRoute]:
+    policy = normalize_transport_policy(transport_policy)
+    normalized_routes = normalize_provider_routes(provider_routes, NativeClientProviderRoute)
+    providers = discover_native_transport_providers(root, native_platform)
+    providers_by_name = {provider.name: provider for provider in providers}
+    transport_names = set(providers_by_name) | set(normalized_routes) | {"tcp", "quic"}
+    forced_transport = forced_transport_name(policy)
+    if forced_transport is not None:
+        transport_names.add(forced_transport)
+    routes = _resolve_client_routes(endpoint, normalized_routes, transport_names)
+    supported = {
+        transport_name
+        for transport_name, route in routes.items()
+        if transport_name in providers_by_name
+        and policy_allows(policy, transport_name)
+        and route.route_resolved
+        and route.security_satisfied
+    }
+    native_candidates: tuple[NativeTransportCandidateDiagnostic, ...] = ()
     try:
-        return select_native_transport_provider(
-            transport_policy,
+        selection = select_native_transport_provider(
+            policy,
             root=root,
             native_platform=native_platform,
             supported_transports=tuple(supported),
-        ).selected_transport_name
-    except NativeArtifactError as selection_error:
-        if not selection_error.candidates or not any(
+        )
+        native_candidates = selection.candidates
+        selected_transport = selection.selected_transport_name
+        return selected_transport, routes[selected_transport]
+    except NativeArtifactError as native_error:
+        native_candidates = native_error.candidates
+        if not native_candidates or not any(
             candidate.rejection_reason is not None and candidate.rejection_reason.value == "probe-missing"
-            for candidate in selection_error.candidates
+            for candidate in native_candidates
         ):
-            raise
+            diagnostics = _client_candidate_diagnostics(
+                policy=policy,
+                transport_names=transport_names,
+                providers_by_name=providers_by_name,
+                routes=routes,
+                native_candidates=native_candidates,
+            )
+            raise selection_error(policy, diagnostics) from native_error
 
     samples: list[NativeTransportProbeSample] = []
-    for provider in discover_native_transport_providers(root, native_platform):
+    for provider in providers:
         if provider.name not in supported:
             continue
-        carrier_endpoint = resolve_native_transport_endpoint(
-            endpoint,
-            provider.name,
-            provider_endpoint=provider_endpoint,
-        )
+        route = routes[provider.name]
+        if route.endpoint is None:
+            continue
         binding = load_native_transport_binding(
             provider.name,
             artifact_path=artifact_path,
@@ -700,7 +804,7 @@ def _select_client_transport(
             library=library,
         )
         try:
-            metrics = binding._probe(carrier_endpoint, security, 3, 64, 0, 1_000)
+            metrics = binding._probe(route.endpoint, route.security, 3, 64, 0, 1_000)
         except Exception:
             samples.append(
                 NativeTransportProbeSample(
@@ -731,23 +835,33 @@ def _select_client_transport(
                     failed=True,
                 )
             )
-    return select_native_transport_provider(
-        transport_policy,
-        root=root,
-        native_platform=native_platform,
-        supported_transports=tuple(supported),
-        probe_samples=samples,
-    ).selected_transport_name
+    try:
+        selection = select_native_transport_provider(
+            policy,
+            root=root,
+            native_platform=native_platform,
+            supported_transports=tuple(supported),
+            probe_samples=samples,
+        )
+    except NativeArtifactError as native_error:
+        diagnostics = _client_candidate_diagnostics(
+            policy=policy,
+            transport_names=transport_names,
+            providers_by_name=providers_by_name,
+            routes=routes,
+            native_candidates=native_error.candidates,
+        )
+        raise selection_error(policy, diagnostics) from native_error
+    selected_transport = selection.selected_transport_name
+    return selected_transport, routes[selected_transport]
 
 
 @contextmanager
 def connect_native_client_connection(
     endpoint: str | NnrpEndpoint,
     *,
-    provider_endpoint: str | NativeTransportEndpoint | None = None,
+    provider_routes: Mapping[str, NativeClientProviderRoute] | None = None,
     transport_policy: TransportPolicy | str | int = TransportPolicy.AUTO,
-    transport: str | None = None,
-    security: NativeTransportClientSecurity | None = None,
     artifact_path: Path | str | None = None,
     root: Path | str | None = None,
     native_platform: NativePlatform | None = None,
@@ -757,30 +871,18 @@ def connect_native_client_connection(
     options: NativeClientConnectionOptions | None = None,
 ) -> Iterator[NativeClientConnection]:
     application_endpoint = endpoint if isinstance(endpoint, NnrpEndpoint) else parse_nnrp_endpoint(endpoint)
-    carrier_override = (
-        provider_endpoint
-        if isinstance(provider_endpoint, NativeTransportEndpoint)
-        else parse_native_transport_endpoint(provider_endpoint)
-        if provider_endpoint is not None
-        else None
-    )
     resolved_options = options or NativeClientConnectionOptions()
-    transport_name = _select_client_transport(
+    transport_name, route = _select_client_transport(
         application_endpoint,
-        provider_endpoint=carrier_override,
+        provider_routes=provider_routes,
         transport_policy=transport_policy,
-        transport=transport,
-        security=security,
         artifact_path=artifact_path,
         root=root,
         native_platform=native_platform,
         library=library,
     )
-    carrier_endpoint = resolve_native_transport_endpoint(
-        application_endpoint,
-        transport_name,
-        provider_endpoint=carrier_override,
-    )
+    if route.endpoint is None:
+        raise AssertionError("selected client route must have a resolved endpoint")
     binding = load_native_transport_binding(
         transport_name,
         artifact_path=artifact_path,
@@ -788,7 +890,7 @@ def connect_native_client_connection(
         native_platform=native_platform,
         library=library,
     )
-    carrier = binding._connect(carrier_endpoint, security, 0, 0)
+    carrier = binding._connect(route.endpoint, route.security, 0, 0)
     try:
         connection = (
             fallback.connect(
@@ -817,10 +919,8 @@ def connect_native_client_connection(
 def connect_native_client_session(
     endpoint: str | NnrpEndpoint,
     *,
-    provider_endpoint: str | NativeTransportEndpoint | None = None,
+    provider_routes: Mapping[str, NativeClientProviderRoute] | None = None,
     transport_policy: TransportPolicy | str | int = TransportPolicy.AUTO,
-    transport: str | None = None,
-    security: NativeTransportClientSecurity | None = None,
     artifact_path: Path | str | None = None,
     root: Path | str | None = None,
     native_platform: NativePlatform | None = None,
@@ -843,10 +943,8 @@ def connect_native_client_session(
     )
     with connect_native_client_connection(
         endpoint,
-        provider_endpoint=provider_endpoint,
+        provider_routes=provider_routes,
         transport_policy=transport_policy,
-        transport=transport,
-        security=security,
         artifact_path=artifact_path,
         root=root,
         native_platform=native_platform,

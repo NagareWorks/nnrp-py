@@ -65,6 +65,7 @@ from nnrp.native import (
     HANDLE_KIND_OBJECT_DESCRIPTOR,
     HANDLE_KIND_OPERATION,
     HANDLE_KIND_SCHEMA_REGISTRY,
+    HANDLE_KIND_SERVER_ACCEPT,
     HANDLE_KIND_SESSION,
     HANDLE_KIND_TRANSPORT_CONNECTION,
     HANDLE_KIND_TRANSPORT_LISTENER,
@@ -157,7 +158,10 @@ from nnrp.native import (
     _NnrpRuntimeFrameSendRequest,
     _NnrpRuntimeObjectDescriptor,
     _NnrpSchemaDescriptorHeader,
-    _NnrpServerAcceptRequest,
+    _NnrpServerAcceptBeginRequest,
+    _NnrpServerAcceptClaimRequest,
+    _NnrpServerAcceptResult,
+    _NnrpServerAcceptWaitRequest,
     _NnrpServerBindRequest,
     _NnrpServerSendResultRequest,
     _NnrpSessionOpenRequest,
@@ -240,7 +244,7 @@ class FakeLibrary:
         self,
         *,
         abi_major: int = 4,
-        abi_minor: int = 0,
+        abi_minor: int = 1,
         abi_patch: int = 0,
         protocol_major: int = 1,
         wire_format: int = 0,
@@ -303,12 +307,16 @@ class FakeRuntimeLibrary(FakeEntrypointLibrary):
         event_kind: int = 6,
         event_message_type: int = 0,
         await_event_delay_seconds: float = 0.0,
+        active_transport_id: int = int(TransportId.TCP),
+        accept_wait_statuses: list[_NnrpFfiStatus] | None = None,
     ) -> None:
         super().__init__()
         self.status = status or NativeStatus.ok().to_ffi()
         self.event_kind = event_kind
         self.event_message_type = event_message_type
         self.await_event_delay_seconds = await_event_delay_seconds
+        self.active_transport_id = active_transport_id
+        self.accept_wait_statuses = list(accept_wait_statuses or [])
         self._event_payload_owner = (
             ctypes.create_string_buffer(event_payload, len(event_payload)) if event_payload else None
         )
@@ -323,7 +331,10 @@ class FakeRuntimeLibrary(FakeEntrypointLibrary):
         self.nnrp_client_await_event.handler = self._await_event
         self.nnrp_client_await_events.handler = self._await_events
         self.nnrp_server_bind.handler = self._server_bind
-        self.nnrp_server_accept.handler = self._server_accept
+        self.nnrp_server_accept_begin.handler = self._server_accept_begin
+        self.nnrp_server_accept_wait.handler = self._server_accept_wait
+        self.nnrp_server_accept_claim.handler = self._server_accept_claim
+        self.nnrp_server_accept_release.handler = self._server_accept_release
         self.nnrp_server_await_events.handler = self._await_events
         self.nnrp_server_send_result.handler = self._server_send_result
         self.nnrp_server_close.handler = self._close
@@ -364,6 +375,7 @@ class FakeRuntimeLibrary(FakeEntrypointLibrary):
         self._buffers: dict[int, ctypes.Array[ctypes.c_char]] = {}
         self._object_descriptors: dict[int, tuple[_NnrpRuntimeObjectDescriptor, ctypes.Array[ctypes.c_char]]] = {}
         self._cache_leases: dict[tuple[int, int, int, int], _NnrpHandle] = {}
+        self._server_accepts: dict[int, _NnrpHandle] = {}
 
     def _client_connect(self, request: _NnrpClientConnectRequest, out_handle: object) -> _NnrpFfiStatus:
         _write_handle(out_handle, _NnrpHandle(HANDLE_KIND_CONNECTION, request.connection_id, request.generation, 0))
@@ -373,10 +385,44 @@ class FakeRuntimeLibrary(FakeEntrypointLibrary):
         _write_handle(out_handle, _NnrpHandle(HANDLE_KIND_CONNECTION, request.server_id, request.generation, 0))
         return self.status
 
-    def _server_accept(self, request: _NnrpServerAcceptRequest, out_handle: object) -> _NnrpFfiStatus:
+    def _server_accept_begin(
+        self,
+        request: _NnrpServerAcceptBeginRequest,
+        out_handle: object,
+    ) -> _NnrpFfiStatus:
         if request.server.kind != HANDLE_KIND_CONNECTION:
             return _NnrpFfiStatus(FFI_STATUS_INVALID_HANDLE, 0, 0, 0)
-        _write_handle(out_handle, _NnrpHandle(HANDLE_KIND_SESSION, request.session_handle_id, request.generation, 0))
+        accept = _NnrpHandle(HANDLE_KIND_SERVER_ACCEPT, request.accept_handle_id, request.generation, 0)
+        self._server_accepts[request.accept_handle_id] = request.server
+        _write_handle(out_handle, accept)
+        return self.status
+
+    def _server_accept_wait(self, request: _NnrpServerAcceptWaitRequest) -> _NnrpFfiStatus:
+        if request.accept.id not in self._server_accepts:
+            return _NnrpFfiStatus(FFI_STATUS_INVALID_HANDLE, 0, 0, 0)
+        if self.accept_wait_statuses:
+            return self.accept_wait_statuses.pop(0)
+        return self.status
+
+    def _server_accept_claim(
+        self,
+        request: _NnrpServerAcceptClaimRequest,
+        out_result: object,
+    ) -> _NnrpFfiStatus:
+        server = self._server_accepts.pop(request.accept.id, None)
+        if server is None:
+            return _NnrpFfiStatus(FFI_STATUS_INVALID_HANDLE, 0, 0, 0)
+        target = getattr(out_result, "_obj", None)
+        if target is None:
+            target = ctypes.cast(out_result, ctypes.POINTER(_NnrpServerAcceptResult)).contents
+        target.session = _NnrpHandle(HANDLE_KIND_SESSION, request.session_handle_id, request.generation, 0)
+        target.active_transport_id = self.active_transport_id
+        target.reserved0 = 0
+        return self.status
+
+    def _server_accept_release(self, accept: _NnrpHandle) -> _NnrpFfiStatus:
+        if self._server_accepts.pop(accept.id, None) is None:
+            return _NnrpFfiStatus(FFI_STATUS_INVALID_HANDLE, 0, 0, 0)
         return self.status
 
     def _open_session(self, request: _NnrpSessionOpenRequest, out_handle: object) -> _NnrpFfiStatus:
@@ -1112,7 +1158,10 @@ RUNTIME_ENTRYPOINT_SYMBOLS = [
     "nnrp_client_await_event",
     "nnrp_client_await_events",
     "nnrp_server_bind",
-    "nnrp_server_accept",
+    "nnrp_server_accept_begin",
+    "nnrp_server_accept_wait",
+    "nnrp_server_accept_claim",
+    "nnrp_server_accept_release",
     "nnrp_server_await_events",
     "nnrp_server_send_result",
     "nnrp_server_close",
@@ -2298,7 +2347,7 @@ def test_probe_native_artifact_accepts_matching_protocol(tmp_path: Path) -> None
 
     assert result.artifact_path == artifact
     assert result.abi_major == 4
-    assert result.abi_minor == 0
+    assert result.abi_minor == 1
     assert result.abi_patch == 0
     assert result.protocol_major == 1
     assert result.protocol_wire_format == 0
@@ -2949,9 +2998,11 @@ def test_native_runtime_client_binds_native_ipc_and_websocket_servers(tmp_path: 
     assert operation.body == b"server-submit"
     assert library.nnrp_server_bind.calls[0][0].transport_listener.kind == HANDLE_KIND_TRANSPORT_LISTENER
     assert library.nnrp_server_bind.calls[1][0].transport_listener.kind == HANDLE_KIND_TRANSPORT_LISTENER
-    assert library.nnrp_server_accept.calls[0][0].server.id == 21
-    assert library.nnrp_server_accept.calls[0][0].session_handle_id == 41
-    assert library.nnrp_server_accept.calls[0][0].timeout_ms == 25
+    assert library.nnrp_server_accept_begin.calls[0][0].server.id == 21
+    assert library.nnrp_server_accept_begin.calls[0][0].accept_handle_id == 41
+    assert library.nnrp_server_accept_wait.calls[0][0].accept.id == 41
+    assert library.nnrp_server_accept_wait.calls[0][0].timeout_ms == 25
+    assert library.nnrp_server_accept_claim.calls[0][0].session_handle_id == 41
     assert library.nnrp_server_await_events.calls[0][0].timeout_ms == 30
     assert library.nnrp_server_await_events.calls[1][0].timeout_ms == 1
     assert _read_buffer_view(library.nnrp_server_send_result.calls[0][0].payload) == (
@@ -2968,6 +3019,84 @@ def test_native_runtime_client_binds_native_ipc_and_websocket_servers(tmp_path: 
             session_handle_id=42,
             generation=4,
         )
+
+
+def test_native_runtime_server_retains_accept_ticket_across_would_block() -> None:
+    library = FakeRuntimeLibrary(
+        active_transport_id=int(TransportId.IPC),
+        accept_wait_statuses=[NativeStatus(FFI_STATUS_WOULD_BLOCK).to_ffi()],
+    )
+    entrypoints = NativeRuntimeEntrypoints(library)
+    server = NativeRuntimeServer(
+        entrypoints,
+        NativeConnectionHandle.from_ffi(_NnrpHandle(HANDLE_KIND_CONNECTION, 21, 1, 0)),
+        "tcp",
+    )
+
+    with pytest.raises(NativeWouldBlockError):
+        server.accept_session(session_handle_id=41, generation=3, timeout_ms=1)
+
+    session = server.accept_session(session_handle_id=42, generation=4, timeout_ms=25)
+
+    assert session.handle.handle.id == 42
+    assert session.active_transport_name == "ipc"
+    assert len(library.nnrp_server_accept_begin.calls) == 1
+    assert len(library.nnrp_server_accept_wait.calls) == 2
+    assert len(library.nnrp_server_accept_claim.calls) == 1
+    assert library.nnrp_server_accept_claim.calls[0][0].accept.id == 41
+    assert library.nnrp_server_accept_claim.calls[0][0].session_handle_id == 42
+
+
+def test_native_runtime_server_releases_pending_accept_ticket_before_close() -> None:
+    library = FakeRuntimeLibrary(
+        accept_wait_statuses=[NativeStatus(FFI_STATUS_WOULD_BLOCK).to_ffi()],
+    )
+    entrypoints = NativeRuntimeEntrypoints(library)
+    server = NativeRuntimeServer(
+        entrypoints,
+        NativeConnectionHandle.from_ffi(_NnrpHandle(HANDLE_KIND_CONNECTION, 21, 1, 0)),
+        "tcp",
+    )
+
+    with pytest.raises(NativeWouldBlockError):
+        server.accept_session(session_handle_id=41, generation=3, timeout_ms=1)
+    server.close()
+
+    assert len(library.nnrp_server_accept_release.calls) == 1
+    assert library.nnrp_server_accept_release.calls[0][0].id == 41
+    assert len(library.nnrp_client_close_connection.calls) == 1
+
+
+def test_native_runtime_server_rejects_unknown_claimed_transport() -> None:
+    library = FakeRuntimeLibrary(active_transport_id=999)
+    server = NativeRuntimeServer(
+        NativeRuntimeEntrypoints(library),
+        NativeConnectionHandle.from_ffi(_NnrpHandle(HANDLE_KIND_CONNECTION, 21, 1, 0)),
+        "tcp",
+    )
+
+    with pytest.raises(NativeArtifactError, match="unsupported transport id 999"):
+        server.accept_session(session_handle_id=41, generation=3, timeout_ms=1)
+
+
+def test_native_runtime_server_still_closes_connection_when_ticket_release_fails() -> None:
+    library = FakeRuntimeLibrary(
+        accept_wait_statuses=[NativeStatus(FFI_STATUS_WOULD_BLOCK).to_ffi()],
+    )
+    server = NativeRuntimeServer(
+        NativeRuntimeEntrypoints(library),
+        NativeConnectionHandle.from_ffi(_NnrpHandle(HANDLE_KIND_CONNECTION, 21, 1, 0)),
+        "tcp",
+    )
+    with pytest.raises(NativeWouldBlockError):
+        server.accept_session(session_handle_id=41, generation=3, timeout_ms=1)
+    library.nnrp_server_accept_release.handler = lambda _accept: NativeStatus(FFI_STATUS_INVALID_STATE).to_ffi()
+
+    with pytest.raises(NativeInvalidStateError):
+        server.close()
+
+    assert server._closed is True
+    assert len(library.nnrp_client_close_connection.calls) == 1
 
 
 def test_native_submit_request_shape_matches_frozen_ffi_without_private_scheduling_fields() -> None:
@@ -5158,10 +5287,16 @@ def test_native_runtime_entrypoints_bind_frozen_symbol_table() -> None:
         ctypes.POINTER(ctypes.c_size_t),
     ]
     assert library.nnrp_server_bind.argtypes == [_NnrpServerBindRequest, ctypes.POINTER(_NnrpHandle)]
-    assert library.nnrp_server_accept.argtypes == [
-        _NnrpServerAcceptRequest,
+    assert library.nnrp_server_accept_begin.argtypes == [
+        _NnrpServerAcceptBeginRequest,
         ctypes.POINTER(_NnrpHandle),
     ]
+    assert library.nnrp_server_accept_wait.argtypes == [_NnrpServerAcceptWaitRequest]
+    assert library.nnrp_server_accept_claim.argtypes == [
+        _NnrpServerAcceptClaimRequest,
+        ctypes.POINTER(_NnrpServerAcceptResult),
+    ]
+    assert library.nnrp_server_accept_release.argtypes == [_NnrpHandle]
     assert library.nnrp_server_await_events.argtypes == [
         _NnrpRoleEventPollRequest,
         ctypes.POINTER(_NnrpEvent),

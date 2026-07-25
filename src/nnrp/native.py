@@ -58,7 +58,7 @@ from nnrp.runtime.types import _FixedRuntimeMetadata
 EXPECTED_PROTOCOL_MAJOR = 1
 EXPECTED_PROTOCOL_WIRE_FORMAT = 0
 EXPECTED_ABI_MAJOR = 4
-EXPECTED_ABI_MINOR = 0
+EXPECTED_ABI_MINOR = 1
 TRANSPORT_SLOT_QUIC = 0x00000001
 TRANSPORT_SLOT_TCP = 0x00000002
 TRANSPORT_SLOT_IPC = 0x00000004
@@ -244,6 +244,7 @@ HANDLE_KIND_CACHE_REFERENCE_DESCRIPTOR = 9
 HANDLE_KIND_TRANSPORT_CONNECTION = 10
 HANDLE_KIND_TRANSPORT_LISTENER = 11
 HANDLE_KIND_TRANSPORT_SECURITY_CONFIG = 12
+HANDLE_KIND_SERVER_ACCEPT = 13
 EVENT_KIND_NONE = 0
 EVENT_KIND_CONNECTION_OPENED = 1
 EVENT_KIND_SESSION_OPENED = 2
@@ -520,6 +521,8 @@ class NativeTransportRejectionReason(StrEnum):
     LOCAL_UNAVAILABLE = "local-unavailable"
     PEER_UNSUPPORTED = "peer-unsupported"
     LIMIT_EXCEEDED = "limit-exceeded"
+    ROUTE_UNRESOLVED = "route-unresolved"
+    SECURITY_UNSATISFIED = "security-unsatisfied"
     PROBE_MISSING = "probe-missing"
     PROBE_FAILED = "probe-failed"
 
@@ -1091,12 +1094,37 @@ class _NnrpRuntimeObjectDescriptor(ctypes.Structure):
     ]
 
 
-class _NnrpServerAcceptRequest(ctypes.Structure):
+class _NnrpServerAcceptBeginRequest(ctypes.Structure):
     _fields_ = [
         ("server", _NnrpHandle),
+        ("accept_handle_id", ctypes.c_uint64),
+        ("generation", ctypes.c_uint32),
+        ("reserved0", ctypes.c_uint32),
+    ]
+
+
+class _NnrpServerAcceptWaitRequest(ctypes.Structure):
+    _fields_ = [
+        ("accept", _NnrpHandle),
+        ("timeout_ms", ctypes.c_uint32),
+        ("flags", ctypes.c_uint32),
+    ]
+
+
+class _NnrpServerAcceptClaimRequest(ctypes.Structure):
+    _fields_ = [
+        ("accept", _NnrpHandle),
         ("session_handle_id", ctypes.c_uint64),
         ("generation", ctypes.c_uint32),
-        ("timeout_ms", ctypes.c_uint32),
+        ("reserved0", ctypes.c_uint32),
+    ]
+
+
+class _NnrpServerAcceptResult(ctypes.Structure):
+    _fields_ = [
+        ("session", _NnrpHandle),
+        ("active_transport_id", ctypes.c_uint32),
+        ("reserved0", ctypes.c_uint32),
     ]
 
 
@@ -1367,11 +1395,29 @@ class NativeRuntimeEntrypoints:
             _NnrpFfiStatus,
             [_NnrpServerBindRequest, ctypes.POINTER(_NnrpHandle)],
         )
-        self.server_accept = _bind_native_function(
+        self.server_accept_begin = _bind_native_function(
             library,
-            "nnrp_server_accept",
+            "nnrp_server_accept_begin",
             _NnrpFfiStatus,
-            [_NnrpServerAcceptRequest, ctypes.POINTER(_NnrpHandle)],
+            [_NnrpServerAcceptBeginRequest, ctypes.POINTER(_NnrpHandle)],
+        )
+        self.server_accept_wait = _bind_native_function(
+            library,
+            "nnrp_server_accept_wait",
+            _NnrpFfiStatus,
+            [_NnrpServerAcceptWaitRequest],
+        )
+        self.server_accept_claim = _bind_native_function(
+            library,
+            "nnrp_server_accept_claim",
+            _NnrpFfiStatus,
+            [_NnrpServerAcceptClaimRequest, ctypes.POINTER(_NnrpServerAcceptResult)],
+        )
+        self.server_accept_release = _bind_native_function(
+            library,
+            "nnrp_server_accept_release",
+            _NnrpFfiStatus,
+            [_NnrpHandle],
         )
         self.server_await_events = _bind_native_function(
             library,
@@ -1859,7 +1905,11 @@ class NativeTransportListener:
             raise_for_native_status(status)
             self._closed = True
             self._handle = NativeHandle.invalid()
-            return NativeRuntimeServer(entrypoints, NativeConnectionHandle.from_ffi(output))
+            return NativeRuntimeServer(
+                entrypoints,
+                NativeConnectionHandle.from_ffi(output),
+                self._provider.name,
+            )
 
     def _require_open(self) -> None:
         if self._closed:
@@ -3393,7 +3443,9 @@ class NativeRuntimeClient:
 class NativeRuntimeServer:
     entrypoints: NativeRuntimeEntrypoints
     handle: NativeConnectionHandle
+    transport_name: str
     _closed: bool = field(default=False, init=False, repr=False, compare=False)
+    _accept_ticket: NativeHandle | None = field(default=None, init=False, repr=False, compare=False)
 
     def accept_session(
         self,
@@ -3406,26 +3458,67 @@ class NativeRuntimeServer:
         _validate_u64("session_handle_id", session_handle_id)
         _validate_u32("generation", generation)
         _validate_u32("timeout_ms", timeout_ms)
-        request = _NnrpServerAcceptRequest(
-            self.handle.to_ffi(),
+        accept_ticket = self._accept_ticket
+        if accept_ticket is None:
+            begin_request = _NnrpServerAcceptBeginRequest(
+                self.handle.to_ffi(),
+                session_handle_id,
+                generation,
+                0,
+            )
+            out_accept = _NnrpHandle()
+            status = self.entrypoints.server_accept_begin(begin_request, ctypes.byref(out_accept))
+            raise_for_native_status(status)
+            accept_ticket = NativeHandle.from_ffi(out_accept)
+            accept_ticket.require_kind(HANDLE_KIND_SERVER_ACCEPT)
+            object.__setattr__(self, "_accept_ticket", accept_ticket)
+
+        wait_request = _NnrpServerAcceptWaitRequest(accept_ticket.to_ffi(), timeout_ms, 0)
+        status = self.entrypoints.server_accept_wait(wait_request)
+        raise_for_native_status(status)
+
+        claim_request = _NnrpServerAcceptClaimRequest(
+            accept_ticket.to_ffi(),
             session_handle_id,
             generation,
-            timeout_ms,
+            0,
         )
-        out_session = _NnrpHandle()
-        status = self.entrypoints.server_accept(request, ctypes.byref(out_session))
+        result = _NnrpServerAcceptResult()
+        status = self.entrypoints.server_accept_claim(claim_request, ctypes.byref(result))
         raise_for_native_status(status)
+        object.__setattr__(self, "_accept_ticket", None)
+        try:
+            active_transport_id = TransportId(int(result.active_transport_id))
+        except ValueError as error:
+            raise NativeArtifactError(
+                f"native server accept returned unsupported transport id {int(result.active_transport_id)}"
+            ) from error
+        transport_name = NATIVE_TRANSPORT_NAME_BY_ID[active_transport_id]
         return NativeRuntimeServerSession(
             self.entrypoints,
             self.handle,
-            NativeSessionHandle.from_ffi(out_session),
+            NativeSessionHandle.from_ffi(result.session),
+            transport_name,
         )
 
     def close(self) -> None:
         self._ensure_open()
-        status = self.entrypoints.client_close_connection(self.handle.to_ffi())
-        raise_for_native_status(status)
+        first_error: BaseException | None = None
+        accept_ticket = self._accept_ticket
+        if accept_ticket is not None:
+            try:
+                raise_for_native_status(self.entrypoints.server_accept_release(accept_ticket.to_ffi()))
+            except BaseException as error:
+                first_error = error
+            finally:
+                object.__setattr__(self, "_accept_ticket", None)
+        try:
+            raise_for_native_status(self.entrypoints.client_close_connection(self.handle.to_ffi()))
+        except BaseException as error:
+            first_error = first_error or error
         object.__setattr__(self, "_closed", True)
+        if first_error is not None:
+            raise first_error
 
     def _ensure_open(self) -> None:
         if self._closed:
@@ -4482,6 +4575,7 @@ class NativeRuntimeServerSession:
     entrypoints: NativeRuntimeEntrypoints
     server: NativeConnectionHandle
     handle: NativeSessionHandle
+    active_transport_name: str
     _closed: bool = field(default=False, init=False, repr=False, compare=False)
     _next_runtime_frame_id: int = field(default=1, init=False, repr=False, compare=False)
 

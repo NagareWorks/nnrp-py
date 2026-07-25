@@ -91,31 +91,31 @@
 
 ## Host Route Cardinality
 
-- [ ] Replace singular production role routing with the frozen route maps.
-  - [ ] Add `NativeClientProviderRoute` and a canonical transport-keyed client mapping.
-  - [ ] Add `NativeServerProviderRoute` and a canonical transport-keyed server mapping.
-  - [ ] Keep the exact owned client/server security fields on each route.
-  - [ ] Remove role-level `provider_endpoint`, `security`, and explicit single-transport options.
-  - [ ] Keep singular endpoint/security only on low-level one-provider packet APIs.
-  - [ ] Report configured known-but-uninstalled routes as `local-unavailable`.
-  - [ ] Apply the exact rejection precedence when multiple checks fail.
-- [ ] Complete native client route orchestration.
-  - [ ] Resolve every installed route independently.
-  - [ ] Probe every eligible Auto/Prefer route.
-  - [ ] Preserve unresolved and security-incompatible candidates in diagnostics.
-  - [ ] Transfer only the selected carrier to the Rust role runtime.
-  - [ ] Fail Force without fallback.
-- [ ] Complete native server listener-set orchestration.
-  - [ ] Resolve every policy-allowed installed route.
-  - [ ] Bind every eligible Auto/Prefer route into one logical server.
-  - [ ] Accept sessions from every bound listener.
-  - [ ] Expose the actual listener transport as `active_transport_name` on every accepted session.
-  - [ ] Expose actual bound provider endpoints, including assigned ports.
-  - [ ] Roll back all listeners when any required bind or adoption fails.
-  - [ ] Fail and close the complete logical server after a terminal provider-listener failure.
-  - [ ] Close every listener and accepted session exactly once.
-- [ ] Enforce route-local application security intent.
-  - [ ] Add TCP TLS client and server routes.
-  - [ ] Keep QUIC and native WSS credentials isolated by route.
-  - [ ] Reject IPC, plain TCP, and WS for `nnrps://` with `security-unsatisfied`.
-  - [ ] Add `route-unresolved` and `security-unsatisfied` to Python diagnostics.
+- [x] Replace singular production role routing with the frozen route maps.
+  - [x] Add `NativeClientProviderRoute` and a canonical transport-keyed client mapping.
+  - [x] Add `NativeServerProviderRoute` and a canonical transport-keyed server mapping.
+  - [x] Keep the exact owned client/server security fields on each route.
+  - [x] Remove role-level `provider_endpoint`, `security`, and explicit single-transport options.
+  - [x] Keep singular endpoint/security only on low-level one-provider packet APIs.
+  - [x] Report configured known-but-uninstalled routes as `local-unavailable`.
+  - [x] Apply the exact rejection precedence when multiple checks fail.
+- [x] Complete native client route orchestration.
+  - [x] Resolve every installed route independently.
+  - [x] Probe every eligible Auto/Prefer route.
+  - [x] Preserve unresolved and security-incompatible candidates in diagnostics.
+  - [x] Transfer only the selected carrier to the Rust role runtime.
+  - [x] Fail Force without fallback.
+- [x] Complete native server listener-set orchestration.
+  - [x] Resolve every policy-allowed installed route.
+  - [x] Bind every eligible Auto/Prefer route into one logical server.
+  - [x] Accept sessions from every bound listener.
+  - [x] Expose the actual listener transport as `active_transport_name` on every accepted session.
+  - [x] Expose actual bound provider endpoints, including assigned ports.
+  - [x] Roll back all listeners when any required bind or adoption fails.
+  - [x] Fail and close the complete logical server after a terminal provider-listener failure.
+  - [x] Close every listener and accepted session exactly once.
+- [x] Enforce route-local application security intent.
+  - [x] Add TCP TLS client and server routes.
+  - [x] Keep QUIC and native WSS credentials isolated by route.
+  - [x] Reject IPC, plain TCP, and WS for `nnrps://` with `security-unsatisfied`.
+  - [x] Add `route-unresolved` and `security-unsatisfied` to Python diagnostics.

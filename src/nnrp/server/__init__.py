@@ -4,6 +4,7 @@ from nnrp.server.native import (
     NativeServer,
     NativeServerAcceptOptions,
     NativeServerOptions,
+    NativeServerProviderRoute,
     listen_native_server,
 )
 from nnrp.server.profile import ServerProfile
@@ -24,6 +25,7 @@ __all__ = [
     "NativeServer",
     "NativeServerAcceptOptions",
     "NativeServerOptions",
+    "NativeServerProviderRoute",
     "ServerProfile",
     "accept_server_connection",
     "accept_server_session",

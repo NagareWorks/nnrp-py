@@ -150,7 +150,9 @@ def test_run_server_scenario_dispatches_typed_handlers(
 
     @contextmanager
     def listen(*args, **kwargs):
-        assert kwargs["provider_endpoint"] == "tcp://127.0.0.1:19091"
+        route = kwargs["provider_routes"]["tcp"]
+        assert route.provider_endpoint == "tcp://127.0.0.1:19091"
+        assert kwargs["transport_policy"] == "force_tcp"
         yield server
 
     monkeypatch.setattr(wire_target, "listen_native_server", listen)

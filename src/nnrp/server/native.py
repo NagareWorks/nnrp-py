@@ -2,25 +2,47 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterator
+import time
+from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass, field
+from types import MappingProxyType
 
+from nnrp._native_routes import (
+    apply_host_rejection,
+    forced_transport_name,
+    normalize_provider_routes,
+    normalize_transport_policy,
+    ordered_candidates,
+    policy_allows,
+    provider_order_key,
+    selection_error,
+    unavailable_candidate,
+)
 from nnrp.core import TransportPolicy
 from nnrp.native import (
+    FFI_STATUS_WOULD_BLOCK,
+    NATIVE_TRANSPORT_ID_BY_NAME,
     NativeArtifactError,
     NativeRuntimeServer,
     NativeRuntimeServerSession,
+    NativeStatus,
+    NativeTransportCandidateDiagnostic,
     NativeTransportEndpoint,
+    NativeTransportProbeState,
+    NativeTransportProvider,
+    NativeTransportRejectionReason,
     NativeTransportServerSecurity,
+    NativeWouldBlockError,
     NnrpEndpoint,
+    discover_native_transport_providers,
     load_native_transport_binding,
-    parse_native_transport_endpoint,
     parse_nnrp_endpoint,
     resolve_native_transport_endpoint,
-    resolve_native_transport_provider,
-    select_native_transport_provider,
 )
+
+_DEFAULT_ACCEPT_TIMEOUT_MS = 5_000
+_ACCEPT_POLL_SLICE_MS = 1
 
 
 @dataclass(frozen=True, slots=True)
@@ -36,125 +58,214 @@ class NativeServerAcceptOptions:
     timeout_ms: int = 0
 
 
+@dataclass(frozen=True, slots=True)
+class NativeServerProviderRoute:
+    provider_endpoint: str | NativeTransportEndpoint | None = None
+    security: NativeTransportServerSecurity | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class _ResolvedServerRoute:
+    provider: NativeTransportProvider
+    endpoint: NativeTransportEndpoint
+    security: NativeTransportServerSecurity | None
+
+
 @dataclass(slots=True)
 class NativeServer:
-    server: NativeRuntimeServer
+    _servers: tuple[tuple[str, NativeRuntimeServer], ...]
+    bound_provider_endpoints: Mapping[str, NativeTransportEndpoint]
     _sessions: list[NativeRuntimeServerSession] = field(default_factory=list, init=False, repr=False)
     _closed: bool = field(default=False, init=False, repr=False)
 
     def accept(self, options: NativeServerAcceptOptions | None = None) -> NativeRuntimeServerSession:
         self._ensure_open()
         resolved = options or NativeServerAcceptOptions()
-        session = self.server.accept_session(
-            session_handle_id=resolved.session_handle_id,
-            generation=resolved.session_generation,
-            timeout_ms=resolved.timeout_ms,
-        )
-        self._sessions.append(session)
-        return session
+        timeout_ms = resolved.timeout_ms or _DEFAULT_ACCEPT_TIMEOUT_MS
+        deadline = time.monotonic() + timeout_ms / 1_000
+        while True:
+            for _transport_name, server in self._servers:
+                try:
+                    session = server.accept_session(
+                        session_handle_id=resolved.session_handle_id,
+                        generation=resolved.session_generation,
+                        timeout_ms=_ACCEPT_POLL_SLICE_MS,
+                    )
+                except NativeWouldBlockError:
+                    continue
+                except BaseException:
+                    try:
+                        self.close()
+                    except BaseException:
+                        pass
+                    raise
+                self._sessions.append(session)
+                return session
+            if time.monotonic() >= deadline:
+                raise NativeWouldBlockError(NativeStatus(FFI_STATUS_WOULD_BLOCK))
 
     def close(self) -> None:
         if self._closed:
             return
+        first_error: BaseException | None = None
         for session in reversed(self._sessions):
             if not session._closed:
-                session.close()
-        if not self.server._closed:
-            self.server.close()
+                try:
+                    session.close()
+                except BaseException as error:
+                    first_error = first_error or error
+        for _transport_name, server in reversed(self._servers):
+            if not server._closed:
+                try:
+                    server.close()
+                except BaseException as error:
+                    first_error = first_error or error
         self._closed = True
+        if first_error is not None:
+            raise first_error
 
     def _ensure_open(self) -> None:
         if self._closed:
             raise RuntimeError("native server is closed")
 
 
-def _select_server_transport(
+def _server_route_security_satisfied(
+    endpoint: NnrpEndpoint,
     *,
+    transport_name: str,
     provider_endpoint: NativeTransportEndpoint | None,
-    transport_policy: TransportPolicy | str | int,
-    transport: str | None,
-) -> str:
-    if transport is not None:
-        provider = resolve_native_transport_provider(transport)
-        select_native_transport_provider(
-            transport_policy,
-            supported_transports=(provider.name,),
-        )
-        if provider_endpoint is not None and provider_endpoint.transport_name != provider.name:
-            raise NativeArtifactError(
-                f"{provider.name} provider cannot use {provider_endpoint.transport_name} carrier endpoint"
-            )
-        return provider.name
+    security: NativeTransportServerSecurity | None,
+) -> bool:
+    if transport_name == "quic":
+        return security is not None
+    if transport_name == "websocket" and provider_endpoint is not None and provider_endpoint.secure:
+        return security is not None
+    if not endpoint.secure:
+        return True
+    if transport_name == "tcp":
+        return security is not None
+    if transport_name == "websocket":
+        return provider_endpoint is not None and provider_endpoint.secure and security is not None
+    return False
 
-    supported = {provider_endpoint.transport_name} if provider_endpoint is not None else {"tcp", "quic"}
-    try:
-        return select_native_transport_provider(
-            transport_policy,
-            supported_transports=tuple(supported),
-        ).selected_transport_name
-    except NativeArtifactError as error:
-        eligible = tuple(
-            candidate
-            for candidate in error.candidates
-            if candidate.transport_name in supported
-            and candidate.rejection_reason is not None
-            and candidate.rejection_reason.value == "probe-missing"
+
+def _base_server_candidate(provider: NativeTransportProvider) -> NativeTransportCandidateDiagnostic:
+    return NativeTransportCandidateDiagnostic(
+        transport_name=provider.name,
+        transport_id=NATIVE_TRANSPORT_ID_BY_NAME[provider.name],
+        provider=provider.metadata,
+        local_available=True,
+        peer_supported=True,
+        within_limits=True,
+        probe_state=NativeTransportProbeState.NOT_RUN,
+    )
+
+
+def _resolve_server_routes(
+    endpoint: NnrpEndpoint,
+    provider_routes: Mapping[str, NativeServerProviderRoute] | None,
+    transport_policy: TransportPolicy | str | int,
+) -> tuple[_ResolvedServerRoute, ...]:
+    policy = normalize_transport_policy(transport_policy)
+    normalized_routes = normalize_provider_routes(provider_routes, NativeServerProviderRoute)
+    providers = discover_native_transport_providers()
+    providers_by_name = {provider.name: provider for provider in providers}
+    transport_names = set(providers_by_name) | set(normalized_routes)
+    forced_transport = forced_transport_name(policy)
+    if forced_transport is not None:
+        transport_names.add(forced_transport)
+    diagnostics: dict[str, NativeTransportCandidateDiagnostic] = {}
+    resolved_routes: list[_ResolvedServerRoute] = []
+    required_failure = False
+
+    for transport_name in transport_names:
+        provider = providers_by_name.get(transport_name)
+        route = normalized_routes.get(transport_name, NativeServerProviderRoute())
+        carrier_endpoint: NativeTransportEndpoint | None = None
+        if provider is not None:
+            try:
+                carrier_endpoint = resolve_native_transport_endpoint(
+                    endpoint,
+                    transport_name,
+                    provider_endpoint=route.provider_endpoint,
+                )
+            except (NativeArtifactError, ValueError):
+                pass
+        security_satisfied = _server_route_security_satisfied(
+            endpoint,
+            transport_name=transport_name,
+            provider_endpoint=carrier_endpoint,
+            security=route.security,
         )
-        if not eligible:
-            raise
-        return min(
-            eligible,
-            key=lambda candidate: (
-                candidate.provider.preference_rank,
-                int(candidate.transport_id),
-                candidate.provider.id,
-            ),
-        ).transport_name
+        candidate = _base_server_candidate(provider) if provider is not None else unavailable_candidate(transport_name)
+        candidate = apply_host_rejection(
+            candidate,
+            policy_allowed=policy_allows(policy, transport_name),
+            local_available=provider is not None,
+            peer_supported=True,
+            within_limits=True,
+            route_resolved=carrier_endpoint is not None,
+            security_satisfied=security_satisfied,
+        )
+        diagnostics[transport_name] = candidate
+
+        if candidate.rejection_reason is None:
+            assert provider is not None and carrier_endpoint is not None
+            resolved_routes.append(_ResolvedServerRoute(provider, carrier_endpoint, route.security))
+        elif policy_allows(policy, transport_name) and (
+            candidate.rejection_reason is NativeTransportRejectionReason.ROUTE_UNRESOLVED
+            or (
+                transport_name in normalized_routes
+                and candidate.rejection_reason is NativeTransportRejectionReason.LOCAL_UNAVAILABLE
+            )
+        ):
+            required_failure = True
+
+    candidates = ordered_candidates(diagnostics)
+    if required_failure or not resolved_routes:
+        raise selection_error(policy, candidates)
+    resolved_routes.sort(key=lambda route: provider_order_key(route.provider.name, route.provider.metadata, policy))
+    return tuple(resolved_routes)
 
 
 @contextmanager
 def listen_native_server(
     endpoint: str | NnrpEndpoint,
     *,
-    provider_endpoint: str | NativeTransportEndpoint | None = None,
+    provider_routes: Mapping[str, NativeServerProviderRoute] | None = None,
     transport_policy: TransportPolicy | str | int = TransportPolicy.AUTO,
-    transport: str | None = None,
-    security: NativeTransportServerSecurity | None = None,
     options: NativeServerOptions | None = None,
     require_native: bool = False,
 ) -> Iterator[NativeServer]:
     del require_native
     application_endpoint = endpoint if isinstance(endpoint, NnrpEndpoint) else parse_nnrp_endpoint(endpoint)
-    carrier_override = (
-        provider_endpoint
-        if isinstance(provider_endpoint, NativeTransportEndpoint)
-        else parse_native_transport_endpoint(provider_endpoint)
-        if provider_endpoint is not None
-        else None
-    )
-    transport_name = _select_server_transport(
-        provider_endpoint=carrier_override,
-        transport_policy=transport_policy,
-        transport=transport,
-    )
-    carrier_endpoint = resolve_native_transport_endpoint(
-        application_endpoint,
-        transport_name,
-        provider_endpoint=carrier_override,
-    )
-    binding = load_native_transport_binding(transport_name)
-    listener = binding._listen(carrier_endpoint, security, 0, 0)
+    routes = _resolve_server_routes(application_endpoint, provider_routes, transport_policy)
     resolved_options = options or NativeServerOptions()
+    adopted: list[tuple[str, NativeRuntimeServer]] = []
+    bound_endpoints: dict[str, NativeTransportEndpoint] = {}
     try:
-        runtime_server = binding.adopt_server(
-            listener,
-            server_id=resolved_options.server_id,
-            generation=resolved_options.server_generation,
-        )
+        for route in routes:
+            binding = load_native_transport_binding(route.provider.name)
+            listener = binding._listen(route.endpoint, route.security, 0, 0)
+            bound_endpoint = listener.endpoint
+            try:
+                runtime_server = binding.adopt_server(
+                    listener,
+                    server_id=resolved_options.server_id,
+                    generation=resolved_options.server_generation,
+                )
+            except BaseException:
+                listener._close()
+                raise
+            adopted.append((route.provider.name, runtime_server))
+            bound_endpoints[route.provider.name] = bound_endpoint
     except BaseException:
-        listener._close()
+        for _transport_name, runtime_server in reversed(adopted):
+            if not runtime_server._closed:
+                runtime_server.close()
         raise
-    server = NativeServer(runtime_server)
+
+    server = NativeServer(tuple(adopted), MappingProxyType(bound_endpoints))
     try:
         yield server
     finally:

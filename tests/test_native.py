@@ -2978,7 +2978,7 @@ def test_native_runtime_client_binds_native_ipc_and_websocket_servers(tmp_path: 
     )
     operation.send_result(result_metadata, b"server-result")
     session.send_trace_context(TraceContextMetadata(1, 2, 0, 3, 0, 0))
-    session.poll_events()
+    event = session.poll_event(timeout_ms=1)
     session.close()
     websocket_server.close()
 
@@ -2986,6 +2986,8 @@ def test_native_runtime_client_binds_native_ipc_and_websocket_servers(tmp_path: 
     assert isinstance(websocket_server, NativeRuntimeServer)
     assert isinstance(session, NativeRuntimeServerSession)
     assert isinstance(operation, NativeRuntimeServerOperation)
+    assert event is not None
+    assert event.session.id == 41
     assert ipc_server.handle.handle.id == 21
     assert websocket_server.handle.handle.id == 22
     assert session.server.handle.id == 21
@@ -3005,6 +3007,7 @@ def test_native_runtime_client_binds_native_ipc_and_websocket_servers(tmp_path: 
     assert library.nnrp_server_accept_claim.calls[0][0].session_handle_id == 41
     assert library.nnrp_server_await_events.calls[0][0].timeout_ms == 30
     assert library.nnrp_server_await_events.calls[1][0].timeout_ms == 1
+    assert library.nnrp_server_await_events.calls[1][0].max_events == 1
     assert _read_buffer_view(library.nnrp_server_send_result.calls[0][0].payload) == (
         result_metadata.pack() + b"server-result"
     )

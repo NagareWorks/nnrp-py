@@ -4636,6 +4636,10 @@ class NativeRuntimeServerSession:
             for index in range(int(event_count.value))
         )
 
+    def poll_event(self, *, timeout_ms: int = 0) -> NativeRuntimeEvent | None:
+        events = self.poll_events(max_events=1, timeout_ms=timeout_ms)
+        return events[0] if events else None
+
     def poll_runtime_frames(
         self,
         *,

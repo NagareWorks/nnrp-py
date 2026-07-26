@@ -206,6 +206,18 @@ foreach ($mode in $modes) {
   }
 
   $securityArguments = @()
+  if ($mode -in @("suite_as_client", "suite_as_server")) {
+    $securityArguments += @(
+      "--transport-security",
+      (@{
+          transport = "tcp"
+          server_name = "localhost"
+          trusted_certificate_der_path = "certs/server.der"
+          certificate_der_path = "certs/server.der"
+          private_key_pkcs8_der_path = "certs/server-key.der"
+        } | ConvertTo-Json -Compress)
+    )
+  }
   if ($mode -in @("suite_as_client", "suite_as_proxy")) {
     $securityArguments += @(
       "--transport-security",

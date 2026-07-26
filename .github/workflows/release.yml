@@ -174,7 +174,7 @@ jobs:
           --verify-platform-tag
           --require-split-transports
           --require-preview4-native-artifacts
-          --require-abi-version 4.0.0
+          --require-abi-version 4.1.0
 
       - name: Run native runtime benchmark smoke thresholds
         shell: bash

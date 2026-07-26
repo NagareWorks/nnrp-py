@@ -62,7 +62,7 @@ def test_ci_runs_independent_process_wire_conformance() -> None:
     workflow = _read_ci_workflow()
 
     assert "wire-conformance:" in workflow
-    assert "NNRP_RS_SOURCE_COMMIT: 730d1cc8035644469d30e665568f48b34aa3b710" in workflow
+    assert "NNRP_RS_SOURCE_COMMIT: a00b77af4e13fc5a21473f6c90a288bd3d248fc7" in workflow
     assert "Checkout pinned nnrp-rs source" in workflow
     assert "ref: ${{ env.NNRP_RS_SOURCE_COMMIT }}" in workflow
     for transport in ("tcp", "quic", "ipc", "websocket"):
@@ -116,3 +116,5 @@ def test_ci_wire_conformance_declares_preview4_modes_transports_and_capabilities
     assert '"validate-wire-results"' in script
     assert 'outcome -ne "passed"' in script
     assert "Expected six Preview4 wire scenarios" in script
+    assert '$mode -in @("suite_as_client", "suite_as_server")' in script
+    assert 'transport = "tcp"' in script

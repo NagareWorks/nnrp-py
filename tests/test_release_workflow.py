@@ -30,7 +30,7 @@ def test_release_workflow_rejects_non_preview4_native_artifact_shape() -> None:
     workflow = RELEASE_WORKFLOW.read_text(encoding="utf-8")
 
     assert "--require-preview4-native-artifacts" in workflow
-    assert "--require-abi-version 4.0.0" in workflow
+    assert "--require-abi-version 4.1.0" in workflow
 
 
 def test_release_workflow_smokes_preview4_ipc_and_websocket_artifacts() -> None:

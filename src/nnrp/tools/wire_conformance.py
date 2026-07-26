@@ -293,15 +293,21 @@ def _target_manifest_cli(argv: Sequence[str] | None = None) -> int:
     unknown_security = sorted(set(security_by_transport) - {transport.name for transport in transports})
     if unknown_security:
         raise ValueError(f"transport security references undeclared transport: {', '.join(unknown_security)}")
-    transports = [
-        dataclasses.replace(transport, security=security_by_transport.get(transport.name))
-        for transport in transports
-    ]
+    secured_transports = []
+    for transport in transports:
+        security = security_by_transport.get(transport.name)
+        secured_transports.append(
+            dataclasses.replace(
+                transport,
+                tls=transport.tls or (transport.name == "tcp" and security is not None),
+                security=security,
+            )
+        )
     manifest = build_wire_target_manifest(
         target_name=args.target_name,
         suite_version=args.suite_version,
         modes=args.modes,
-        transports=transports,
+        transports=secured_transports,
         capabilities=args.capabilities,
         max_frame_bytes=args.max_frame_bytes,
         max_in_flight=args.max_in_flight,
@@ -484,8 +490,8 @@ def _normalize_transports(transports: Sequence[WireTargetTransport]) -> list[Wir
         expected_tls = _endpoint_uses_tls(transport.name, transport.endpoint)
         if transport.name == "quic" and not transport.tls:
             raise ValueError("QUIC wire conformance transport requires TLS")
-        if transport.name in {"tcp", "ipc"} and transport.tls:
-            raise ValueError(f"{transport.name} wire conformance transport does not use TLS")
+        if transport.name == "ipc" and transport.tls:
+            raise ValueError("ipc wire conformance transport does not use TLS")
         if transport.name == "websocket" and transport.tls != expected_tls:
             raise ValueError("WebSocket TLS flag must match its ws:// or wss:// endpoint")
         if transport.tls and transport.security is None:

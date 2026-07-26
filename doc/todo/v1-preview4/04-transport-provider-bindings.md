@@ -87,6 +87,7 @@
 - [x] Add carrier-backed E2E tests for TCP, QUIC, IPC, and WebSocket.
   - [x] Cover client/server handshake and submit/result exchange.
   - [x] Cover runtime control and object/cache events.
+  - [x] Cover route-local TCP TLS through packaged artifacts and the independent wire target.
   - [x] Cover ownership transfer failure and idempotent role close.
 
 ## Host Route Cardinality

@@ -20,7 +20,7 @@
 - [x] Keep client/server hot paths coarse at submit, event-batch, result, and runtime-frame boundaries.
 - [x] Reject universal wheels for native preview4 releases.
 - [x] Verify wheel contents per platform.
-- [x] Require Rust ABI `4.0.0` in the release workflow.
+- [x] Require Rust ABI `4.1.0` in the release workflow.
 
 ## Benchmarks
 
@@ -47,7 +47,7 @@
 
 - [x] Run unit tests.
 - [x] Run adapter conformance.
-- [x] Run wire conformance dry-run.
+- [x] Run wire conformance dry-run and the independent-process plain/TLS carrier matrix.
 - [x] Run native wheel inspection.
 - [x] Run real bidirectional complete-packet IPC and WebSocket loopbacks against packaged artifacts.
 - [x] Run benchmark smoke thresholds.

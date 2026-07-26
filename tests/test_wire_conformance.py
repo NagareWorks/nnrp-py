@@ -263,6 +263,14 @@ def test_parse_wire_target_security_rejects_incomplete_or_ambiguous_values(value
                 "transports": [WireTargetTransport("tcp", "127.0.0.1:1", tls=True)],
                 "capabilities": ["control.cancel_abort"],
             },
+            "requires security material",
+        ),
+        (
+            {
+                "modes": ["suite_as_client"],
+                "transports": [WireTargetTransport("ipc", "unix:///tmp/nnrp.sock", tls=True)],
+                "capabilities": ["control.cancel_abort"],
+            },
             "does not use TLS",
         ),
         (
@@ -379,6 +387,39 @@ def test_wire_target_manifest_cli_writes_tls_security(tmp_path) -> None:
     ) == 0
 
     transport = json.loads(output_path.read_text(encoding="utf-8"))["wire_conformance"]["transports"][0]
+    assert transport["security"]["server_name"] == "localhost"
+
+
+def test_wire_target_manifest_cli_enables_optional_tcp_tls_from_security(tmp_path) -> None:
+    output_path = tmp_path / "target.json"
+    security = json.dumps(
+        {
+            "transport": "tcp",
+            "server_name": "localhost",
+            "trusted_certificate_der_path": "certs/server.der",
+            "certificate_der_path": "certs/server.der",
+            "private_key_pkcs8_der_path": "certs/server-key.der",
+        }
+    )
+
+    assert main(
+        [
+            "manifest",
+            "--mode",
+            "suite_as_server",
+            "--transport",
+            "tcp=127.0.0.1:19091",
+            "--transport-security",
+            security,
+            "--capability",
+            "control.cancel_abort",
+            "--output",
+            str(output_path),
+        ]
+    ) == 0
+
+    transport = json.loads(output_path.read_text(encoding="utf-8"))["wire_conformance"]["transports"][0]
+    assert transport["tls"] is True
     assert transport["security"]["server_name"] == "localhost"
 
 

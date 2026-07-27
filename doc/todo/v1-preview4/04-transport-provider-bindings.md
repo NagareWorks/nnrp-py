@@ -15,7 +15,7 @@
   - [x] Maximum frame bytes.
   - [x] Registered platform limitations.
 - [x] Reject aggregate and legacy provider manifest shapes.
-- [x] Reject provider names that are not advertised by the native artifact.
+- [x] Reject provider names that are not advertised by the native artifact and reject duplicate transport/provider ids.
 - [x] Keep application-facing `nnrp://` / `nnrps://` endpoints separate from provider-local locators.
 
 ## TCP And QUIC Preview4 Runtime Continuity
@@ -53,11 +53,11 @@
 - [x] Select the installed transport directly for single-provider installations.
 - [x] Probe installed transports by policy for multi-provider installations.
 - [x] Preserve explicit user transport selection.
-- [x] Match probe samples by transport id and stable provider id.
-- [x] Compute per-sample throughput and exact odd/even medians.
+- [x] Require exact readiness and observation evidence keyed by transport id and stable provider id; reject duplicate, unmatched, or incomplete evidence before selection.
+- [x] Summarize raw probe samples into succeeded/failed observations with per-sample throughput and exact odd/even medians.
 - [x] Apply the frozen success, throughput, RTT, cost, preference, transport-id, and provider-id comparator.
 - [x] Surface typed probe metrics and complete ordered candidate diagnostics.
-- [x] Carry complete candidate diagnostics on selection errors.
+- [x] Carry complete candidate diagnostics on typed invalid-evidence, forced-unavailable, and no-viable selection errors.
 - [x] Remove the Python-specific weighted score API.
 
 ## Public Binding Surface

@@ -33,8 +33,11 @@ from nnrp.native import (
     NativeTransportCandidateDiagnostic,
     NativeTransportClientSecurity,
     NativeTransportConnection,
+    NativeTransportProbeMetrics,
     NativeTransportProbeState,
     NativeTransportRejectionReason,
+    NativeTransportSelectionError,
+    NativeTransportSelectionErrorCode,
     NativeWouldBlockError,
     parse_native_transport_endpoint,
 )
@@ -133,6 +136,7 @@ class FakeBackend:
         connection = FakeConnection(connection_id, generation, transport_connection)
         self.connections.append(connection)
         return connection
+
 
 class FakeConnection:
     def __init__(
@@ -1082,21 +1086,14 @@ def test_connect_client_keeps_security_on_its_selected_route(monkeypatch: pytest
 
 def test_select_client_transport_probes_every_eligible_route(monkeypatch: pytest.MonkeyPatch) -> None:
     providers = tuple(
-        SimpleNamespace(name=name, metadata=official_provider_metadata(name))
-        for name in ("tcp", "websocket")
+        SimpleNamespace(name=name, metadata=official_provider_metadata(name)) for name in ("tcp", "websocket")
     )
-    selected_samples = []
+    selected_observations = []
+    selected_readiness = []
 
     def select_provider(*_args, **kwargs):
-        if "probe_samples" not in kwargs:
-            raise NativeArtifactError(
-                "probe samples required",
-                candidates=tuple(
-                    native_candidate(name, NativeTransportRejectionReason.PROBE_MISSING)
-                    for name in ("tcp", "websocket")
-                ),
-            )
-        selected_samples.extend(kwargs["probe_samples"])
+        selected_readiness.extend(kwargs["candidate_readiness"])
+        selected_observations.extend(kwargs["probe_observations"])
         return SimpleNamespace(
             selected_transport_name="tcp",
             candidates=(native_candidate("tcp"), native_candidate("websocket")),
@@ -1104,7 +1101,7 @@ def test_select_client_transport_probes_every_eligible_route(monkeypatch: pytest
 
     class FakeProbeBinding:
         def _probe(self, *_args):
-            return SimpleNamespace(
+            return NativeTransportProbeMetrics(
                 success_count=2,
                 sample_count=3,
                 median_rtt_us=12,
@@ -1132,14 +1129,83 @@ def test_select_client_transport_probes_every_eligible_route(monkeypatch: pytest
     )
 
     assert selected == "tcp"
-    assert [(sample.transport_name, sample.failed) for sample in selected_samples] == [
-        ("tcp", False),
-        ("tcp", False),
-        ("tcp", True),
-        ("websocket", False),
-        ("websocket", False),
-        ("websocket", True),
+    assert [(record.transport_id, record.route_resolved) for record in selected_readiness] == [
+        (NATIVE_TRANSPORT_ID_BY_NAME["tcp"], True),
+        (NATIVE_TRANSPORT_ID_BY_NAME["websocket"], True),
     ]
+    assert [(observation.transport_id, observation.state) for observation in selected_observations] == [
+        (NATIVE_TRANSPORT_ID_BY_NAME["tcp"], NativeTransportProbeState.SUCCEEDED),
+        (NATIVE_TRANSPORT_ID_BY_NAME["websocket"], NativeTransportProbeState.SUCCEEDED),
+    ]
+
+
+def test_select_client_transport_records_probe_failure_observation(monkeypatch: pytest.MonkeyPatch) -> None:
+    providers = tuple(
+        SimpleNamespace(name=name, metadata=official_provider_metadata(name)) for name in ("tcp", "websocket")
+    )
+    selected_observations = []
+
+    def select_provider(*_args, **kwargs):
+        selected_observations.extend(kwargs["probe_observations"])
+        return SimpleNamespace(selected_transport_name="websocket", candidates=())
+
+    class FakeProbeBinding:
+        def __init__(self, transport_name: str) -> None:
+            self.transport_name = transport_name
+
+        def _probe(self, *_args):
+            if self.transport_name == "tcp":
+                raise RuntimeError("connection refused")
+            return NativeTransportProbeMetrics(1, 1, 4096, 12)
+
+    monkeypatch.setattr(client_native_module, "select_native_transport_provider", select_provider)
+    monkeypatch.setattr(client_native_module, "discover_native_transport_providers", lambda *_args: providers)
+    monkeypatch.setattr(
+        client_native_module,
+        "load_native_transport_binding",
+        lambda transport_name, **_kwargs: FakeProbeBinding(transport_name),
+    )
+
+    selected, _route = client_native_module._select_client_transport(
+        client_native_module.parse_nnrp_endpoint("nnrp://localhost"),
+        provider_routes={"websocket": NativeClientProviderRoute(provider_endpoint="ws://localhost/nnrp")},
+        transport_policy="auto",
+        artifact_path=None,
+        root=None,
+        native_platform=None,
+        library=None,
+    )
+
+    assert selected == "websocket"
+    assert selected_observations[0].state is NativeTransportProbeState.FAILED
+    assert selected_observations[0].diagnostic == "transport probe failed: connection refused"
+
+
+def test_select_client_transport_preserves_invalid_evidence_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    provider = SimpleNamespace(name="tcp", metadata=official_provider_metadata("tcp"))
+    expected = NativeTransportSelectionError(
+        NativeTransportSelectionErrorCode.INVALID_EVIDENCE,
+        "duplicate readiness",
+    )
+    monkeypatch.setattr(client_native_module, "discover_native_transport_providers", lambda *_args: (provider,))
+    monkeypatch.setattr(
+        client_native_module,
+        "select_native_transport_provider",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(expected),
+    )
+
+    with pytest.raises(NativeTransportSelectionError) as caught:
+        client_native_module._select_client_transport(
+            client_native_module.parse_nnrp_endpoint("nnrp://localhost"),
+            provider_routes=None,
+            transport_policy="auto",
+            artifact_path=None,
+            root=None,
+            native_platform=None,
+            library=None,
+        )
+
+    assert caught.value is expected
 
 
 @pytest.mark.parametrize(
@@ -1173,14 +1239,20 @@ def test_select_client_transport_reports_host_route_rejection(
     expected_reason: NativeTransportRejectionReason,
 ) -> None:
     installed_names = ("tcp", "websocket") if policy != "force_ipc" else ()
-    providers = tuple(
-        SimpleNamespace(name=name, metadata=official_provider_metadata(name)) for name in installed_names
-    )
+    providers = tuple(SimpleNamespace(name=name, metadata=official_provider_metadata(name)) for name in installed_names)
     monkeypatch.setattr(client_native_module, "discover_native_transport_providers", lambda *_args: providers)
     monkeypatch.setattr(
         client_native_module,
         "select_native_transport_provider",
-        lambda *_args, **_kwargs: (_ for _ in ()).throw(NativeArtifactError("no route")),
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            NativeTransportSelectionError(
+                NativeTransportSelectionErrorCode.NO_VIABLE_TRANSPORT,
+                "no route",
+                candidates=(native_candidate(policy.removeprefix("force_"), expected_reason),)
+                if installed_names
+                else (),
+            )
+        ),
     )
 
     with pytest.raises(NativeArtifactError) as caught:

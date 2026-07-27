@@ -20,6 +20,8 @@ from nnrp.native import (
     NativeTransportProviderLimits,
     NativeTransportProviderMetadata,
     NativeTransportRejectionReason,
+    NativeTransportSelectionError,
+    NativeTransportSelectionErrorCode,
 )
 
 _Route = TypeVar("_Route")
@@ -158,9 +160,7 @@ def ordered_candidates(
             candidates.values(),
             key=lambda candidate: (
                 candidate.selection_rank is None,
-                candidate.selection_rank
-                if candidate.selection_rank is not None
-                else int(candidate.transport_id),
+                candidate.selection_rank if candidate.selection_rank is not None else int(candidate.transport_id),
                 candidate.provider.id.encode(),
             ),
         )
@@ -170,18 +170,27 @@ def ordered_candidates(
 def selection_error(
     policy: TransportPolicy,
     candidates: tuple[NativeTransportCandidateDiagnostic, ...],
-) -> NativeArtifactError:
+) -> NativeTransportSelectionError:
     forced = forced_transport_name(policy)
     if forced is not None:
         candidate = next((value for value in candidates if value.transport_name == forced), None)
         if candidate is not None and candidate.rejection_reason is not None:
-            return NativeArtifactError(
+            return NativeTransportSelectionError(
+                NativeTransportSelectionErrorCode.FORCED_TRANSPORT_UNAVAILABLE,
                 f"forced native transport {forced} rejected: {candidate.rejection_reason.value}",
+                policy=policy,
                 candidates=candidates,
             )
-        return NativeArtifactError(f"forced native transport is not available: {forced}", candidates=candidates)
-    return NativeArtifactError(
+        return NativeTransportSelectionError(
+            NativeTransportSelectionErrorCode.FORCED_TRANSPORT_UNAVAILABLE,
+            f"forced native transport is not available: {forced}",
+            policy=policy,
+            candidates=candidates,
+        )
+    return NativeTransportSelectionError(
+        NativeTransportSelectionErrorCode.NO_VIABLE_TRANSPORT,
         "no viable native transport provider after applying host routes",
+        policy=policy,
         candidates=candidates,
     )
 

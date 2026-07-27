@@ -22,6 +22,7 @@ from nnrp._native_routes import (
 from nnrp.core import FrameSubmitMetadata, MessageType, TransportPolicy
 from nnrp.native import (
     FFI_STATUS_WOULD_BLOCK,
+    NATIVE_TRANSPORT_ID_BY_NAME,
     NativeArtifactError,
     NativePlatform,
     NativeRuntimeBackend,
@@ -31,9 +32,12 @@ from nnrp.native import (
     NativeRuntimeSession,
     NativeStatus,
     NativeTransportCandidateDiagnostic,
+    NativeTransportCandidateReadiness,
     NativeTransportClientSecurity,
     NativeTransportEndpoint,
-    NativeTransportProbeSample,
+    NativeTransportProbeObservation,
+    NativeTransportSelectionError,
+    NativeTransportSelectionErrorCode,
     NativeWouldBlockError,
     NnrpEndpoint,
     discover_native_transport_providers,
@@ -722,7 +726,11 @@ def _client_candidate_diagnostics(
     native_by_name = {candidate.transport_name: candidate for candidate in native_candidates}
     diagnostics: dict[str, NativeTransportCandidateDiagnostic] = {}
     for transport_name in transport_names:
-        candidate = native_by_name.get(transport_name, unavailable_candidate(transport_name))
+        candidate = native_by_name.get(transport_name)
+        if candidate is not None:
+            diagnostics[transport_name] = candidate
+            continue
+        candidate = unavailable_candidate(transport_name)
         route = routes[transport_name]
         diagnostics[transport_name] = apply_host_rejection(
             candidate,
@@ -755,43 +763,33 @@ def _select_client_transport(
     if forced_transport is not None:
         transport_names.add(forced_transport)
     routes = _resolve_client_routes(endpoint, normalized_routes, transport_names)
-    supported = {
-        transport_name
-        for transport_name, route in routes.items()
-        if transport_name in providers_by_name
-        and policy_allows(policy, transport_name)
-        and route.route_resolved
-        and route.security_satisfied
-    }
-    native_candidates: tuple[NativeTransportCandidateDiagnostic, ...] = ()
-    try:
-        selection = select_native_transport_provider(
-            policy,
-            root=root,
-            native_platform=native_platform,
-            supported_transports=tuple(supported),
+    supported = set(providers_by_name)
+    readiness = tuple(
+        NativeTransportCandidateReadiness(
+            transport_id=NATIVE_TRANSPORT_ID_BY_NAME[provider.name],
+            provider_id=provider.metadata.id,
+            route_resolved=routes[provider.name].route_resolved,
+            security_satisfied=routes[provider.name].security_satisfied,
+            diagnostic=(
+                "provider route is unresolved"
+                if not routes[provider.name].route_resolved
+                else "provider route does not satisfy application security"
+                if not routes[provider.name].security_satisfied
+                else None
+            ),
         )
-        native_candidates = selection.candidates
-        selected_transport = selection.selected_transport_name
-        return selected_transport, routes[selected_transport]
-    except NativeArtifactError as native_error:
-        native_candidates = native_error.candidates
-        if not native_candidates or not any(
-            candidate.rejection_reason is not None and candidate.rejection_reason.value == "probe-missing"
-            for candidate in native_candidates
-        ):
-            diagnostics = _client_candidate_diagnostics(
-                policy=policy,
-                transport_names=transport_names,
-                providers_by_name=providers_by_name,
-                routes=routes,
-                native_candidates=native_candidates,
-            )
-            raise selection_error(policy, diagnostics) from native_error
-
-    samples: list[NativeTransportProbeSample] = []
+        for provider in providers
+    )
+    eligible_provider_names = {
+        provider.name
+        for provider in providers
+        if policy_allows(policy, provider.name)
+        and routes[provider.name].route_resolved
+        and routes[provider.name].security_satisfied
+    }
+    observations: list[NativeTransportProbeObservation] = []
     for provider in providers:
-        if provider.name not in supported:
+        if len(eligible_provider_names) <= 1 or provider.name not in eligible_provider_names:
             continue
         route = routes[provider.name]
         if route.endpoint is None:
@@ -805,45 +803,27 @@ def _select_client_transport(
         )
         try:
             metrics = binding._probe(route.endpoint, route.security, 3, 64, 0, 1_000)
-        except Exception:
-            samples.append(
-                NativeTransportProbeSample(
-                    provider_id=provider.metadata.id,
-                    transport_name=provider.name,
-                    elapsed_us=1,
-                    failed=True,
+        except Exception as error:
+            observations.append(
+                NativeTransportProbeObservation.failed(
+                    provider,
+                    f"transport probe failed: {error}",
                 )
             )
             continue
-        successful_samples = max(1, int(metrics.success_count))
-        for _ in range(successful_samples):
-            samples.append(
-                NativeTransportProbeSample(
-                    provider_id=provider.metadata.id,
-                    transport_name=provider.name,
-                    elapsed_us=1_000_000,
-                    rtt_us=metrics.median_rtt_us,
-                    bytes_received=metrics.median_throughput_bytes_per_sec,
-                )
-            )
-        for _ in range(max(0, int(metrics.sample_count) - successful_samples)):
-            samples.append(
-                NativeTransportProbeSample(
-                    provider_id=provider.metadata.id,
-                    transport_name=provider.name,
-                    elapsed_us=1,
-                    failed=True,
-                )
-            )
+        observations.append(NativeTransportProbeObservation.succeeded(provider, metrics))
     try:
         selection = select_native_transport_provider(
             policy,
             root=root,
             native_platform=native_platform,
             supported_transports=tuple(supported),
-            probe_samples=samples,
+            candidate_readiness=readiness,
+            probe_observations=observations,
         )
-    except NativeArtifactError as native_error:
+    except NativeTransportSelectionError as native_error:
+        if native_error.code is NativeTransportSelectionErrorCode.INVALID_EVIDENCE:
+            raise
         diagnostics = _client_candidate_diagnostics(
             policy=policy,
             transport_names=transport_names,

@@ -403,8 +403,8 @@ class NativeTransportCandidateReadiness:
     def __post_init__(self) -> None:
         if self.transport_id not in NATIVE_TRANSPORT_NAME_BY_ID:
             raise ValueError("transport_id must identify a selectable transport")
-        if not isinstance(self.provider_id, str) or not self.provider_id:
-            raise ValueError("provider_id must be a non-empty string")
+        if not isinstance(self.provider_id, str) or not self.provider_id or not self.provider_id.isascii():
+            raise ValueError("provider_id must be a non-empty ASCII string")
         if not isinstance(self.route_resolved, bool):
             raise ValueError("route_resolved must be a bool")
         if not isinstance(self.security_satisfied, bool):
@@ -532,8 +532,8 @@ class NativeTransportProbeSample:
     failed: bool = False
 
     def __post_init__(self) -> None:
-        if not isinstance(self.provider_id, str) or not self.provider_id:
-            raise ValueError("provider_id must be a non-empty string")
+        if not isinstance(self.provider_id, str) or not self.provider_id or not self.provider_id.isascii():
+            raise ValueError("provider_id must be a non-empty ASCII string")
         if not isinstance(self.transport_name, str):
             raise ValueError("transport_name must be a canonical transport name")
         try:
@@ -589,8 +589,8 @@ class NativeTransportProbeObservation:
     def __post_init__(self) -> None:
         if self.transport_id not in NATIVE_TRANSPORT_NAME_BY_ID:
             raise ValueError("transport_id must identify a selectable transport")
-        if not isinstance(self.provider_id, str) or not self.provider_id:
-            raise ValueError("provider_id must be a non-empty string")
+        if not isinstance(self.provider_id, str) or not self.provider_id or not self.provider_id.isascii():
+            raise ValueError("provider_id must be a non-empty ASCII string")
         if self.state not in {NativeTransportProbeState.SUCCEEDED, NativeTransportProbeState.FAILED}:
             raise ValueError("state must be SUCCEEDED or FAILED")
         if self.state is NativeTransportProbeState.SUCCEEDED and self.metrics is None:

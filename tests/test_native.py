@@ -2596,6 +2596,31 @@ def test_select_native_transport_provider_compares_shared_cost_model_before_pref
         ),
         (
             lambda: NativeTransportProbeSample(
+                provider_id="provider-\u8f93\u5165",
+                transport_name="tcp",
+                elapsed_us=1,
+            ),
+            "provider_id",
+        ),
+        (
+            lambda: native_module.NativeTransportCandidateReadiness(
+                transport_id=TransportId.TCP,
+                provider_id="provider-\u8f93\u5165",
+                route_resolved=True,
+                security_satisfied=True,
+            ),
+            "provider_id",
+        ),
+        (
+            lambda: native_module.NativeTransportProbeObservation(
+                transport_id=TransportId.TCP,
+                provider_id="provider-\u8f93\u5165",
+                state=native_module.NativeTransportProbeState.FAILED,
+            ),
+            "provider_id",
+        ),
+        (
+            lambda: NativeTransportProbeSample(
                 provider_id="provider",
                 transport_name="auto",
                 elapsed_us=1,

@@ -15,9 +15,8 @@ $suiteManifest = Join-Path $conformanceRoot "wire-conformance/nnrp-1-preview4/ma
 $executableSuffix = if ($IsWindows) { ".exe" } else { "" }
 $runnerExecutable = Join-Path $conformanceRoot "target/debug/nnrp-conformance-runner$executableSuffix"
 $resolvedPythonExecutable = (Get-Command $PythonExecutable -ErrorAction Stop).Source
-$hostRouteTargetExecutable = Join-Path (
-  Split-Path -Parent $resolvedPythonExecutable
-) "nnrp-wire-host-route-target$executableSuffix"
+$hostRouteTargetCommand = Get-Command "nnrp-wire-host-route-target" -CommandType Application -ErrorAction SilentlyContinue
+$hostRouteTargetExecutable = if ($null -eq $hostRouteTargetCommand) { "" } else { $hostRouteTargetCommand.Source }
 
 function Invoke-Checked {
   param(
@@ -350,7 +349,7 @@ if ($totalPassed -ne 6) {
   throw "Expected six Preview4 wire scenarios, got $totalPassed."
 }
 
-if (-not (Test-Path -LiteralPath $hostRouteTargetExecutable)) {
+if ([string]::IsNullOrWhiteSpace($hostRouteTargetExecutable) -or -not (Test-Path -LiteralPath $hostRouteTargetExecutable)) {
   throw "Python host-route target executable not found: $hostRouteTargetExecutable"
 }
 

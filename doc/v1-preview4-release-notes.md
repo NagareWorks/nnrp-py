@@ -6,6 +6,14 @@ runtime-object, transport-provider, and wire-conformance surfaces needed by NNRP
 This document is the preview4 release note entry point. Historical preview3 performance notes remain in their own
 benchmark documents and are not used as preview4 release criteria.
 
+## 1.0.0rc4.post11
+
+- Pins Rust `1.0.0-preview.4.19` at merge commit `e37779d` and requires the exact FFI ABI `4.1.1`.
+- Requires the native runtime shutdown boundary and verifies shutdown, stale-handle invalidation, and runtime restart.
+- Verifies the release ABI layout independently in Python and decodes multiple events from one native poll batch.
+- Installs a built Linux wheel into an isolated environment and runs the real native client/server role E2E against the
+  packaged transport libraries before publication.
+
 ## 1.0.0rc4.post10
 
 - Pins Rust `1.0.0-preview.4.18` at merge commit `67b85b9` while retaining FFI ABI `4.1.x`.
@@ -50,7 +58,7 @@ benchmark documents and are not used as preview4 release criteria.
 ## Transport Providers
 
 - Rust preview4 artifacts are transport scoped and expose TCP, QUIC, IPC, and WebSocket capability slots.
-- Python `1.0.0rc4.post10` consumes Rust `1.0.0-preview.4.18` and exposes the frozen provider cost, preference,
+- Python `1.0.0rc4.post11` consumes Rust `1.0.0-preview.4.19` and exposes the frozen provider cost, preference,
   frame-limit, limitation, probe-metrics, and ordered candidate models without a Python-specific weighted score.
 - Multi-provider selection follows the cross-SDK deterministic comparator and reports every eligible or rejected
   candidate; probe samples bind to the stable provider id carried by the owning artifact.
@@ -73,14 +81,14 @@ benchmark documents and are not used as preview4 release criteria.
 
 ## Release Gates
 
-- Python `1.0.0rc4.post10` pins Rust `1.0.0-preview.4.18` and requires ABI `4.1.x`.
-- The release audit passed 853 Python tests with 93.92% line coverage, all 9 selected adapter-conformance cases,
-  all 6 independent-process frame scenarios, and all 10 native host-route scenarios without skips or synthesized
-  success paths.
-- All 16 platform wheels were rebuilt from the 64 transport-scoped Rust release assets and verified to contain one
-  platform plus independently owned TCP, QUIC, IPC, and WebSocket manifests and libraries at ABI `4.1.0`.
-- Source distributions exclude release workspace artifacts and are validated for payload boundaries and size before
-  publication; the audited source distribution contains 130 members and is 428106 bytes.
+- Python `1.0.0rc4.post11` pins Rust `1.0.0-preview.4.19` and requires the exact ABI `4.1.1`.
+- The release candidate must pass the complete Python suite with at least 90% total and incremental line coverage, all
+  selected adapter-conformance cases, all independent-process frame scenarios, and all native host-route scenarios
+  without skips or synthesized success paths.
+- All 16 platform wheels must be rebuilt from the 64 transport-scoped Rust release assets and verified to contain one
+  platform plus independently owned TCP, QUIC, IPC, and WebSocket manifests and libraries at ABI `4.1.1`.
+- Source distributions must exclude release workspace artifacts and pass payload-boundary and size validation before
+  publication.
 - Preview4 native wheels must embed preview4-shaped Rust artifact metadata.
 - Universal wheels are rejected for native preview4 releases.
 - Native hot paths must remain coarse-grained and covered by benchmark smoke thresholds before release.

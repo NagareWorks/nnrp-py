@@ -149,6 +149,7 @@ from nnrp.native import (
     _NnrpClientCancelRequest,
     _NnrpClientConnectRequest,
     _NnrpEvent,
+    _NnrpFfiDiagnostic,
     _NnrpFfiStatus,
     _NnrpHandle,
     _NnrpPollResult,
@@ -168,6 +169,7 @@ from nnrp.native import (
     _NnrpSessionRecoveryOutcome,
     _NnrpSessionResumeRequest,
     _NnrpSubmitRequest,
+    _NnrpTransportOpenRequest,
     _NnrpTypedPayloadDescriptor,
     _normalize_arch,
     current_native_platform,
@@ -245,7 +247,7 @@ class FakeLibrary:
         *,
         abi_major: int = 4,
         abi_minor: int = 1,
-        abi_patch: int = 0,
+        abi_patch: int = 1,
         protocol_major: int = 1,
         wire_format: int = 0,
         transport_slots: int = TRANSPORT_SLOT_TCP,
@@ -296,6 +298,8 @@ class FakeEntrypointLibrary:
         for symbol in RUNTIME_ENTRYPOINT_SYMBOLS:
             if symbol != missing_symbol:
                 setattr(self, symbol, FakeFunction())
+        if missing_symbol != "nnrp_transport_runtime_shutdown":
+            self.nnrp_transport_runtime_shutdown = FakeFunction(NativeStatus.ok().to_ffi())
 
 
 class FakeRuntimeLibrary(FakeEntrypointLibrary):
@@ -2358,15 +2362,11 @@ def test_select_native_transport_provider_rejects_invalid_evidence(
 @pytest.mark.parametrize(
     "constructor",
     [
-        lambda: native_module.NativeTransportCandidateReadiness(
-            TransportId.UNSPECIFIED, "provider", True, True
-        ),
+        lambda: native_module.NativeTransportCandidateReadiness(TransportId.UNSPECIFIED, "provider", True, True),
         lambda: native_module.NativeTransportCandidateReadiness(TransportId.TCP, "", True, True),
         lambda: native_module.NativeTransportCandidateReadiness(TransportId.TCP, "provider", 1, True),
         lambda: native_module.NativeTransportCandidateReadiness(TransportId.TCP, "provider", True, 1),
-        lambda: native_module.NativeTransportCandidateReadiness(
-            TransportId.TCP, "provider", True, True, diagnostic=1
-        ),
+        lambda: native_module.NativeTransportCandidateReadiness(TransportId.TCP, "provider", True, True, diagnostic=1),
         lambda: native_module.NativeTransportProbeObservation(
             TransportId.UNSPECIFIED, "provider", native_module.NativeTransportProbeState.FAILED
         ),
@@ -2672,7 +2672,7 @@ def test_probe_native_artifact_accepts_matching_protocol(tmp_path: Path) -> None
     assert result.artifact_path == artifact
     assert result.abi_major == 4
     assert result.abi_minor == 1
-    assert result.abi_patch == 0
+    assert result.abi_patch == 1
     assert result.protocol_major == 1
     assert result.protocol_wire_format == 0
     assert result.sdk_channel == 3
@@ -2769,6 +2769,9 @@ def test_probe_native_artifact_rejects_abi_mismatch(tmp_path: Path) -> None:
     with pytest.raises(NativeArtifactError, match="ABI mismatch"):
         probe_native_artifact(artifact, library=FakeLibrary(abi_major=2))
 
+    with pytest.raises(NativeArtifactError, match="ABI mismatch"):
+        probe_native_artifact(artifact, library=FakeLibrary(abi_patch=0))
+
 
 def test_probe_native_artifact_rejects_missing_required_feature(tmp_path: Path) -> None:
     artifact = tmp_path / "nnrp_ffi.dll"
@@ -2811,6 +2814,79 @@ def test_load_native_runtime_validates_probe_before_binding_entrypoints(tmp_path
     runtime = load_native_runtime(artifact, library=library)
 
     assert runtime.submit is library.nnrp_submit
+    assert library.nnrp_transport_runtime_shutdown.restype is _NnrpFfiStatus
+    assert library.nnrp_transport_runtime_shutdown.argtypes == []
+
+
+def test_load_native_runtime_rejects_missing_shutdown_boundary(tmp_path: Path) -> None:
+    artifact = tmp_path / "nnrp_ffi.dll"
+    artifact.write_bytes(b"fake")
+    library = FakeEntrypointLibrary(missing_symbol="nnrp_transport_runtime_shutdown")
+    library.nnrp_runtime_capabilities.value = FakeLibrary().nnrp_runtime_capabilities()
+
+    with pytest.raises(NativeArtifactError, match="missing nnrp_transport_runtime_shutdown"):
+        load_native_runtime(artifact, library=library)
+
+
+def test_native_runtime_shutdown_is_registered_once_per_artifact(tmp_path: Path) -> None:
+    artifact = tmp_path / "nnrp_ffi.dll"
+    artifact.write_bytes(b"fake")
+    first = FakeRuntimeLibrary()
+    second = FakeRuntimeLibrary()
+
+    load_native_runtime(artifact, library=first)
+    load_native_runtime(artifact, library=second)
+    native_module._shutdown_registered_native_runtimes()
+
+    assert len(first.nnrp_transport_runtime_shutdown.calls) == 1
+    assert second.nnrp_transport_runtime_shutdown.calls == []
+
+    load_native_runtime(artifact, library=second)
+    native_module._shutdown_registered_native_runtimes()
+
+    assert len(first.nnrp_transport_runtime_shutdown.calls) == 1
+    assert len(second.nnrp_transport_runtime_shutdown.calls) == 1
+
+
+def test_native_runtime_shutdown_does_not_interrupt_interpreter_teardown(monkeypatch: pytest.MonkeyPatch) -> None:
+    def raise_during_shutdown() -> None:
+        raise RuntimeError("shutdown failed")
+
+    monkeypatch.setattr(
+        native_module,
+        "_NATIVE_RUNTIME_SHUTDOWNS",
+        {"failing-runtime": (object(), raise_during_shutdown)},
+    )
+
+    native_module._shutdown_registered_native_runtimes()
+
+
+def test_load_native_transport_binding_registers_runtime_shutdown(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    artifact = tmp_path / "nnrp_ffi.dll"
+    artifact.write_bytes(b"fake")
+    provider = SimpleNamespace(name="tcp", artifact_path=artifact)
+    library = object()
+    registrations: list[tuple[object, Path]] = []
+
+    monkeypatch.setattr(native_module, "resolve_native_transport_provider", lambda *_args, **_kwargs: provider)
+    monkeypatch.setattr(native_module, "_call_runtime_capabilities", lambda _library: object())
+    monkeypatch.setattr(native_module, "_validate_runtime_capabilities", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        native_module,
+        "_register_native_runtime_shutdown",
+        lambda loaded, path: registrations.append((loaded, path)),
+    )
+    monkeypatch.setattr(native_module, "_NativeTransportEntrypoints", lambda *_args, **_kwargs: object())
+    monkeypatch.setattr(native_module, "NativeRuntimeEntrypoints", lambda *_args, **_kwargs: object())
+    monkeypatch.setattr(native_module, "NativeTransportBinding", lambda *args: args)
+
+    binding = native_module.load_native_transport_binding("tcp", library=library)
+
+    assert len(binding) == 3
+    assert registrations == [(library, artifact)]
 
 
 def test_native_schema_codec_delegates_descriptor_parse_write_and_validation(tmp_path: Path) -> None:
@@ -3490,6 +3566,101 @@ def test_native_resumed_session_can_submit_operations(tmp_path: Path) -> None:
     assert submit_request.session.id == 41
     assert submit_request.payload.len == FrameSubmitMetadata.STRUCT.size + len(b"after-resume")
     assert _read_buffer_view(submit_request.payload)[FrameSubmitMetadata.STRUCT.size :] == b"after-resume"
+
+
+def test_native_role_event_abi_layout_matches_rust_header() -> None:
+    layout = (ctypes.sizeof(ctypes.c_void_p), ctypes.alignment(ctypes.c_uint64))
+    if layout == (8, 8):
+        diagnostic = (48, 32, 40)
+        event = (176, 32, 56, 80, 88, 112, 128)
+    elif layout == (4, 8):
+        diagnostic = (48, 32, 40)
+        event = (168, 32, 56, 80, 88, 112, 120)
+    elif layout == (4, 4):
+        diagnostic = (40, 28, 36)
+        event = (140, 28, 48, 68, 72, 92, 100)
+    else:
+        pytest.fail(f"unsupported FFI ABI layout: {layout}")
+
+    assert ctypes.sizeof(_NnrpFfiDiagnostic) == diagnostic[0]
+    assert _NnrpFfiDiagnostic.status.offset == 0
+    assert _NnrpFfiDiagnostic.related_connection_id.offset == 16
+    assert _NnrpFfiDiagnostic.related_session_id.offset == 24
+    assert _NnrpFfiDiagnostic.related_operation_id.offset == diagnostic[1]
+    assert _NnrpFfiDiagnostic.related_frame_id.offset == diagnostic[2]
+
+    assert ctypes.sizeof(_NnrpEvent) == event[0]
+    assert _NnrpEvent.kind.offset == 0
+    assert _NnrpEvent.message_type.offset == 4
+    assert _NnrpEvent.connection.offset == 8
+    assert _NnrpEvent.session.offset == event[1]
+    assert _NnrpEvent.operation.offset == event[2]
+    assert _NnrpEvent.frame_id.offset == event[3]
+    assert _NnrpEvent.payload_owner.offset == event[4]
+    assert _NnrpEvent.payload.offset == event[5]
+    assert _NnrpEvent.diagnostic.offset == event[6]
+
+
+def test_native_role_request_abi_layout_matches_rust_header() -> None:
+    layout = (ctypes.sizeof(ctypes.c_void_p), ctypes.alignment(ctypes.c_uint64))
+    if layout == (8, 8):
+        expected = (24, 8, 64, 24, 48, 60, 40, 48, 56, 40, 200, 24)
+    elif layout == (4, 8):
+        expected = (24, 8, 56, 16, 40, 52, 40, 48, 48, 40, 192, 24)
+    elif layout == (4, 4):
+        expected = (20, 4, 52, 16, 36, 48, 36, 40, 40, 36, 160, 20)
+    else:
+        pytest.fail(f"unsupported FFI ABI layout: {layout}")
+
+    (
+        handle_size,
+        handle_id,
+        open_size,
+        open_config,
+        open_max_packet,
+        open_reserved,
+        adoption_size,
+        session_open_size,
+        submit_size,
+        role_poll_size,
+        poll_result_size,
+        poll_result_event,
+    ) = expected
+
+    assert ctypes.sizeof(_NnrpHandle) == handle_size
+    assert _NnrpHandle.kind.offset == 0
+    assert _NnrpHandle.id.offset == handle_id
+    assert _NnrpHandle.generation.offset == handle_id + 8
+    assert _NnrpHandle.flags.offset == handle_id + 12
+
+    assert ctypes.sizeof(_NnrpTransportOpenRequest) == open_size
+    assert _NnrpTransportOpenRequest.endpoint.offset == 8
+    assert _NnrpTransportOpenRequest.config.offset == open_config
+    assert _NnrpTransportOpenRequest.max_packet_bytes.offset == open_max_packet
+    assert _NnrpTransportOpenRequest.reserved0.offset == open_reserved
+
+    assert ctypes.sizeof(_NnrpClientConnectRequest) == adoption_size
+    assert _NnrpClientConnectRequest.reserved0.offset == 12
+    assert _NnrpClientConnectRequest.transport_connection.offset == 16
+    assert ctypes.sizeof(_NnrpServerBindRequest) == adoption_size
+    assert _NnrpServerBindRequest.reserved0.offset == 12
+    assert _NnrpServerBindRequest.transport_listener.offset == 16
+
+    assert ctypes.sizeof(_NnrpSessionOpenRequest) == session_open_size
+    assert _NnrpSessionOpenRequest.profile_id.offset == handle_size + 8
+    assert _NnrpSessionOpenRequest.schema_id.offset == handle_size + 12
+    assert ctypes.sizeof(_NnrpSubmitRequest) == submit_size
+    assert _NnrpSubmitRequest.operation_id.offset == handle_size
+
+    assert ctypes.sizeof(_NnrpRoleEventPollRequest) == role_poll_size
+    assert _NnrpRoleEventPollRequest.max_events.offset == handle_size
+    assert ctypes.sizeof(_NnrpServerAcceptBeginRequest) == adoption_size
+    assert ctypes.sizeof(_NnrpServerAcceptClaimRequest) == adoption_size
+    assert ctypes.sizeof(_NnrpServerAcceptWaitRequest) == handle_size + 8
+    assert ctypes.sizeof(_NnrpServerAcceptResult) == handle_size + 8
+    assert ctypes.sizeof(_NnrpPollResult) == poll_result_size
+    assert _NnrpPollResult.has_event.offset == 16
+    assert _NnrpPollResult.event.offset == poll_result_event
 
 
 def test_native_cache_backend_routes_lease_ops_through_ffi(tmp_path: Path) -> None:

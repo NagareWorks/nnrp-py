@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import atexit
 import ctypes
 import json
 import os
@@ -55,10 +56,15 @@ from nnrp.runtime import (
 )
 from nnrp.runtime.types import _FixedRuntimeMetadata
 
+_NATIVE_RUNTIME_SHUTDOWN_LOCK = threading.Lock()
+_NATIVE_RUNTIME_SHUTDOWNS: dict[str, tuple[Any, Any]] = {}
+_NATIVE_RUNTIME_ATEXIT_REGISTERED = False
+
 EXPECTED_PROTOCOL_MAJOR = 1
 EXPECTED_PROTOCOL_WIRE_FORMAT = 0
 EXPECTED_ABI_MAJOR = 4
 EXPECTED_ABI_MINOR = 1
+EXPECTED_ABI_PATCH = 1
 TRANSPORT_SLOT_QUIC = 0x00000001
 TRANSPORT_SLOT_TCP = 0x00000002
 TRANSPORT_SLOT_IPC = 0x00000004
@@ -5723,6 +5729,34 @@ def load_native_library(artifact_path: Path | str) -> ctypes.CDLL:
         raise NativeArtifactError(f"failed to load native artifact {artifact_path}: {error}") from error
 
 
+def _register_native_runtime_shutdown(library: Any, artifact_path: Path) -> None:
+    shutdown = _bind_native_function(
+        library,
+        "nnrp_transport_runtime_shutdown",
+        _NnrpFfiStatus,
+        [],
+    )
+    key = os.path.normcase(str(artifact_path.resolve()))
+    global _NATIVE_RUNTIME_ATEXIT_REGISTERED
+    with _NATIVE_RUNTIME_SHUTDOWN_LOCK:
+        _NATIVE_RUNTIME_SHUTDOWNS.setdefault(key, (library, shutdown))
+        if not _NATIVE_RUNTIME_ATEXIT_REGISTERED:
+            atexit.register(_shutdown_registered_native_runtimes)
+            _NATIVE_RUNTIME_ATEXIT_REGISTERED = True
+
+
+def _shutdown_registered_native_runtimes() -> None:
+    with _NATIVE_RUNTIME_SHUTDOWN_LOCK:
+        shutdowns = tuple(_NATIVE_RUNTIME_SHUTDOWNS.values())
+        _NATIVE_RUNTIME_SHUTDOWNS.clear()
+    for _library, shutdown in shutdowns:
+        try:
+            shutdown()
+        except Exception:
+            # Interpreter teardown must continue if one native module cannot stop cleanly.
+            pass
+
+
 def load_native_runtime(
     artifact_path: Path | str | None = None,
     *,
@@ -5742,6 +5776,7 @@ def load_native_runtime(
         capabilities,
         required_transport_slots=_required_transport_slots_for_artifact(resolved_path, transport),
     )
+    _register_native_runtime_shutdown(loaded_library, resolved_path)
     return NativeRuntimeEntrypoints(
         loaded_library,
         artifact_path=resolved_path,
@@ -5806,6 +5841,7 @@ def load_native_transport_binding(
         capabilities,
         required_transport_slots=NATIVE_TRANSPORT_SLOT_BY_NAME[provider.name],
     )
+    _register_native_runtime_shutdown(loaded_library, provider.artifact_path)
     return NativeTransportBinding(
         _NativeTransportEntrypoints(loaded_library, artifact_path=provider.artifact_path),
         provider,
@@ -5935,10 +5971,14 @@ def _validate_runtime_capabilities(
     *,
     required_transport_slots: int = REQUIRED_TRANSPORT_SLOTS,
 ) -> None:
-    if capabilities.abi_major != EXPECTED_ABI_MAJOR or capabilities.abi_minor != EXPECTED_ABI_MINOR:
+    if (
+        capabilities.abi_major != EXPECTED_ABI_MAJOR
+        or capabilities.abi_minor != EXPECTED_ABI_MINOR
+        or capabilities.abi_patch != EXPECTED_ABI_PATCH
+    ):
         raise NativeArtifactError(
             "native artifact ABI mismatch: "
-            f"expected {EXPECTED_ABI_MAJOR}.{EXPECTED_ABI_MINOR}.x, "
+            f"expected {EXPECTED_ABI_MAJOR}.{EXPECTED_ABI_MINOR}.{EXPECTED_ABI_PATCH}, "
             f"got {capabilities.abi_major}.{capabilities.abi_minor}.{capabilities.abi_patch}"
         )
     version = capabilities.protocol_version

@@ -1793,6 +1793,11 @@ def test_discover_native_transport_provider_rejects_invalid_manifest_document(
             "id must be a non-empty string",
         ),
         (
+            _provider_artifact_manifest("ipc")
+            | {"provider": _provider_manifest("ipc") | {"id": "provider-\u8f93\u5165"}},
+            "provider.id must be ASCII",
+        ),
+        (
             _provider_artifact_manifest("ipc") | {"provider": _provider_manifest("ipc") | {"cost": []}},
             "provider.cost must be an object",
         ),
@@ -1807,6 +1812,11 @@ def test_discover_native_transport_provider_rejects_invalid_manifest_document(
             "units must be a canonical decimal u64 string",
         ),
         (
+            _provider_artifact_manifest("ipc")
+            | {"provider": _provider_manifest("ipc") | {"cost": {"model_id": 0, "units": "1"}}},
+            "units must be zero when model_id is zero",
+        ),
+        (
             _provider_artifact_manifest("ipc") | {"provider": _provider_manifest("ipc") | {"preference_rank": 65536}},
             "preference_rank must be an integer",
         ),
@@ -1818,6 +1828,11 @@ def test_discover_native_transport_provider_rejects_invalid_manifest_document(
             _provider_artifact_manifest("ipc")
             | {"provider": _provider_manifest("ipc") | {"limits": {"max_frame_bytes": "-1"}}},
             "max_frame_bytes must be a canonical decimal u64 string",
+        ),
+        (
+            _provider_artifact_manifest("ipc")
+            | {"provider": _provider_manifest("ipc") | {"limits": {"max_frame_bytes": "0"}}},
+            "max_frame_bytes must be greater than zero",
         ),
         (
             _provider_artifact_manifest("ipc")
@@ -2539,7 +2554,19 @@ def test_select_native_transport_provider_compares_shared_cost_model_before_pref
     ("constructor", "match"),
     [
         (lambda: native_module.NativeTransportProviderCost(model_id=True, units=0), "model_id"),
+        (lambda: native_module.NativeTransportProviderCost(model_id=0, units=1), "units"),
         (lambda: native_module.NativeTransportProviderLimits(max_frame_bytes=-1), "max_frame_bytes"),
+        (lambda: native_module.NativeTransportProviderLimits(max_frame_bytes=0), "max_frame_bytes"),
+        (
+            lambda: native_module.NativeTransportProviderMetadata(
+                id="provider-\u8f93\u5165",
+                cost=native_module.NativeTransportProviderCost(model_id=0, units=0),
+                preference_rank=0,
+                limits=native_module.NativeTransportProviderLimits(max_frame_bytes=1),
+                limitations=(),
+            ),
+            "id",
+        ),
         (
             lambda: native_module.NativeTransportProviderMetadata(
                 id="provider",
@@ -2564,6 +2591,31 @@ def test_select_native_transport_provider_compares_shared_cost_model_before_pref
                 provider_id="",
                 transport_name="tcp",
                 elapsed_us=1,
+            ),
+            "provider_id",
+        ),
+        (
+            lambda: NativeTransportProbeSample(
+                provider_id="provider-\u8f93\u5165",
+                transport_name="tcp",
+                elapsed_us=1,
+            ),
+            "provider_id",
+        ),
+        (
+            lambda: native_module.NativeTransportCandidateReadiness(
+                transport_id=TransportId.TCP,
+                provider_id="provider-\u8f93\u5165",
+                route_resolved=True,
+                security_satisfied=True,
+            ),
+            "provider_id",
+        ),
+        (
+            lambda: native_module.NativeTransportProbeObservation(
+                transport_id=TransportId.TCP,
+                provider_id="provider-\u8f93\u5165",
+                state=native_module.NativeTransportProbeState.FAILED,
             ),
             "provider_id",
         ),

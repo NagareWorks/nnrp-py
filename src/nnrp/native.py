@@ -331,6 +331,8 @@ class NativeTransportProviderCost:
     def __post_init__(self) -> None:
         _require_bounded_integer("model_id", self.model_id, 0xFFFF)
         _require_bounded_integer("units", self.units, 0xFFFFFFFFFFFFFFFF)
+        if self.model_id == 0 and self.units != 0:
+            raise ValueError("units must be zero when model_id is zero")
 
 
 @dataclass(frozen=True)
@@ -339,6 +341,8 @@ class NativeTransportProviderLimits:
 
     def __post_init__(self) -> None:
         _require_bounded_integer("max_frame_bytes", self.max_frame_bytes, 0xFFFFFFFFFFFFFFFF)
+        if self.max_frame_bytes == 0:
+            raise ValueError("max_frame_bytes must be greater than zero")
 
 
 class NativeTransportProviderLimitation(StrEnum):
@@ -360,8 +364,8 @@ class NativeTransportProviderMetadata:
     limitations: tuple[NativeTransportProviderLimitation, ...]
 
     def __post_init__(self) -> None:
-        if not isinstance(self.id, str) or not self.id:
-            raise ValueError("id must be a non-empty string")
+        if not isinstance(self.id, str) or not self.id or not self.id.isascii():
+            raise ValueError("id must be a non-empty ASCII string")
         if not isinstance(self.cost, NativeTransportProviderCost):
             raise ValueError("cost must be a NativeTransportProviderCost")
         _require_bounded_integer("preference_rank", self.preference_rank, 0xFFFF)
@@ -399,8 +403,8 @@ class NativeTransportCandidateReadiness:
     def __post_init__(self) -> None:
         if self.transport_id not in NATIVE_TRANSPORT_NAME_BY_ID:
             raise ValueError("transport_id must identify a selectable transport")
-        if not isinstance(self.provider_id, str) or not self.provider_id:
-            raise ValueError("provider_id must be a non-empty string")
+        if not isinstance(self.provider_id, str) or not self.provider_id or not self.provider_id.isascii():
+            raise ValueError("provider_id must be a non-empty ASCII string")
         if not isinstance(self.route_resolved, bool):
             raise ValueError("route_resolved must be a bool")
         if not isinstance(self.security_satisfied, bool):
@@ -528,8 +532,8 @@ class NativeTransportProbeSample:
     failed: bool = False
 
     def __post_init__(self) -> None:
-        if not isinstance(self.provider_id, str) or not self.provider_id:
-            raise ValueError("provider_id must be a non-empty string")
+        if not isinstance(self.provider_id, str) or not self.provider_id or not self.provider_id.isascii():
+            raise ValueError("provider_id must be a non-empty ASCII string")
         if not isinstance(self.transport_name, str):
             raise ValueError("transport_name must be a canonical transport name")
         try:
@@ -585,8 +589,8 @@ class NativeTransportProbeObservation:
     def __post_init__(self) -> None:
         if self.transport_id not in NATIVE_TRANSPORT_NAME_BY_ID:
             raise ValueError("transport_id must identify a selectable transport")
-        if not isinstance(self.provider_id, str) or not self.provider_id:
-            raise ValueError("provider_id must be a non-empty string")
+        if not isinstance(self.provider_id, str) or not self.provider_id or not self.provider_id.isascii():
+            raise ValueError("provider_id must be a non-empty ASCII string")
         if self.state not in {NativeTransportProbeState.SUCCEEDED, NativeTransportProbeState.FAILED}:
             raise ValueError("state must be SUCCEEDED or FAILED")
         if self.state is NativeTransportProbeState.SUCCEEDED and self.metrics is None:
@@ -6072,6 +6076,8 @@ def _manifest_provider_metadata(manifest: Mapping[str, Any]) -> NativeTransportP
     if not isinstance(provider, Mapping):
         raise NativeArtifactError("native artifact manifest provider must be an object")
     provider_id = _manifest_required_string(provider, "id")
+    if not provider_id.isascii():
+        raise NativeArtifactError("native artifact manifest provider.id must be ASCII")
     cost = provider.get("cost")
     if not isinstance(cost, Mapping):
         raise NativeArtifactError("native artifact manifest provider.cost must be an object")
@@ -6080,8 +6086,12 @@ def _manifest_provider_metadata(manifest: Mapping[str, Any]) -> NativeTransportP
         raise NativeArtifactError("native artifact manifest provider.limits must be an object")
     model_id = _manifest_bounded_integer(cost, "model_id", 0xFFFF)
     units = _manifest_canonical_u64(cost, "units")
+    if model_id == 0 and units != 0:
+        raise NativeArtifactError("native artifact manifest provider.cost.units must be zero when model_id is zero")
     preference_rank = _manifest_bounded_integer(provider, "preference_rank", 0xFFFF)
     max_frame_bytes = _manifest_canonical_u64(limits, "max_frame_bytes")
+    if max_frame_bytes == 0:
+        raise NativeArtifactError("native artifact manifest provider.limits.max_frame_bytes must be greater than zero")
     raw_limitations = provider.get("limitations")
     if not isinstance(raw_limitations, list):
         raise NativeArtifactError("native artifact manifest provider.limitations must be a list")

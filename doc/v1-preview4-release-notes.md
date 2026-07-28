@@ -6,6 +6,13 @@ runtime-object, transport-provider, and wire-conformance surfaces needed by NNRP
 This document is the preview4 release note entry point. Historical preview3 performance notes remain in their own
 benchmark documents and are not used as preview4 release criteria.
 
+## 1.0.0rc4.post10
+
+- Pins Rust `1.0.0-preview.4.18` at merge commit `67b85b9` while retaining FFI ABI `4.1.x`.
+- Rejects transport evidence whose provider identity does not match the selected binding or provider metadata.
+- Runs the complete suite-owned adapter contract and independent-process preview4 host-route matrix against the exact
+  Rust release source used to build packaged transport artifacts.
+
 ## 1.0.0rc4.post9
 
 - Pins Rust `1.0.0-preview.4.17` and FFI ABI `4.1.x`.
@@ -43,7 +50,7 @@ benchmark documents and are not used as preview4 release criteria.
 ## Transport Providers
 
 - Rust preview4 artifacts are transport scoped and expose TCP, QUIC, IPC, and WebSocket capability slots.
-- Python `1.0.0rc4.post9` consumes Rust `1.0.0-preview.4.17` and exposes the frozen provider cost, preference,
+- Python `1.0.0rc4.post10` consumes Rust `1.0.0-preview.4.18` and exposes the frozen provider cost, preference,
   frame-limit, limitation, probe-metrics, and ordered candidate models without a Python-specific weighted score.
 - Multi-provider selection follows the cross-SDK deterministic comparator and reports every eligible or rejected
   candidate; probe samples bind to the stable provider id carried by the owning artifact.
@@ -66,8 +73,8 @@ benchmark documents and are not used as preview4 release criteria.
 
 ## Release Gates
 
-- Python `1.0.0rc4.post9` pins Rust `1.0.0-preview.4.17` and requires ABI `4.1.x`.
-- The release audit passed 830 Python tests with 92.49% line coverage, all 9 selected adapter-conformance cases,
+- Python `1.0.0rc4.post10` pins Rust `1.0.0-preview.4.18` and requires ABI `4.1.x`.
+- The release audit passed 853 Python tests with 93.92% line coverage, all 9 selected adapter-conformance cases,
   all 6 independent-process frame scenarios, and all 10 native host-route scenarios without skips or synthesized
   success paths.
 - All 16 platform wheels were rebuilt from the 64 transport-scoped Rust release assets and verified to contain one

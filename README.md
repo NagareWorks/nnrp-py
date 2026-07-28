@@ -65,7 +65,7 @@ from nnrp.client import (
 )
 
 with connect_native_client_connection(
-	"nnrps://runtime.example/session/default",
+	"nnrp://runtime.example/session/default",
 	options=NativeClientConnectionOptions(connection_id=7),
 	require_native=True,
 ) as connection:
@@ -81,10 +81,10 @@ with connect_native_client_connection(
 		session,
 		operation_id=1001,
 		frame_id=1,
-		payload=b"tensor-or-typed-payload-bytes",
+		body=b"tensor-or-typed-payload-bytes",
 		max_events=8,
 	)
-	print(result.state, result.payload)
+	print(result.state, result.body)
 ```
 
 The native helpers provide:
@@ -111,7 +111,7 @@ Client control helpers build the frozen preview4 metadata payloads and send one 
 from nnrp.client import NativeClientSessionOpenOptions, connect_native_client_connection
 
 with connect_native_client_connection(
-	"nnrps://runtime.example/session/default",
+	"nnrp://runtime.example/session/default",
 	require_native=True,
 ) as connection:
 	session = connection.open_session(NativeClientSessionOpenOptions(requested_session_id=42))
@@ -228,7 +228,7 @@ from nnrp import (
 from nnrp.client import NativeClientSessionOpenOptions, connect_native_client_connection
 
 with connect_native_client_connection(
-	"nnrps://runtime.example/session/default",
+	"nnrp://runtime.example/session/default",
 	require_native=True,
 ) as connection:
 	session = connection.open_session(NativeClientSessionOpenOptions(requested_session_id=42))
@@ -415,7 +415,7 @@ The canonical host shape is a long-lived native connection with one or more expl
 from nnrp.client import NativeClientSessionOpenOptions, connect_native_client_connection
 
 with connect_native_client_connection(
-	"nnrps://runtime.example/session/default",
+	"nnrp://runtime.example/session/default",
 	require_native=True,
 ) as connection:
 	interactive = connection.open_session(
@@ -428,12 +428,12 @@ with connect_native_client_connection(
 	interactive_op = interactive.submit_operation(
 		operation_id=2001,
 		frame_id=1,
-		payload=b"interactive-frame",
+		body=b"interactive-frame",
 	)
 	batch_op = batch.submit_operation(
 		operation_id=3001,
 		frame_id=1,
-		payload=b"batch-frame",
+		body=b"batch-frame",
 	)
 
 	interactive_result = connection.poll_result(interactive, interactive_op, max_events=16)

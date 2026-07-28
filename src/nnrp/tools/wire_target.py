@@ -11,7 +11,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from nnrp.client.native import connect_native_client_connection
+from nnrp.client.native import NativeClientProviderRoute, connect_native_client_connection
 from nnrp.core import (
     BudgetPolicy,
     MessageType,
@@ -40,7 +40,7 @@ from nnrp.runtime import (
     RuntimeRole,
     TraceContextMetadata,
 )
-from nnrp.server.native import NativeServerAcceptOptions, listen_native_server
+from nnrp.server.native import NativeServerAcceptOptions, NativeServerProviderRoute, listen_native_server
 
 _APPLICATION_ENDPOINT = "nnrp://wire-conformance.local"
 _REQUEST_BODY = b"wire-external-request"
@@ -142,9 +142,13 @@ def _run_server_scenario(
 ) -> None:
     with listen_native_server(
         _APPLICATION_ENDPOINT,
-        provider_endpoint=scenario.transport.endpoint,
-        transport=scenario.transport.name,
-        security=scenario.transport.server_security,
+        provider_routes={
+            scenario.transport.name: NativeServerProviderRoute(
+                provider_endpoint=scenario.transport.endpoint,
+                security=scenario.transport.server_security,
+            )
+        },
+        transport_policy=f"force_{scenario.transport.name}",
     ) as server:
         ready_event.set()
         session = server.accept(
@@ -242,9 +246,13 @@ def _open_connection(transport: LiveWireTransport, *, deadline: float) -> Any:
     while time.monotonic() < deadline:
         context = connect_native_client_connection(
             _APPLICATION_ENDPOINT,
-            provider_endpoint=transport.endpoint,
-            transport=transport.name,
-            security=transport.client_security,
+            provider_routes={
+                transport.name: NativeClientProviderRoute(
+                    provider_endpoint=transport.endpoint,
+                    security=transport.client_security,
+                )
+            },
+            transport_policy=f"force_{transport.name}",
         )
         try:
             connection = context.__enter__()

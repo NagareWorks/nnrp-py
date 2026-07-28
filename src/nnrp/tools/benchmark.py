@@ -21,7 +21,11 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
-from nnrp.client.native import NativeClientSessionOpenOptions, connect_native_client_connection
+from nnrp.client.native import (
+    NativeClientProviderRoute,
+    NativeClientSessionOpenOptions,
+    connect_native_client_connection,
+)
 from nnrp.core.enums import HeaderFlags, MessageType, WireFormat
 from nnrp.core.header import HEADER_LENGTH, NnrpHeader
 from nnrp.core.messages.control import (
@@ -92,7 +96,12 @@ from nnrp.schema import (
     unpack_typed_payload_descriptor,
     validate_typed_payload_binding,
 )
-from nnrp.server import NativeServerAcceptOptions, NativeServerOptions, listen_native_server
+from nnrp.server import (
+    NativeServerAcceptOptions,
+    NativeServerOptions,
+    NativeServerProviderRoute,
+    listen_native_server,
+)
 
 _RESULTS_SCHEMA_URL = (
     "https://raw.githubusercontent.com/NagareWorks/nnrp-conformance/main/schemas/benchmark-results.schema.json"
@@ -433,8 +442,10 @@ def _open_native_role_loopback(transport: str = "ipc") -> Any:
     try:
         with listen_native_server(
             "nnrp://benchmark.local",
-            provider_endpoint=provider_endpoint,
-            transport=transport,
+            provider_routes={
+                transport: NativeServerProviderRoute(provider_endpoint=provider_endpoint),
+            },
+            transport_policy=f"force_{transport}",
             require_native=True,
             options=NativeServerOptions(server_id=2),
         ) as server:
@@ -449,8 +460,10 @@ def _open_native_role_loopback(transport: str = "ipc") -> Any:
                 )
                 with connect_native_client_connection(
                     "nnrp://benchmark.local",
-                    provider_endpoint=provider_endpoint,
-                    transport=transport,
+                    provider_routes={
+                        transport: NativeClientProviderRoute(provider_endpoint=provider_endpoint),
+                    },
+                    transport_policy=f"force_{transport}",
                     require_native=True,
                 ) as client:
                     client_session = client.open_session(

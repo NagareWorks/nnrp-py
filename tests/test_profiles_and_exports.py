@@ -43,6 +43,7 @@ from nnrp.client import (
     MigrationTriggerSnapshot,
     NativeClientConnection,
     NativeClientConnectionOptions,
+    NativeClientProviderRoute,
     NativeClientSessionOpenOptions,
     NativeClientSessionOptions,
     PathHealthSample,
@@ -146,7 +147,7 @@ from nnrp.core import (
 )
 from nnrp.enums import ErrorCode, FrameClass, HeaderFlags, MessageType, WireFormat
 from nnrp.header import HEADER_LENGTH, HEADER_MAGIC, NnrpHeader
-from nnrp.server import ServerProfile
+from nnrp.server import NativeServerProviderRoute, ServerProfile, listen_native_server
 
 
 def test_client_profile_defaults_and_overrides() -> None:
@@ -356,6 +357,7 @@ def test_connect_client_session_is_exported() -> None:
     assert "packet transport smoke/tooling" in (connect_client_session_with_probe.__doc__ or "")
     assert NativeClientConnection.__name__ == "NativeClientConnection"
     assert NativeClientConnectionOptions.__name__ == "NativeClientConnectionOptions"
+    assert NativeClientProviderRoute.__name__ == "NativeClientProviderRoute"
     assert NativeClientSessionOptions.__name__ == "NativeClientSessionOptions"
     assert NativeClientSessionOpenOptions.__name__ == "NativeClientSessionOpenOptions"
     assert callable(connect_native_client_connection)
@@ -378,6 +380,15 @@ def test_preview4_host_runtime_api_keeps_request_options_off_packet_helpers() ->
         "connection_id",
         "connection_generation",
     }
+    assert set(NativeClientProviderRoute.__annotations__) == {"provider_endpoint", "security"}
+    assert set(NativeServerProviderRoute.__annotations__) == {"provider_endpoint", "security"}
+    client_signature = inspect.signature(connect_native_client_connection)
+    server_signature = inspect.signature(listen_native_server)
+    assert "provider_routes" in client_signature.parameters
+    assert "provider_routes" in server_signature.parameters
+    for removed_name in ("provider_endpoint", "transport", "security"):
+        assert removed_name not in client_signature.parameters
+        assert removed_name not in server_signature.parameters
     assert set(NativeClientSessionOpenOptions.__annotations__) == {
         "requested_session_id",
         "session_generation",

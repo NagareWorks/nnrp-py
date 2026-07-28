@@ -65,6 +65,7 @@ from nnrp.native import (
     HANDLE_KIND_OBJECT_DESCRIPTOR,
     HANDLE_KIND_OPERATION,
     HANDLE_KIND_SCHEMA_REGISTRY,
+    HANDLE_KIND_SERVER_ACCEPT,
     HANDLE_KIND_SESSION,
     HANDLE_KIND_TRANSPORT_CONNECTION,
     HANDLE_KIND_TRANSPORT_LISTENER,
@@ -157,7 +158,10 @@ from nnrp.native import (
     _NnrpRuntimeFrameSendRequest,
     _NnrpRuntimeObjectDescriptor,
     _NnrpSchemaDescriptorHeader,
-    _NnrpServerAcceptRequest,
+    _NnrpServerAcceptBeginRequest,
+    _NnrpServerAcceptClaimRequest,
+    _NnrpServerAcceptResult,
+    _NnrpServerAcceptWaitRequest,
     _NnrpServerBindRequest,
     _NnrpServerSendResultRequest,
     _NnrpSessionOpenRequest,
@@ -240,7 +244,7 @@ class FakeLibrary:
         self,
         *,
         abi_major: int = 4,
-        abi_minor: int = 0,
+        abi_minor: int = 1,
         abi_patch: int = 0,
         protocol_major: int = 1,
         wire_format: int = 0,
@@ -303,12 +307,16 @@ class FakeRuntimeLibrary(FakeEntrypointLibrary):
         event_kind: int = 6,
         event_message_type: int = 0,
         await_event_delay_seconds: float = 0.0,
+        active_transport_id: int = int(TransportId.TCP),
+        accept_wait_statuses: list[_NnrpFfiStatus] | None = None,
     ) -> None:
         super().__init__()
         self.status = status or NativeStatus.ok().to_ffi()
         self.event_kind = event_kind
         self.event_message_type = event_message_type
         self.await_event_delay_seconds = await_event_delay_seconds
+        self.active_transport_id = active_transport_id
+        self.accept_wait_statuses = list(accept_wait_statuses or [])
         self._event_payload_owner = (
             ctypes.create_string_buffer(event_payload, len(event_payload)) if event_payload else None
         )
@@ -323,7 +331,10 @@ class FakeRuntimeLibrary(FakeEntrypointLibrary):
         self.nnrp_client_await_event.handler = self._await_event
         self.nnrp_client_await_events.handler = self._await_events
         self.nnrp_server_bind.handler = self._server_bind
-        self.nnrp_server_accept.handler = self._server_accept
+        self.nnrp_server_accept_begin.handler = self._server_accept_begin
+        self.nnrp_server_accept_wait.handler = self._server_accept_wait
+        self.nnrp_server_accept_claim.handler = self._server_accept_claim
+        self.nnrp_server_accept_release.handler = self._server_accept_release
         self.nnrp_server_await_events.handler = self._await_events
         self.nnrp_server_send_result.handler = self._server_send_result
         self.nnrp_server_close.handler = self._close
@@ -364,6 +375,7 @@ class FakeRuntimeLibrary(FakeEntrypointLibrary):
         self._buffers: dict[int, ctypes.Array[ctypes.c_char]] = {}
         self._object_descriptors: dict[int, tuple[_NnrpRuntimeObjectDescriptor, ctypes.Array[ctypes.c_char]]] = {}
         self._cache_leases: dict[tuple[int, int, int, int], _NnrpHandle] = {}
+        self._server_accepts: dict[int, _NnrpHandle] = {}
 
     def _client_connect(self, request: _NnrpClientConnectRequest, out_handle: object) -> _NnrpFfiStatus:
         _write_handle(out_handle, _NnrpHandle(HANDLE_KIND_CONNECTION, request.connection_id, request.generation, 0))
@@ -373,10 +385,44 @@ class FakeRuntimeLibrary(FakeEntrypointLibrary):
         _write_handle(out_handle, _NnrpHandle(HANDLE_KIND_CONNECTION, request.server_id, request.generation, 0))
         return self.status
 
-    def _server_accept(self, request: _NnrpServerAcceptRequest, out_handle: object) -> _NnrpFfiStatus:
+    def _server_accept_begin(
+        self,
+        request: _NnrpServerAcceptBeginRequest,
+        out_handle: object,
+    ) -> _NnrpFfiStatus:
         if request.server.kind != HANDLE_KIND_CONNECTION:
             return _NnrpFfiStatus(FFI_STATUS_INVALID_HANDLE, 0, 0, 0)
-        _write_handle(out_handle, _NnrpHandle(HANDLE_KIND_SESSION, request.session_handle_id, request.generation, 0))
+        accept = _NnrpHandle(HANDLE_KIND_SERVER_ACCEPT, request.accept_handle_id, request.generation, 0)
+        self._server_accepts[request.accept_handle_id] = request.server
+        _write_handle(out_handle, accept)
+        return self.status
+
+    def _server_accept_wait(self, request: _NnrpServerAcceptWaitRequest) -> _NnrpFfiStatus:
+        if request.accept.id not in self._server_accepts:
+            return _NnrpFfiStatus(FFI_STATUS_INVALID_HANDLE, 0, 0, 0)
+        if self.accept_wait_statuses:
+            return self.accept_wait_statuses.pop(0)
+        return self.status
+
+    def _server_accept_claim(
+        self,
+        request: _NnrpServerAcceptClaimRequest,
+        out_result: object,
+    ) -> _NnrpFfiStatus:
+        server = self._server_accepts.pop(request.accept.id, None)
+        if server is None:
+            return _NnrpFfiStatus(FFI_STATUS_INVALID_HANDLE, 0, 0, 0)
+        target = getattr(out_result, "_obj", None)
+        if target is None:
+            target = ctypes.cast(out_result, ctypes.POINTER(_NnrpServerAcceptResult)).contents
+        target.session = _NnrpHandle(HANDLE_KIND_SESSION, request.session_handle_id, request.generation, 0)
+        target.active_transport_id = self.active_transport_id
+        target.reserved0 = 0
+        return self.status
+
+    def _server_accept_release(self, accept: _NnrpHandle) -> _NnrpFfiStatus:
+        if self._server_accepts.pop(accept.id, None) is None:
+            return _NnrpFfiStatus(FFI_STATUS_INVALID_HANDLE, 0, 0, 0)
         return self.status
 
     def _open_session(self, request: _NnrpSessionOpenRequest, out_handle: object) -> _NnrpFfiStatus:
@@ -946,24 +992,27 @@ def _read_buffer_view(view: _NnrpBufferView) -> bytes:
 
 
 def _native_token_result_payload(body: bytes = b"result") -> bytes:
-    return ResultPushMetadata(
-        status_code=200,
-        result_flags=ResultFlags.NONE,
-        section_count=0,
-        tile_count=0,
-        active_profile_id=2,
-        reserved0=0,
-        inference_ms=1,
-        queue_ms=0,
-        server_total_ms=1,
-        reserved1=0,
-        tile_base_id=0,
-        tile_index_bytes=0,
-        result_class=ResultClass.COMPLETE,
-        applied_budget_policy=BudgetPolicy.NONE,
-        payload_kind_bitmap=PayloadKind.TOKEN_CHUNK,
-        payload_frame_count=1,
-    ).pack() + body
+    return (
+        ResultPushMetadata(
+            status_code=200,
+            result_flags=ResultFlags.NONE,
+            section_count=0,
+            tile_count=0,
+            active_profile_id=2,
+            reserved0=0,
+            inference_ms=1,
+            queue_ms=0,
+            server_total_ms=1,
+            reserved1=0,
+            tile_base_id=0,
+            tile_index_bytes=0,
+            result_class=ResultClass.COMPLETE,
+            applied_budget_policy=BudgetPolicy.NONE,
+            payload_kind_bitmap=PayloadKind.TOKEN_CHUNK,
+            payload_frame_count=1,
+        ).pack()
+        + body
+    )
 
 
 def _open_event_session(connection: NativeRuntimeConnection) -> NativeRuntimeSession:
@@ -1096,6 +1145,7 @@ class FakeBackend:
         self.connections.append((connection_id, generation, transport_id))
         raise NotImplementedError("fixture connect")
 
+
 RUNTIME_ENTRYPOINT_SYMBOLS = [
     "nnrp_current_protocol_version",
     "nnrp_runtime_capabilities",
@@ -1112,7 +1162,10 @@ RUNTIME_ENTRYPOINT_SYMBOLS = [
     "nnrp_client_await_event",
     "nnrp_client_await_events",
     "nnrp_server_bind",
-    "nnrp_server_accept",
+    "nnrp_server_accept_begin",
+    "nnrp_server_accept_wait",
+    "nnrp_server_accept_claim",
+    "nnrp_server_accept_release",
     "nnrp_server_await_events",
     "nnrp_server_send_result",
     "nnrp_server_close",
@@ -1283,6 +1336,26 @@ def test_native_transport_binding_requires_client_role_entrypoints() -> None:
 
     with pytest.raises(NativeArtifactError, match="role adoption entrypoints"):
         binding.adopt_client(carrier, connection_id=11, generation=2)
+
+
+def test_unavailable_native_transport_binding_rejects_every_execution_path() -> None:
+    provider = SimpleNamespace(
+        name="tcp",
+        transport_slots=("tcp",),
+        metadata=SimpleNamespace(id="example.transport.tcp.uninstalled"),
+    )
+    binding = NativeTransportBinding.unavailable(provider, "provider package is not installed")
+
+    assert binding.local_available is False
+    assert binding.diagnostic == "provider package is not installed"
+    calls = (
+        lambda: binding._probe(_test_transport_endpoint("tcp"), None, 1, 1, 0, 0),
+        lambda: binding._connect(_test_transport_endpoint("tcp"), None, 0, 0),
+        lambda: binding._listen(_test_transport_endpoint("tcp"), None, 0, 0),
+    )
+    for call in calls:
+        with pytest.raises(NativeArtifactError, match="provider package is not installed"):
+            call()
 
 
 def test_native_transport_connection_remains_owned_when_client_role_adoption_fails() -> None:
@@ -1526,10 +1599,7 @@ def _provider_metadata(scope: str) -> native_module.NativeTransportProviderMetad
         cost=native_module.NativeTransportProviderCost(model_id=0, units=0),
         preference_rank=int(manifest["preference_rank"]),
         limits=native_module.NativeTransportProviderLimits(max_frame_bytes=67108864),
-        limitations=tuple(
-            native_module.NativeTransportProviderLimitation(value)
-            for value in manifest["limitations"]
-        ),
+        limitations=tuple(native_module.NativeTransportProviderLimitation(value) for value in manifest["limitations"]),
     )
 
 
@@ -1563,6 +1633,34 @@ def _probe_sample(
         timed_out=timed_out,
         failed=failed,
     )
+
+
+def _candidate_readiness(root: Path) -> list[native_module.NativeTransportCandidateReadiness]:
+    return [
+        native_module.NativeTransportCandidateReadiness.ready(provider)
+        for provider in discover_native_transport_providers(root, NativePlatform("linux", "x86_64"))
+    ]
+
+
+def _probe_observations(
+    root: Path,
+    samples: list[NativeTransportProbeSample],
+) -> list[native_module.NativeTransportProbeObservation]:
+    observations: list[native_module.NativeTransportProbeObservation] = []
+    for provider in discover_native_transport_providers(root, NativePlatform("linux", "x86_64")):
+        matching = [
+            sample
+            for sample in samples
+            if sample.provider_id == provider.metadata.id and sample.transport_name == provider.name
+        ]
+        if not matching:
+            continue
+        metrics = native_module.summarize_native_provider_probe(provider, matching)
+        if metrics is None:
+            observations.append(native_module.NativeTransportProbeObservation.failed(provider, "probe failed"))
+        else:
+            observations.append(native_module.NativeTransportProbeObservation.succeeded(provider, metrics))
+    return observations
 
 
 def _write_provider_artifact_with_manifest(root: Path, scope: str, manifest: object) -> Path:
@@ -1709,8 +1807,7 @@ def test_discover_native_transport_provider_rejects_invalid_manifest_document(
             "units must be a canonical decimal u64 string",
         ),
         (
-            _provider_artifact_manifest("ipc")
-            | {"provider": _provider_manifest("ipc") | {"preference_rank": 65536}},
+            _provider_artifact_manifest("ipc") | {"provider": _provider_manifest("ipc") | {"preference_rank": 65536}},
             "preference_rank must be an integer",
         ),
         (
@@ -1728,8 +1825,7 @@ def test_discover_native_transport_provider_rejects_invalid_manifest_document(
             "provider.limitations must be a list",
         ),
         (
-            _provider_artifact_manifest("ipc")
-            | {"provider": _provider_manifest("ipc") | {"limitations": ["unknown"]}},
+            _provider_artifact_manifest("ipc") | {"provider": _provider_manifest("ipc") | {"limitations": ["unknown"]}},
             "unsupported native transport provider limitation",
         ),
     ],
@@ -1951,7 +2047,11 @@ def test_diagnose_native_transport_endpoint_support_skips_missing_provider(
 def test_select_native_transport_provider_selects_single_installed_transport(tmp_path: Path) -> None:
     tcp_artifact = _write_provider_artifact(tmp_path, "tcp")
 
-    selection = select_native_transport_provider(root=tmp_path, native_platform=NativePlatform("linux", "x86_64"))
+    selection = select_native_transport_provider(
+        root=tmp_path,
+        native_platform=NativePlatform("linux", "x86_64"),
+        candidate_readiness=_candidate_readiness(tmp_path),
+    )
 
     assert selection.selected_provider.artifact_path == tcp_artifact
     assert selection.selected_transport_name == "tcp"
@@ -1972,19 +2072,22 @@ def test_select_native_transport_provider_applies_preview4_policy_order(tmp_path
     auto = select_native_transport_provider(
         root=tmp_path,
         native_platform=NativePlatform("linux", "x86_64"),
-        probe_samples=samples,
+        candidate_readiness=_candidate_readiness(tmp_path),
+        probe_observations=_probe_observations(tmp_path, samples),
     )
     preferred_websocket = select_native_transport_provider(
         TransportPolicy.PREFER_WEBSOCKET,
         root=tmp_path,
         native_platform=NativePlatform("linux", "x86_64"),
-        probe_samples=samples,
+        candidate_readiness=_candidate_readiness(tmp_path),
+        probe_observations=_probe_observations(tmp_path, samples),
     )
     preferred_tcp = select_native_transport_provider(
         "prefer-tcp",
         root=tmp_path,
         native_platform=NativePlatform("linux", "x86_64"),
-        probe_samples=samples,
+        candidate_readiness=_candidate_readiness(tmp_path),
+        probe_observations=_probe_observations(tmp_path, samples),
     )
 
     assert auto.selected_transport_id is TransportId.IPC
@@ -2000,6 +2103,7 @@ def test_select_native_transport_provider_rejects_missing_forced_transport(tmp_p
             TransportPolicy.FORCE_IPC,
             root=tmp_path,
             native_platform=NativePlatform("linux", "x86_64"),
+            candidate_readiness=_candidate_readiness(tmp_path),
         )
 
 
@@ -2015,6 +2119,7 @@ def test_select_native_transport_provider_reports_forced_transport_rejection(tmp
             root=tmp_path,
             native_platform=NativePlatform("linux", "x86_64"),
             supported_transports=(TransportId.QUIC,),
+            candidate_readiness=_candidate_readiness(tmp_path),
         )
 
     assert caught.value.candidates[0].rejection_reason is (
@@ -2024,17 +2129,27 @@ def test_select_native_transport_provider_reports_forced_transport_rejection(tmp
 
 def test_select_native_transport_provider_rejects_empty_provider_registry(tmp_path: Path) -> None:
     with pytest.raises(NativeArtifactError, match="no viable native transport provider"):
-        select_native_transport_provider(root=tmp_path, native_platform=NativePlatform("linux", "x86_64"))
+        select_native_transport_provider(
+            root=tmp_path,
+            native_platform=NativePlatform("linux", "x86_64"),
+            candidate_readiness=[],
+        )
 
 
 def test_select_native_transport_provider_accepts_integer_and_auto_string_policy(tmp_path: Path) -> None:
     _write_provider_artifact(tmp_path, "websocket")
 
-    auto = select_native_transport_provider("auto", root=tmp_path, native_platform=NativePlatform("linux", "x86_64"))
+    auto = select_native_transport_provider(
+        "auto",
+        root=tmp_path,
+        native_platform=NativePlatform("linux", "x86_64"),
+        candidate_readiness=_candidate_readiness(tmp_path),
+    )
     forced = select_native_transport_provider(
         int(TransportPolicy.FORCE_WEBSOCKET),
         root=tmp_path,
         native_platform=NativePlatform("linux", "x86_64"),
+        candidate_readiness=_candidate_readiness(tmp_path),
     )
 
     assert auto.selected_transport_id is TransportId.WEBSOCKET
@@ -2049,6 +2164,7 @@ def test_select_native_transport_provider_rejects_invalid_policy(tmp_path: Path)
             "prefer-stdio",
             root=tmp_path,
             native_platform=NativePlatform("linux", "x86_64"),
+            candidate_readiness=_candidate_readiness(tmp_path),
         )
 
 
@@ -2060,6 +2176,7 @@ def test_select_native_transport_provider_rejects_unspecified_supported_transpor
             root=tmp_path,
             native_platform=NativePlatform("linux", "x86_64"),
             supported_transports=(TransportId.UNSPECIFIED,),
+            candidate_readiness=_candidate_readiness(tmp_path),
         )
 
 
@@ -2072,7 +2189,11 @@ def test_select_native_transport_provider_reports_remote_unsupported_transport(t
         root=tmp_path,
         native_platform=NativePlatform("linux", "x86_64"),
         supported_transports=(TransportId.TCP, TransportId.QUIC),
-        probe_samples=[_probe_sample("tcp"), _probe_sample("quic")],
+        candidate_readiness=_candidate_readiness(tmp_path),
+        probe_observations=_probe_observations(
+            tmp_path,
+            [_probe_sample("tcp"), _probe_sample("quic")],
+        ),
     )
 
     assert selection.selected_transport_id is TransportId.QUIC
@@ -2086,34 +2207,36 @@ def test_select_native_transport_provider_uses_deterministic_probe_metrics(tmp_p
     _write_provider_artifact(tmp_path, "quic")
     _write_provider_artifact(tmp_path, "ipc")
 
+    samples = [
+        _probe_sample(
+            "tcp",
+            elapsed_us=1_500,
+            rtt_us=1_500,
+            bytes_sent=128,
+            bytes_received=128,
+        ),
+        _probe_sample(
+            "quic",
+            elapsed_us=800,
+            rtt_us=800,
+            bytes_sent=512,
+            bytes_received=512,
+        ),
+        _probe_sample(
+            "ipc",
+            elapsed_us=2_000,
+            rtt_us=None,
+            bytes_sent=0,
+            bytes_received=0,
+            timed_out=True,
+            failed=True,
+        ),
+    ]
     selection = select_native_transport_provider(
         root=tmp_path,
         native_platform=NativePlatform("linux", "x86_64"),
-        probe_samples=[
-            _probe_sample(
-                "tcp",
-                elapsed_us=1_500,
-                rtt_us=1_500,
-                bytes_sent=128,
-                bytes_received=128,
-            ),
-            _probe_sample(
-                "quic",
-                elapsed_us=800,
-                rtt_us=800,
-                bytes_sent=512,
-                bytes_received=512,
-            ),
-            _probe_sample(
-                "ipc",
-                elapsed_us=2_000,
-                rtt_us=None,
-                bytes_sent=0,
-                bytes_received=0,
-                timed_out=True,
-                failed=True,
-            ),
-        ],
+        candidate_readiness=_candidate_readiness(tmp_path),
+        probe_observations=_probe_observations(tmp_path, samples),
     )
 
     assert selection.selected_transport_id is TransportId.QUIC
@@ -2124,7 +2247,7 @@ def test_select_native_transport_provider_uses_deterministic_probe_metrics(tmp_p
     assert selection.diagnostic == "native transport selected by deterministic probe ordering"
 
 
-def test_select_native_transport_provider_requires_probe_samples_for_probe_mode(tmp_path: Path) -> None:
+def test_select_native_transport_provider_requires_probe_observations_for_probe_mode(tmp_path: Path) -> None:
     _write_provider_artifact(tmp_path, "tcp")
     _write_provider_artifact(tmp_path, "quic")
 
@@ -2132,12 +2255,210 @@ def test_select_native_transport_provider_requires_probe_samples_for_probe_mode(
         select_native_transport_provider(
             root=tmp_path,
             native_platform=NativePlatform("linux", "x86_64"),
-            probe_samples=[],
+            candidate_readiness=_candidate_readiness(tmp_path),
+            probe_observations=[],
         )
     assert all(
         candidate.rejection_reason is native_module.NativeTransportRejectionReason.PROBE_MISSING
         for candidate in caught.value.candidates
     )
+
+
+def test_select_native_transport_provider_distinguishes_failed_and_missing_probe_observations(
+    tmp_path: Path,
+) -> None:
+    _write_provider_artifact(tmp_path, "tcp")
+    _write_provider_artifact(tmp_path, "quic")
+    providers = discover_native_transport_providers(tmp_path, NativePlatform("linux", "x86_64"))
+    tcp = next(provider for provider in providers if provider.name == "tcp")
+    quic = next(provider for provider in providers if provider.name == "quic")
+    quic_metrics = native_module.summarize_native_provider_probe(quic, [_probe_sample("quic")])
+    assert quic_metrics is not None
+
+    selection = select_native_transport_provider(
+        root=tmp_path,
+        native_platform=NativePlatform("linux", "x86_64"),
+        candidate_readiness=[native_module.NativeTransportCandidateReadiness.ready(provider) for provider in providers],
+        probe_observations=[
+            native_module.NativeTransportProbeObservation.failed(tcp, "connection refused"),
+            native_module.NativeTransportProbeObservation.succeeded(quic, quic_metrics),
+        ],
+    )
+
+    tcp_candidate = next(candidate for candidate in selection.candidates if candidate.transport_name == "tcp")
+    assert tcp_candidate.probe_state is native_module.NativeTransportProbeState.FAILED
+    assert tcp_candidate.rejection_reason is native_module.NativeTransportRejectionReason.PROBE_FAILED
+    assert tcp_candidate.diagnostic == "connection refused"
+
+
+@pytest.mark.parametrize(
+    "evidence_case",
+    ["missing", "duplicate", "unmatched-readiness", "unmatched-observation", "duplicate-observation"],
+)
+def test_select_native_transport_provider_rejects_invalid_evidence(
+    tmp_path: Path,
+    evidence_case: str,
+) -> None:
+    _write_provider_artifact(tmp_path, "tcp")
+    provider = discover_native_transport_providers(tmp_path, NativePlatform("linux", "x86_64"))[0]
+    readiness = [native_module.NativeTransportCandidateReadiness.ready(provider)]
+    observations: list[native_module.NativeTransportProbeObservation] = []
+    if evidence_case == "missing":
+        readiness = []
+    elif evidence_case == "duplicate":
+        readiness *= 2
+    elif evidence_case == "unmatched-readiness":
+        readiness = [
+            native_module.NativeTransportCandidateReadiness(
+                transport_id=TransportId.TCP,
+                provider_id="unknown.provider",
+                route_resolved=True,
+                security_satisfied=True,
+            )
+        ]
+    else:
+        observations = [
+            native_module.NativeTransportProbeObservation(
+                transport_id=TransportId.TCP,
+                provider_id=(provider.metadata.id if evidence_case == "duplicate-observation" else "unknown.provider"),
+                state=native_module.NativeTransportProbeState.FAILED,
+            )
+        ]
+        if evidence_case == "duplicate-observation":
+            observations *= 2
+
+    with pytest.raises(native_module.NativeTransportSelectionError) as caught:
+        select_native_transport_provider(
+            root=tmp_path,
+            native_platform=NativePlatform("linux", "x86_64"),
+            candidate_readiness=readiness,
+            probe_observations=observations,
+        )
+
+    assert caught.value.code is native_module.NativeTransportSelectionErrorCode.INVALID_EVIDENCE
+    assert caught.value.policy is None
+    assert caught.value.candidates == ()
+
+
+@pytest.mark.parametrize(
+    "constructor",
+    [
+        lambda: native_module.NativeTransportCandidateReadiness(
+            TransportId.UNSPECIFIED, "provider", True, True
+        ),
+        lambda: native_module.NativeTransportCandidateReadiness(TransportId.TCP, "", True, True),
+        lambda: native_module.NativeTransportCandidateReadiness(TransportId.TCP, "provider", 1, True),
+        lambda: native_module.NativeTransportCandidateReadiness(TransportId.TCP, "provider", True, 1),
+        lambda: native_module.NativeTransportCandidateReadiness(
+            TransportId.TCP, "provider", True, True, diagnostic=1
+        ),
+        lambda: native_module.NativeTransportProbeObservation(
+            TransportId.UNSPECIFIED, "provider", native_module.NativeTransportProbeState.FAILED
+        ),
+        lambda: native_module.NativeTransportProbeObservation(
+            TransportId.TCP, "", native_module.NativeTransportProbeState.FAILED
+        ),
+        lambda: native_module.NativeTransportProbeObservation(
+            TransportId.TCP, "provider", native_module.NativeTransportProbeState.NOT_RUN
+        ),
+        lambda: native_module.NativeTransportProbeObservation(
+            TransportId.TCP, "provider", native_module.NativeTransportProbeState.SUCCEEDED
+        ),
+        lambda: native_module.NativeTransportProbeObservation(
+            TransportId.TCP,
+            "provider",
+            native_module.NativeTransportProbeState.SUCCEEDED,
+            metrics=object(),
+        ),
+        lambda: native_module.NativeTransportProbeObservation(
+            TransportId.TCP,
+            "provider",
+            native_module.NativeTransportProbeState.FAILED,
+            metrics=native_module.NativeTransportProbeMetrics(1, 1, 1, 1),
+        ),
+        lambda: native_module.NativeTransportProbeObservation(
+            TransportId.TCP,
+            "provider",
+            native_module.NativeTransportProbeState.FAILED,
+            diagnostic=1,
+        ),
+    ],
+)
+def test_transport_selection_evidence_models_reject_invalid_fields(constructor) -> None:
+    with pytest.raises(ValueError):
+        constructor()
+
+
+def test_transport_candidate_readiness_factories_preserve_host_failure(tmp_path: Path) -> None:
+    _write_provider_artifact(tmp_path, "tcp")
+    provider = discover_native_transport_providers(tmp_path, NativePlatform("linux", "x86_64"))[0]
+
+    unresolved = native_module.NativeTransportCandidateReadiness.route_unresolved(provider, "no route")
+    insecure = native_module.NativeTransportCandidateReadiness.security_unsatisfied(provider, "TLS required")
+
+    assert (unresolved.route_resolved, unresolved.diagnostic) == (False, "no route")
+    assert (insecure.security_satisfied, insecure.diagnostic) == (False, "TLS required")
+
+
+@pytest.mark.parametrize(
+    ("readiness_factory", "expected_reason"),
+    [
+        (
+            lambda provider: native_module.NativeTransportCandidateReadiness.route_unresolved(provider, "no route"),
+            native_module.NativeTransportRejectionReason.ROUTE_UNRESOLVED,
+        ),
+        (
+            lambda provider: native_module.NativeTransportCandidateReadiness.security_unsatisfied(
+                provider, "TLS required"
+            ),
+            native_module.NativeTransportRejectionReason.SECURITY_UNSATISFIED,
+        ),
+    ],
+)
+def test_select_native_transport_provider_applies_candidate_readiness(
+    tmp_path: Path,
+    readiness_factory,
+    expected_reason: native_module.NativeTransportRejectionReason,
+) -> None:
+    _write_provider_artifact(tmp_path, "tcp")
+    provider = discover_native_transport_providers(tmp_path, NativePlatform("linux", "x86_64"))[0]
+
+    with pytest.raises(native_module.NativeTransportSelectionError) as caught:
+        select_native_transport_provider(
+            root=tmp_path,
+            native_platform=NativePlatform("linux", "x86_64"),
+            candidate_readiness=[readiness_factory(provider)],
+        )
+
+    assert caught.value.candidates[0].rejection_reason is expected_reason
+
+
+def test_diagnose_nnrp_endpoint_support_summarizes_raw_probe_samples(tmp_path: Path) -> None:
+    _write_provider_artifact(tmp_path, "tcp")
+    _write_provider_artifact(tmp_path, "quic")
+
+    support = diagnose_nnrp_endpoint_support(
+        "nnrp://localhost",
+        root=tmp_path,
+        native_platform=NativePlatform("linux", "x86_64"),
+        probe_samples=[_probe_sample("tcp"), _probe_sample("quic", failed=True, rtt_us=None)],
+    )
+
+    assert support.available is True
+    assert support.selection is not None
+    assert support.selection.selected_transport_name == "tcp"
+
+
+def test_discover_native_transport_providers_rejects_duplicate_provider_ids(tmp_path: Path) -> None:
+    _write_provider_artifact(tmp_path, "tcp")
+    quic_manifest = _provider_artifact_manifest("quic")
+    quic_provider = dict(quic_manifest["provider"])
+    quic_provider["id"] = _provider_manifest("tcp")["id"]
+    quic_manifest["provider"] = quic_provider
+    _write_provider_artifact_with_manifest(tmp_path, "quic", quic_manifest)
+
+    with pytest.raises(NativeArtifactError, match="duplicate native provider id"):
+        discover_native_transport_providers(tmp_path, NativePlatform("linux", "x86_64"))
 
 
 def test_select_native_transport_provider_enforces_requested_frame_limit(tmp_path: Path) -> None:
@@ -2148,6 +2469,7 @@ def test_select_native_transport_provider_enforces_requested_frame_limit(tmp_pat
             root=tmp_path,
             native_platform=NativePlatform("linux", "x86_64"),
             requested_max_frame_bytes=67108865,
+            candidate_readiness=_candidate_readiness(tmp_path),
         )
 
     assert len(caught.value.candidates) == 1
@@ -2164,6 +2486,7 @@ def test_select_native_transport_provider_rejects_invalid_requested_frame_limit(
             root=tmp_path,
             native_platform=NativePlatform("linux", "x86_64"),
             requested_max_frame_bytes=True,
+            candidate_readiness=_candidate_readiness(tmp_path),
         )
 
 
@@ -2194,20 +2517,18 @@ def test_summarize_native_provider_probe_uses_per_sample_even_medians(tmp_path: 
 
 def test_select_native_transport_provider_compares_shared_cost_model_before_preference(tmp_path: Path) -> None:
     tcp_manifest = _provider_artifact_manifest("tcp")
-    tcp_manifest["provider"] = _provider_manifest("tcp") | {
-        "cost": {"model_id": 7, "units": "1"}
-    }
+    tcp_manifest["provider"] = _provider_manifest("tcp") | {"cost": {"model_id": 7, "units": "1"}}
     ipc_manifest = _provider_artifact_manifest("ipc")
-    ipc_manifest["provider"] = _provider_manifest("ipc") | {
-        "cost": {"model_id": 7, "units": "2"}
-    }
+    ipc_manifest["provider"] = _provider_manifest("ipc") | {"cost": {"model_id": 7, "units": "2"}}
     _write_provider_artifact_with_manifest(tmp_path, "tcp", tcp_manifest)
     _write_provider_artifact_with_manifest(tmp_path, "ipc", ipc_manifest)
 
+    samples = [_probe_sample("tcp"), _probe_sample("ipc")]
     selection = select_native_transport_provider(
         root=tmp_path,
         native_platform=NativePlatform("linux", "x86_64"),
-        probe_samples=[_probe_sample("tcp"), _probe_sample("ipc")],
+        candidate_readiness=_candidate_readiness(tmp_path),
+        probe_observations=_probe_observations(tmp_path, samples),
     )
 
     assert selection.selected_transport_id is TransportId.TCP
@@ -2298,7 +2619,7 @@ def test_probe_native_artifact_accepts_matching_protocol(tmp_path: Path) -> None
 
     assert result.artifact_path == artifact
     assert result.abi_major == 4
-    assert result.abi_minor == 0
+    assert result.abi_minor == 1
     assert result.abi_patch == 0
     assert result.protocol_major == 1
     assert result.protocol_wire_format == 0
@@ -2929,7 +3250,7 @@ def test_native_runtime_client_binds_native_ipc_and_websocket_servers(tmp_path: 
     )
     operation.send_result(result_metadata, b"server-result")
     session.send_trace_context(TraceContextMetadata(1, 2, 0, 3, 0, 0))
-    session.poll_events()
+    event = session.poll_event(timeout_ms=1)
     session.close()
     websocket_server.close()
 
@@ -2937,6 +3258,8 @@ def test_native_runtime_client_binds_native_ipc_and_websocket_servers(tmp_path: 
     assert isinstance(websocket_server, NativeRuntimeServer)
     assert isinstance(session, NativeRuntimeServerSession)
     assert isinstance(operation, NativeRuntimeServerOperation)
+    assert event is not None
+    assert event.session.id == 41
     assert ipc_server.handle.handle.id == 21
     assert websocket_server.handle.handle.id == 22
     assert session.server.handle.id == 21
@@ -2949,11 +3272,14 @@ def test_native_runtime_client_binds_native_ipc_and_websocket_servers(tmp_path: 
     assert operation.body == b"server-submit"
     assert library.nnrp_server_bind.calls[0][0].transport_listener.kind == HANDLE_KIND_TRANSPORT_LISTENER
     assert library.nnrp_server_bind.calls[1][0].transport_listener.kind == HANDLE_KIND_TRANSPORT_LISTENER
-    assert library.nnrp_server_accept.calls[0][0].server.id == 21
-    assert library.nnrp_server_accept.calls[0][0].session_handle_id == 41
-    assert library.nnrp_server_accept.calls[0][0].timeout_ms == 25
+    assert library.nnrp_server_accept_begin.calls[0][0].server.id == 21
+    assert library.nnrp_server_accept_begin.calls[0][0].accept_handle_id == 41
+    assert library.nnrp_server_accept_wait.calls[0][0].accept.id == 41
+    assert library.nnrp_server_accept_wait.calls[0][0].timeout_ms == 25
+    assert library.nnrp_server_accept_claim.calls[0][0].session_handle_id == 41
     assert library.nnrp_server_await_events.calls[0][0].timeout_ms == 30
     assert library.nnrp_server_await_events.calls[1][0].timeout_ms == 1
+    assert library.nnrp_server_await_events.calls[1][0].max_events == 1
     assert _read_buffer_view(library.nnrp_server_send_result.calls[0][0].payload) == (
         result_metadata.pack() + b"server-result"
     )
@@ -2968,6 +3294,84 @@ def test_native_runtime_client_binds_native_ipc_and_websocket_servers(tmp_path: 
             session_handle_id=42,
             generation=4,
         )
+
+
+def test_native_runtime_server_retains_accept_ticket_across_would_block() -> None:
+    library = FakeRuntimeLibrary(
+        active_transport_id=int(TransportId.IPC),
+        accept_wait_statuses=[NativeStatus(FFI_STATUS_WOULD_BLOCK).to_ffi()],
+    )
+    entrypoints = NativeRuntimeEntrypoints(library)
+    server = NativeRuntimeServer(
+        entrypoints,
+        NativeConnectionHandle.from_ffi(_NnrpHandle(HANDLE_KIND_CONNECTION, 21, 1, 0)),
+        "tcp",
+    )
+
+    with pytest.raises(NativeWouldBlockError):
+        server.accept_session(session_handle_id=41, generation=3, timeout_ms=1)
+
+    session = server.accept_session(session_handle_id=42, generation=4, timeout_ms=25)
+
+    assert session.handle.handle.id == 42
+    assert session.active_transport_name == "ipc"
+    assert len(library.nnrp_server_accept_begin.calls) == 1
+    assert len(library.nnrp_server_accept_wait.calls) == 2
+    assert len(library.nnrp_server_accept_claim.calls) == 1
+    assert library.nnrp_server_accept_claim.calls[0][0].accept.id == 41
+    assert library.nnrp_server_accept_claim.calls[0][0].session_handle_id == 42
+
+
+def test_native_runtime_server_releases_pending_accept_ticket_before_close() -> None:
+    library = FakeRuntimeLibrary(
+        accept_wait_statuses=[NativeStatus(FFI_STATUS_WOULD_BLOCK).to_ffi()],
+    )
+    entrypoints = NativeRuntimeEntrypoints(library)
+    server = NativeRuntimeServer(
+        entrypoints,
+        NativeConnectionHandle.from_ffi(_NnrpHandle(HANDLE_KIND_CONNECTION, 21, 1, 0)),
+        "tcp",
+    )
+
+    with pytest.raises(NativeWouldBlockError):
+        server.accept_session(session_handle_id=41, generation=3, timeout_ms=1)
+    server.close()
+
+    assert len(library.nnrp_server_accept_release.calls) == 1
+    assert library.nnrp_server_accept_release.calls[0][0].id == 41
+    assert len(library.nnrp_client_close_connection.calls) == 1
+
+
+def test_native_runtime_server_rejects_unknown_claimed_transport() -> None:
+    library = FakeRuntimeLibrary(active_transport_id=999)
+    server = NativeRuntimeServer(
+        NativeRuntimeEntrypoints(library),
+        NativeConnectionHandle.from_ffi(_NnrpHandle(HANDLE_KIND_CONNECTION, 21, 1, 0)),
+        "tcp",
+    )
+
+    with pytest.raises(NativeArtifactError, match="unsupported transport id 999"):
+        server.accept_session(session_handle_id=41, generation=3, timeout_ms=1)
+
+
+def test_native_runtime_server_still_closes_connection_when_ticket_release_fails() -> None:
+    library = FakeRuntimeLibrary(
+        accept_wait_statuses=[NativeStatus(FFI_STATUS_WOULD_BLOCK).to_ffi()],
+    )
+    server = NativeRuntimeServer(
+        NativeRuntimeEntrypoints(library),
+        NativeConnectionHandle.from_ffi(_NnrpHandle(HANDLE_KIND_CONNECTION, 21, 1, 0)),
+        "tcp",
+    )
+    with pytest.raises(NativeWouldBlockError):
+        server.accept_session(session_handle_id=41, generation=3, timeout_ms=1)
+    library.nnrp_server_accept_release.handler = lambda _accept: NativeStatus(FFI_STATUS_INVALID_STATE).to_ffi()
+
+    with pytest.raises(NativeInvalidStateError):
+        server.close()
+
+    assert server._closed is True
+    assert len(library.nnrp_client_close_connection.calls) == 1
 
 
 def test_native_submit_request_shape_matches_frozen_ffi_without_private_scheduling_fields() -> None:
@@ -5158,10 +5562,16 @@ def test_native_runtime_entrypoints_bind_frozen_symbol_table() -> None:
         ctypes.POINTER(ctypes.c_size_t),
     ]
     assert library.nnrp_server_bind.argtypes == [_NnrpServerBindRequest, ctypes.POINTER(_NnrpHandle)]
-    assert library.nnrp_server_accept.argtypes == [
-        _NnrpServerAcceptRequest,
+    assert library.nnrp_server_accept_begin.argtypes == [
+        _NnrpServerAcceptBeginRequest,
         ctypes.POINTER(_NnrpHandle),
     ]
+    assert library.nnrp_server_accept_wait.argtypes == [_NnrpServerAcceptWaitRequest]
+    assert library.nnrp_server_accept_claim.argtypes == [
+        _NnrpServerAcceptClaimRequest,
+        ctypes.POINTER(_NnrpServerAcceptResult),
+    ]
+    assert library.nnrp_server_accept_release.argtypes == [_NnrpHandle]
     assert library.nnrp_server_await_events.argtypes == [
         _NnrpRoleEventPollRequest,
         ctypes.POINTER(_NnrpEvent),

@@ -14,6 +14,10 @@ $nativeArtifactRoot = [System.IO.Path]::GetFullPath((Join-Path $repositoryRoot $
 $suiteManifest = Join-Path $conformanceRoot "wire-conformance/nnrp-1-preview4/manifest.json"
 $executableSuffix = if ($IsWindows) { ".exe" } else { "" }
 $runnerExecutable = Join-Path $conformanceRoot "target/debug/nnrp-conformance-runner$executableSuffix"
+$resolvedPythonExecutable = (Get-Command $PythonExecutable -ErrorAction Stop).Source
+$hostRouteTargetExecutable = Join-Path (
+  Split-Path -Parent $resolvedPythonExecutable
+) "nnrp-wire-host-route-target$executableSuffix"
 
 function Invoke-Checked {
   param(
@@ -206,6 +210,18 @@ foreach ($mode in $modes) {
   }
 
   $securityArguments = @()
+  if ($mode -in @("suite_as_client", "suite_as_server")) {
+    $securityArguments += @(
+      "--transport-security",
+      (@{
+          transport = "tcp"
+          server_name = "localhost"
+          trusted_certificate_der_path = "certs/server.der"
+          certificate_der_path = "certs/server.der"
+          private_key_pkcs8_der_path = "certs/server-key.der"
+        } | ConvertTo-Json -Compress)
+    )
+  }
   if ($mode -in @("suite_as_client", "suite_as_proxy")) {
     $securityArguments += @(
       "--transport-security",
@@ -332,5 +348,99 @@ foreach ($mode in $modes) {
 $totalPassed = ($summaries | Measure-Object -Property passed -Sum).Sum
 if ($totalPassed -ne 6) {
   throw "Expected six Preview4 wire scenarios, got $totalPassed."
+}
+
+if (-not (Test-Path -LiteralPath $hostRouteTargetExecutable)) {
+  throw "Python host-route target executable not found: $hostRouteTargetExecutable"
+}
+
+$hostRouteProfiles = @(
+  @{
+    Name = "installed-native"
+    Expected = 9
+    Providers = @(
+      @{ transport = "tcp"; provider_id = "nnrp.transport.tcp.native"; installed = $true; platforms = @("native"); security_modes = @("plain", "tls_server_auth") },
+      @{ transport = "quic"; provider_id = "nnrp.transport.quic.native"; installed = $true; platforms = @("native"); security_modes = @("tls_server_auth") },
+      @{ transport = "ipc"; provider_id = "nnrp.transport.ipc.native"; installed = $true; platforms = @("native"); security_modes = @("plain") },
+      @{ transport = "websocket"; provider_id = "nnrp.transport.websocket.native"; installed = $true; platforms = @("native"); security_modes = @("plain", "wss") }
+    )
+  },
+  @{
+    Name = "known-uninstalled"
+    Expected = 1
+    Providers = @(
+      @{ transport = "quic"; provider_id = "example.transport.quic.uninstalled"; installed = $false; platforms = @("native"); security_modes = @("tls_server_auth") }
+    )
+  }
+)
+
+foreach ($profile in $hostRouteProfiles) {
+  $profileDirectory = Join-Path $artifactRoot "host-route-$($profile.Name)"
+  if (Test-Path -LiteralPath $profileDirectory) {
+    Remove-Item -LiteralPath $profileDirectory -Recurse -Force
+  }
+  New-Item -ItemType Directory -Force -Path $profileDirectory | Out-Null
+  $targetManifest = Join-Path $profileDirectory "target.json"
+  $executionPlan = Join-Path $profileDirectory "plan.json"
+  $resultReport = Join-Path $profileDirectory "results.json"
+  $evidenceDirectory = Join-Path $profileDirectory "evidence"
+
+  $manifestArguments = @(
+    "-m", "nnrp.tools.wire_conformance",
+    "manifest",
+    "--target-name", "nnrp-py-host-route-$($profile.Name)",
+    "--mode", "suite_as_client",
+    "--mode", "suite_as_server",
+    "--capability", "host.routes"
+  )
+  foreach ($provider in $profile.Providers) {
+    $manifestArguments += @("--host-route-provider", ($provider | ConvertTo-Json -Compress))
+  }
+  $manifestArguments += @("--output", $targetManifest)
+  Invoke-Checked -FilePath $resolvedPythonExecutable -ArgumentList $manifestArguments -WorkingDirectory $repositoryRoot
+
+  Invoke-Checked -FilePath $runnerExecutable -ArgumentList @(
+    "wire-plan",
+    "--suite", $suiteManifest,
+    "--target", $targetManifest,
+    "--output", $executionPlan,
+    "--results-path", $resultReport,
+    "--evidence-dir", $evidenceDirectory
+  ) -WorkingDirectory $repositoryRoot
+
+  Invoke-Checked -FilePath $runnerExecutable -ArgumentList @(
+    "wire-run",
+    "--plan", $executionPlan,
+    "--target", $targetManifest,
+    "--host-route-target", $hostRouteTargetExecutable,
+    "--output", $resultReport
+  ) -WorkingDirectory $repositoryRoot
+
+  Invoke-Checked -FilePath $runnerExecutable -ArgumentList @(
+    "validate-wire-results",
+    "--plan", $executionPlan,
+    "--results", $resultReport
+  ) -WorkingDirectory $repositoryRoot
+
+  $report = Get-Content -Raw -LiteralPath $resultReport | ConvertFrom-Json
+  $results = @($report.results)
+  $failed = @($results | Where-Object { $_.outcome -ne "passed" })
+  if ($failed.Count -ne 0 -or $results.Count -ne $profile.Expected) {
+    throw "$($profile.Name) expected $($profile.Expected) passing host-route scenarios; got $($results.Count) total and $($failed.Count) non-passing."
+  }
+  $summaries += [pscustomobject]@{
+    mode = "host-route-$($profile.Name)"
+    passed = $results.Count
+    results = $resultReport
+  }
+}
+
+$hostRoutePassed = (
+  $summaries |
+    Where-Object { $_.mode -like "host-route-*" } |
+    Measure-Object -Property passed -Sum
+).Sum
+if ($hostRoutePassed -ne 10) {
+  throw "Expected ten Preview4 host-route scenarios, got $hostRoutePassed."
 }
 $summaries | ConvertTo-Json -Depth 4

@@ -27,6 +27,8 @@ _VALID_TRANSPORTS = frozenset(PREVIEW4_TRANSPORT_NAMES)
 _VALID_FRAME_DIRECTIONS = frozenset({"sent", "received"})
 _VALID_OUTCOMES = frozenset({"passed", "failed", "skipped"})
 _VALID_TERMINALS = frozenset({"success", "cancelled", "dropped", "error"})
+_VALID_HOST_PLATFORMS = frozenset({"native", "browser"})
+_VALID_HOST_SECURITY_MODES = frozenset({"plain", "tls_server_auth", "mutual_tls", "wss", "browser_host"})
 
 
 @dataclass(frozen=True, slots=True)
@@ -43,6 +45,15 @@ class WireTargetTransport:
     endpoint: str
     tls: bool = False
     security: WireTargetTransportSecurity | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class WireHostRouteProvider:
+    transport: str
+    provider_id: str
+    installed: bool
+    platforms: Sequence[str]
+    security_modes: Sequence[str]
 
 
 @dataclass(frozen=True, slots=True)
@@ -70,12 +81,14 @@ def build_wire_target_manifest(
     modes: Sequence[str],
     transports: Sequence[WireTargetTransport],
     capabilities: Sequence[str],
+    host_route_providers: Sequence[WireHostRouteProvider] = (),
     max_frame_bytes: int = _DEFAULT_MAX_FRAME_BYTES,
     max_in_flight: int = _DEFAULT_MAX_IN_FLIGHT,
 ) -> dict[str, Any]:
     normalized_modes = _normalize_unique_strings(modes, field_name="modes")
     normalized_capabilities = _normalize_unique_strings(capabilities, field_name="capabilities")
     normalized_transports = _normalize_transports(transports)
+    normalized_host_route_providers = _normalize_host_route_providers(host_route_providers)
     if not target_name:
         raise ValueError("target_name must be non-empty")
     if not suite_version:
@@ -84,8 +97,13 @@ def build_wire_target_manifest(
         raise ValueError("max_frame_bytes must be positive")
     if max_in_flight <= 0:
         raise ValueError("max_in_flight must be positive")
+    claims_host_routes = "host.routes" in normalized_capabilities
+    if claims_host_routes != bool(normalized_host_route_providers):
+        raise ValueError("host.routes capability and host_route_providers must be declared together")
+    if not normalized_transports and not normalized_host_route_providers:
+        raise ValueError("wire target must declare transports or host_route_providers")
 
-    return {
+    manifest = {
         "$schema": _TARGET_SCHEMA_URL,
         "target_name": target_name,
         "protocol_version": _DEFAULT_PROTOCOL_VERSION,
@@ -100,6 +118,11 @@ def build_wire_target_manifest(
             },
         },
     }
+    if normalized_host_route_providers:
+        manifest["wire_conformance"]["host_route_providers"] = [
+            _host_route_provider_to_dict(provider) for provider in normalized_host_route_providers
+        ]
+    return manifest
 
 
 def build_wire_case_results_report(
@@ -264,8 +287,18 @@ def _target_manifest_cli(argv: Sequence[str] | None = None) -> int:
         "--transport",
         action="append",
         dest="transports",
-        required=True,
+        default=[],
         help="Transport in name=endpoint form, for example tcp=127.0.0.1:19091 or websocket=wss://host/nnrp.",
+    )
+    parser.add_argument(
+        "--host-route-provider",
+        action="append",
+        dest="host_route_providers",
+        default=[],
+        help=(
+            "JSON object containing transport, provider_id, installed, platforms, and security_modes. "
+            "Repeat for each host-route provider."
+        ),
     )
     parser.add_argument(
         "--transport-security",
@@ -284,6 +317,7 @@ def _target_manifest_cli(argv: Sequence[str] | None = None) -> int:
     args = parser.parse_args(list(argv) if argv is not None else None)
 
     transports = [parse_wire_target_transport(value) for value in args.transports]
+    host_route_providers = [parse_wire_host_route_provider(value) for value in args.host_route_providers]
     security_by_transport: dict[str, WireTargetTransportSecurity] = {}
     for value in args.transport_security:
         transport_name, security = parse_wire_target_security(value)
@@ -293,16 +327,23 @@ def _target_manifest_cli(argv: Sequence[str] | None = None) -> int:
     unknown_security = sorted(set(security_by_transport) - {transport.name for transport in transports})
     if unknown_security:
         raise ValueError(f"transport security references undeclared transport: {', '.join(unknown_security)}")
-    transports = [
-        dataclasses.replace(transport, security=security_by_transport.get(transport.name))
-        for transport in transports
-    ]
+    secured_transports = []
+    for transport in transports:
+        security = security_by_transport.get(transport.name)
+        secured_transports.append(
+            dataclasses.replace(
+                transport,
+                tls=transport.tls or (transport.name == "tcp" and security is not None),
+                security=security,
+            )
+        )
     manifest = build_wire_target_manifest(
         target_name=args.target_name,
         suite_version=args.suite_version,
         modes=args.modes,
-        transports=transports,
+        transports=secured_transports,
         capabilities=args.capabilities,
+        host_route_providers=host_route_providers,
         max_frame_bytes=args.max_frame_bytes,
         max_in_flight=args.max_in_flight,
     )
@@ -391,6 +432,32 @@ def parse_wire_target_security(value: str) -> tuple[str, WireTargetTransportSecu
         trusted_certificate_der_path=_required_string(document, "trusted_certificate_der_path"),
         certificate_der_path=_required_string(document, "certificate_der_path"),
         private_key_pkcs8_der_path=_required_string(document, "private_key_pkcs8_der_path"),
+    )
+
+
+def parse_wire_host_route_provider(value: str) -> WireHostRouteProvider:
+    try:
+        document = json.loads(value)
+    except json.JSONDecodeError as error:
+        raise ValueError("host-route provider must be a JSON object") from error
+    if not isinstance(document, Mapping):
+        raise ValueError("host-route provider must be a JSON object")
+    expected_fields = {"transport", "provider_id", "installed", "platforms", "security_modes"}
+    unexpected_fields = sorted(set(document) - expected_fields)
+    if unexpected_fields:
+        raise ValueError(f"host-route provider contains unknown fields: {', '.join(unexpected_fields)}")
+    missing_fields = sorted(expected_fields - set(document))
+    if missing_fields:
+        raise ValueError(f"host-route provider is missing fields: {', '.join(missing_fields)}")
+    installed = document["installed"]
+    if not isinstance(installed, bool):
+        raise ValueError("host-route provider installed must be a bool")
+    return WireHostRouteProvider(
+        transport=_required_string(document, "transport").strip().lower(),
+        provider_id=_required_string(document, "provider_id"),
+        installed=installed,
+        platforms=_required_string_sequence(document, "platforms"),
+        security_modes=_required_string_sequence(document, "security_modes"),
     )
 
 
@@ -484,8 +551,8 @@ def _normalize_transports(transports: Sequence[WireTargetTransport]) -> list[Wir
         expected_tls = _endpoint_uses_tls(transport.name, transport.endpoint)
         if transport.name == "quic" and not transport.tls:
             raise ValueError("QUIC wire conformance transport requires TLS")
-        if transport.name in {"tcp", "ipc"} and transport.tls:
-            raise ValueError(f"{transport.name} wire conformance transport does not use TLS")
+        if transport.name == "ipc" and transport.tls:
+            raise ValueError("ipc wire conformance transport does not use TLS")
         if transport.name == "websocket" and transport.tls != expected_tls:
             raise ValueError("WebSocket TLS flag must match its ws:// or wss:// endpoint")
         if transport.tls and transport.security is None:
@@ -494,8 +561,50 @@ def _normalize_transports(transports: Sequence[WireTargetTransport]) -> list[Wir
             raise ValueError(f"{transport.name} non-TLS transport must not declare security material")
         seen.add(transport.name)
         normalized.append(transport)
-    if not normalized:
-        raise ValueError("transports must not be empty")
+    return normalized
+
+
+def _normalize_host_route_providers(
+    providers: Sequence[WireHostRouteProvider],
+) -> list[WireHostRouteProvider]:
+    normalized: list[WireHostRouteProvider] = []
+    transports: set[str] = set()
+    provider_ids: set[str] = set()
+    for provider in providers:
+        if provider.transport not in _VALID_TRANSPORTS:
+            raise ValueError(f"unsupported host-route provider transport: {provider.transport}")
+        if not provider.provider_id:
+            raise ValueError("host-route provider_id must be non-empty")
+        if provider.transport in transports:
+            raise ValueError(f"duplicate host-route provider transport: {provider.transport}")
+        if provider.provider_id in provider_ids:
+            raise ValueError(f"duplicate host-route provider id: {provider.provider_id}")
+        platforms = _normalize_enum_values(
+            provider.platforms,
+            field_name="host-route provider platforms",
+            valid_values=_VALID_HOST_PLATFORMS,
+        )
+        security_modes = _normalize_enum_values(
+            provider.security_modes,
+            field_name="host-route provider security_modes",
+            valid_values=_VALID_HOST_SECURITY_MODES,
+        )
+        transports.add(provider.transport)
+        provider_ids.add(provider.provider_id)
+        normalized.append(dataclasses.replace(provider, platforms=platforms, security_modes=security_modes))
+    return normalized
+
+
+def _normalize_enum_values(
+    values: Sequence[str],
+    *,
+    field_name: str,
+    valid_values: frozenset[str],
+) -> list[str]:
+    normalized = _normalize_unique_strings(values, field_name=field_name)
+    unsupported = sorted(set(normalized) - valid_values)
+    if unsupported:
+        raise ValueError(f"unsupported {field_name}: {', '.join(unsupported)}")
     return normalized
 
 
@@ -508,6 +617,16 @@ def _target_transport_to_dict(transport: WireTargetTransport) -> dict[str, Any]:
     if transport.security is not None:
         document["security"] = dataclasses.asdict(transport.security)
     return document
+
+
+def _host_route_provider_to_dict(provider: WireHostRouteProvider) -> dict[str, Any]:
+    return {
+        "transport": provider.transport,
+        "provider_id": provider.provider_id,
+        "installed": provider.installed,
+        "platforms": list(provider.platforms),
+        "security_modes": list(provider.security_modes),
+    }
 
 
 def _endpoint_uses_tls(name: str, endpoint: str) -> bool:
@@ -581,6 +700,15 @@ def _required_string(mapping: Mapping[str, Any], field_name: str) -> str:
     return value
 
 
+def _required_string_sequence(mapping: Mapping[str, Any], field_name: str) -> list[str]:
+    value = mapping.get(field_name)
+    if not isinstance(value, Sequence) or isinstance(value, str):
+        raise ValueError(f"{field_name} must be a list")
+    if any(not isinstance(item, str) for item in value):
+        raise ValueError(f"{field_name} must contain strings")
+    return list(value)
+
+
 def _scenario_map(plan: Mapping[str, Any]) -> dict[str, Mapping[str, Any]]:
     scenarios = plan.get("scenarios")
     if not isinstance(scenarios, Sequence) or isinstance(scenarios, str) or not scenarios:
@@ -640,12 +768,14 @@ def _evidence_record(result: Mapping[str, Any]) -> dict[str, Any]:
 __all__ = [
     "WireCaseResult",
     "WireObservedFrame",
+    "WireHostRouteProvider",
     "WireTargetTransport",
     "build_wire_case_results_report",
     "build_wire_skipped_results_from_plan",
     "build_wire_target_manifest",
     "main",
     "parse_wire_target_transport",
+    "parse_wire_host_route_provider",
     "run_wire_harness_plan",
     "validate_wire_case_results_against_plan",
     "write_wire_case_results_report",

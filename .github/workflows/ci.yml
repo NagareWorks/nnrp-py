@@ -247,7 +247,7 @@ jobs:
   wire-conformance:
     runs-on: ubuntu-latest
     env:
-      NNRP_RS_NATIVE_VERSION: 1.0.0-preview.4.15
+      NNRP_RS_SOURCE_COMMIT: 3d193aea566420a2ff55b9a1f252aebbfa7e1a24
 
     steps:
       - name: Checkout
@@ -262,6 +262,14 @@ jobs:
           path: nnrp-conformance-runner
           fetch-depth: 1
 
+      - name: Checkout pinned nnrp-rs source
+        uses: actions/checkout@v5
+        with:
+          repository: ${{ github.repository_owner }}/nnrp-rs
+          path: nnrp-rs-source
+          ref: ${{ env.NNRP_RS_SOURCE_COMMIT }}
+          fetch-depth: 1
+
       - name: Setup Python
         id: setup-python
         uses: actions/setup-python@v6
@@ -274,31 +282,29 @@ jobs:
       - name: Cache Rust artifacts
         uses: Swatinem/rust-cache@v2
         with:
-          workspaces: nnrp-conformance-runner -> target
+          workspaces: |
+            nnrp-conformance-runner -> target
+            nnrp-rs-source -> target
 
       - name: Install dependencies
         run: |
           ${{ steps.setup-python.outputs.python-path }} -m pip install --upgrade pip
           ${{ steps.setup-python.outputs.python-path }} -m pip install -e .[dev] build
 
-      - name: Download Rust native transport artifacts
-        env:
-          GH_TOKEN: ${{ github.token }}
+      - name: Build pinned Rust native transport artifacts
         shell: bash
-        run: |
-          set -euo pipefail
-          mkdir -p artifacts/native-downloads
-          gh release download "v${NNRP_RS_NATIVE_VERSION}" \
-            --repo "${{ github.repository_owner }}/nnrp-rs" \
-            --pattern "nnrp-ffi-transport-tcp-native-linux-x86_64-${NNRP_RS_NATIVE_VERSION}.zip" \
-            --pattern "nnrp-ffi-transport-quic-native-linux-x86_64-${NNRP_RS_NATIVE_VERSION}.zip" \
-            --pattern "nnrp-ffi-transport-ipc-native-linux-x86_64-${NNRP_RS_NATIVE_VERSION}.zip" \
-            --pattern "nnrp-ffi-transport-websocket-native-linux-x86_64-${NNRP_RS_NATIVE_VERSION}.zip" \
-            --dir artifacts/native-downloads
+        working-directory: nnrp-rs-source
+        run: >-
+          python scripts/package_native_artifacts.py
+          --out artifacts/native
+          --transport-scope tcp
+          --transport-scope quic
+          --transport-scope ipc
+          --transport-scope websocket
 
       - name: Prepare Rust native transport artifacts
         shell: bash
-        run: python scripts/prepare_native_artifacts.py --clean artifacts/native-downloads/*.zip
+        run: python scripts/prepare_native_artifacts.py --clean nnrp-rs-source/artifacts/native
 
       - name: Run independent-process Preview4 wire E2E
         shell: pwsh

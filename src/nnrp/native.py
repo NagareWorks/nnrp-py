@@ -58,7 +58,7 @@ from nnrp.runtime.types import _FixedRuntimeMetadata
 EXPECTED_PROTOCOL_MAJOR = 1
 EXPECTED_PROTOCOL_WIRE_FORMAT = 0
 EXPECTED_ABI_MAJOR = 4
-EXPECTED_ABI_MINOR = 0
+EXPECTED_ABI_MINOR = 1
 TRANSPORT_SLOT_QUIC = 0x00000001
 TRANSPORT_SLOT_TCP = 0x00000002
 TRANSPORT_SLOT_IPC = 0x00000004
@@ -244,6 +244,7 @@ HANDLE_KIND_CACHE_REFERENCE_DESCRIPTOR = 9
 HANDLE_KIND_TRANSPORT_CONNECTION = 10
 HANDLE_KIND_TRANSPORT_LISTENER = 11
 HANDLE_KIND_TRANSPORT_SECURITY_CONFIG = 12
+HANDLE_KIND_SERVER_ACCEPT = 13
 EVENT_KIND_NONE = 0
 EVENT_KIND_CONNECTION_OPENED = 1
 EVENT_KIND_SESSION_OPENED = 2
@@ -388,6 +389,64 @@ class NativeTransportProvider:
 
 
 @dataclass(frozen=True)
+class NativeTransportCandidateReadiness:
+    transport_id: TransportId
+    provider_id: str
+    route_resolved: bool
+    security_satisfied: bool
+    diagnostic: str | None = None
+
+    def __post_init__(self) -> None:
+        if self.transport_id not in NATIVE_TRANSPORT_NAME_BY_ID:
+            raise ValueError("transport_id must identify a selectable transport")
+        if not isinstance(self.provider_id, str) or not self.provider_id:
+            raise ValueError("provider_id must be a non-empty string")
+        if not isinstance(self.route_resolved, bool):
+            raise ValueError("route_resolved must be a bool")
+        if not isinstance(self.security_satisfied, bool):
+            raise ValueError("security_satisfied must be a bool")
+        if self.diagnostic is not None and not isinstance(self.diagnostic, str):
+            raise ValueError("diagnostic must be a string or None")
+
+    @classmethod
+    def ready(cls, provider: NativeTransportProvider) -> NativeTransportCandidateReadiness:
+        return cls(
+            transport_id=NATIVE_TRANSPORT_ID_BY_NAME[provider.name],
+            provider_id=provider.metadata.id,
+            route_resolved=True,
+            security_satisfied=True,
+        )
+
+    @classmethod
+    def route_unresolved(
+        cls,
+        provider: NativeTransportProvider,
+        diagnostic: str,
+    ) -> NativeTransportCandidateReadiness:
+        return cls(
+            transport_id=NATIVE_TRANSPORT_ID_BY_NAME[provider.name],
+            provider_id=provider.metadata.id,
+            route_resolved=False,
+            security_satisfied=True,
+            diagnostic=diagnostic,
+        )
+
+    @classmethod
+    def security_unsatisfied(
+        cls,
+        provider: NativeTransportProvider,
+        diagnostic: str,
+    ) -> NativeTransportCandidateReadiness:
+        return cls(
+            transport_id=NATIVE_TRANSPORT_ID_BY_NAME[provider.name],
+            provider_id=provider.metadata.id,
+            route_resolved=True,
+            security_satisfied=False,
+            diagnostic=diagnostic,
+        )
+
+
+@dataclass(frozen=True)
 class NativeTransportClientSecurity:
     server_name: str
     trusted_certificate_der: bytes
@@ -515,11 +574,64 @@ class NativeTransportProbeMetrics:
         _require_bounded_integer("median_rtt_us", self.median_rtt_us, 0xFFFFFFFFFFFFFFFF)
 
 
+@dataclass(frozen=True)
+class NativeTransportProbeObservation:
+    transport_id: TransportId
+    provider_id: str
+    state: NativeTransportProbeState
+    metrics: NativeTransportProbeMetrics | None = None
+    diagnostic: str | None = None
+
+    def __post_init__(self) -> None:
+        if self.transport_id not in NATIVE_TRANSPORT_NAME_BY_ID:
+            raise ValueError("transport_id must identify a selectable transport")
+        if not isinstance(self.provider_id, str) or not self.provider_id:
+            raise ValueError("provider_id must be a non-empty string")
+        if self.state not in {NativeTransportProbeState.SUCCEEDED, NativeTransportProbeState.FAILED}:
+            raise ValueError("state must be SUCCEEDED or FAILED")
+        if self.state is NativeTransportProbeState.SUCCEEDED and self.metrics is None:
+            raise ValueError("SUCCEEDED observations require metrics")
+        if self.metrics is not None and not isinstance(self.metrics, NativeTransportProbeMetrics):
+            raise ValueError("metrics must be a NativeTransportProbeMetrics or None")
+        if self.state is NativeTransportProbeState.FAILED and self.metrics is not None:
+            raise ValueError("FAILED observations forbid metrics")
+        if self.diagnostic is not None and not isinstance(self.diagnostic, str):
+            raise ValueError("diagnostic must be a string or None")
+
+    @classmethod
+    def succeeded(
+        cls,
+        provider: NativeTransportProvider,
+        metrics: NativeTransportProbeMetrics,
+    ) -> NativeTransportProbeObservation:
+        return cls(
+            transport_id=NATIVE_TRANSPORT_ID_BY_NAME[provider.name],
+            provider_id=provider.metadata.id,
+            state=NativeTransportProbeState.SUCCEEDED,
+            metrics=metrics,
+        )
+
+    @classmethod
+    def failed(
+        cls,
+        provider: NativeTransportProvider,
+        diagnostic: str,
+    ) -> NativeTransportProbeObservation:
+        return cls(
+            transport_id=NATIVE_TRANSPORT_ID_BY_NAME[provider.name],
+            provider_id=provider.metadata.id,
+            state=NativeTransportProbeState.FAILED,
+            diagnostic=diagnostic,
+        )
+
+
 class NativeTransportRejectionReason(StrEnum):
     POLICY_DISALLOWED = "policy-disallowed"
     LOCAL_UNAVAILABLE = "local-unavailable"
     PEER_UNSUPPORTED = "peer-unsupported"
     LIMIT_EXCEEDED = "limit-exceeded"
+    ROUTE_UNRESOLVED = "route-unresolved"
+    SECURITY_UNSATISFIED = "security-unsatisfied"
     PROBE_MISSING = "probe-missing"
     PROBE_FAILED = "probe-failed"
 
@@ -569,6 +681,29 @@ class NativeTransportSelection:
     @property
     def selected_transport_id(self) -> TransportId:
         return NATIVE_TRANSPORT_ID_BY_NAME[self.selected_provider.name]
+
+
+class NativeTransportSelectionErrorCode(StrEnum):
+    INVALID_EVIDENCE = "invalid-evidence"
+    FORCED_TRANSPORT_UNAVAILABLE = "forced-transport-unavailable"
+    NO_VIABLE_TRANSPORT = "no-viable-transport"
+
+
+class NativeTransportSelectionError(NativeArtifactError):
+    """Raised when transport evidence is invalid or cannot produce a selection."""
+
+    def __init__(
+        self,
+        code: NativeTransportSelectionErrorCode,
+        diagnostic: str,
+        *,
+        policy: TransportPolicy | None = None,
+        candidates: tuple[NativeTransportCandidateDiagnostic, ...] = (),
+    ) -> None:
+        super().__init__(diagnostic, candidates=candidates)
+        self.code = code
+        self.policy = policy
+        self.diagnostic = diagnostic
 
 
 class NativeHandleError(ValueError):
@@ -1091,12 +1226,37 @@ class _NnrpRuntimeObjectDescriptor(ctypes.Structure):
     ]
 
 
-class _NnrpServerAcceptRequest(ctypes.Structure):
+class _NnrpServerAcceptBeginRequest(ctypes.Structure):
     _fields_ = [
         ("server", _NnrpHandle),
+        ("accept_handle_id", ctypes.c_uint64),
+        ("generation", ctypes.c_uint32),
+        ("reserved0", ctypes.c_uint32),
+    ]
+
+
+class _NnrpServerAcceptWaitRequest(ctypes.Structure):
+    _fields_ = [
+        ("accept", _NnrpHandle),
+        ("timeout_ms", ctypes.c_uint32),
+        ("flags", ctypes.c_uint32),
+    ]
+
+
+class _NnrpServerAcceptClaimRequest(ctypes.Structure):
+    _fields_ = [
+        ("accept", _NnrpHandle),
         ("session_handle_id", ctypes.c_uint64),
         ("generation", ctypes.c_uint32),
-        ("timeout_ms", ctypes.c_uint32),
+        ("reserved0", ctypes.c_uint32),
+    ]
+
+
+class _NnrpServerAcceptResult(ctypes.Structure):
+    _fields_ = [
+        ("session", _NnrpHandle),
+        ("active_transport_id", ctypes.c_uint32),
+        ("reserved0", ctypes.c_uint32),
     ]
 
 
@@ -1367,11 +1527,29 @@ class NativeRuntimeEntrypoints:
             _NnrpFfiStatus,
             [_NnrpServerBindRequest, ctypes.POINTER(_NnrpHandle)],
         )
-        self.server_accept = _bind_native_function(
+        self.server_accept_begin = _bind_native_function(
             library,
-            "nnrp_server_accept",
+            "nnrp_server_accept_begin",
             _NnrpFfiStatus,
-            [_NnrpServerAcceptRequest, ctypes.POINTER(_NnrpHandle)],
+            [_NnrpServerAcceptBeginRequest, ctypes.POINTER(_NnrpHandle)],
+        )
+        self.server_accept_wait = _bind_native_function(
+            library,
+            "nnrp_server_accept_wait",
+            _NnrpFfiStatus,
+            [_NnrpServerAcceptWaitRequest],
+        )
+        self.server_accept_claim = _bind_native_function(
+            library,
+            "nnrp_server_accept_claim",
+            _NnrpFfiStatus,
+            [_NnrpServerAcceptClaimRequest, ctypes.POINTER(_NnrpServerAcceptResult)],
+        )
+        self.server_accept_release = _bind_native_function(
+            library,
+            "nnrp_server_accept_release",
+            _NnrpFfiStatus,
+            [_NnrpHandle],
         )
         self.server_await_events = _bind_native_function(
             library,
@@ -1571,6 +1749,7 @@ class NativeRuntimeEntrypoints:
             _NnrpFfiStatus,
             [_NnrpCallbackSink, ctypes.POINTER(_NnrpEvent)],
         )
+
 
 class _NativeTransportEntrypoints:
     """ctypes entrypoint table for complete-packet native transport I/O."""
@@ -1859,7 +2038,11 @@ class NativeTransportListener:
             raise_for_native_status(status)
             self._closed = True
             self._handle = NativeHandle.invalid()
-            return NativeRuntimeServer(entrypoints, NativeConnectionHandle.from_ffi(output))
+            return NativeRuntimeServer(
+                entrypoints,
+                NativeConnectionHandle.from_ffi(output),
+                self._provider.name,
+            )
 
     def _require_open(self) -> None:
         if self._closed:
@@ -1877,15 +2060,30 @@ class NativeTransportBinding:
 
     def __init__(
         self,
-        entrypoints: _NativeTransportEntrypoints,
+        entrypoints: _NativeTransportEntrypoints | None,
         provider: NativeTransportProvider,
         role_entrypoints: NativeRuntimeEntrypoints | None = None,
+        *,
+        unavailable_diagnostic: str | None = None,
     ) -> None:
         if provider.name not in provider.transport_slots:
             raise NativeArtifactError(f"native provider {provider.name!r} does not own its transport slot")
+        if entrypoints is None and not unavailable_diagnostic:
+            raise ValueError("unavailable native transport bindings require a diagnostic")
+        if entrypoints is not None and unavailable_diagnostic is not None:
+            raise ValueError("available native transport bindings must not declare an unavailable diagnostic")
         self.entrypoints = entrypoints
         self.provider = provider
         self._role_entrypoints = role_entrypoints
+        self._unavailable_diagnostic = unavailable_diagnostic
+
+    @classmethod
+    def unavailable(
+        cls,
+        provider: NativeTransportProvider,
+        diagnostic: str,
+    ) -> NativeTransportBinding:
+        return cls(None, provider, unavailable_diagnostic=diagnostic)
 
     def adopt_client(
         self,
@@ -1894,6 +2092,7 @@ class NativeTransportBinding:
         connection_id: int,
         generation: int,
     ) -> NativeRuntimeConnection:
+        self._require_available()
         if connection._entrypoints is not self.entrypoints:
             raise NativeArtifactError("native carrier must be adopted by its owning transport artifact")
         if self._role_entrypoints is None:
@@ -1911,6 +2110,7 @@ class NativeTransportBinding:
         server_id: int,
         generation: int,
     ) -> NativeRuntimeServer:
+        self._require_available()
         if listener._entrypoints is not self.entrypoints:
             raise NativeArtifactError("native listener must be adopted by its owning transport artifact")
         if self._role_entrypoints is None:
@@ -1925,6 +2125,14 @@ class NativeTransportBinding:
     def kind(self) -> str:
         return self.provider.name
 
+    @property
+    def local_available(self) -> bool:
+        return self.entrypoints is not None
+
+    @property
+    def diagnostic(self) -> str | None:
+        return self._unavailable_diagnostic
+
     async def probe(
         self,
         endpoint: str | NativeTransportEndpoint,
@@ -1935,6 +2143,7 @@ class NativeTransportBinding:
         max_packet_bytes: int = 0,
         timeout_ms: int = 0,
     ) -> NativeTransportProbeMetrics:
+        self._require_available()
         return await asyncio.to_thread(
             self._probe,
             endpoint,
@@ -1954,6 +2163,7 @@ class NativeTransportBinding:
         max_packet_bytes: int,
         timeout_ms: int,
     ) -> NativeTransportProbeMetrics:
+        self._require_available()
         _require_bounded_integer("sample_count", sample_count, 0xFFFFFFFF)
         _require_bounded_integer("probe_payload_bytes", probe_payload_bytes, 0xFFFFFFFF)
         parsed = self._endpoint(endpoint)
@@ -1983,6 +2193,7 @@ class NativeTransportBinding:
         max_packet_bytes: int = 0,
         timeout_ms: int = 0,
     ) -> NativeTransportConnection:
+        self._require_available()
         return await asyncio.to_thread(
             self._connect,
             endpoint,
@@ -1998,6 +2209,7 @@ class NativeTransportBinding:
         max_packet_bytes: int,
         timeout_ms: int,
     ) -> NativeTransportConnection:
+        self._require_available()
         parsed = self._endpoint(endpoint)
         config = self._client_security_config(security)
         try:
@@ -2021,6 +2233,7 @@ class NativeTransportBinding:
         max_packet_bytes: int = 0,
         timeout_ms: int = 0,
     ) -> NativeTransportListener:
+        self._require_available()
         return await asyncio.to_thread(
             self._listen,
             endpoint,
@@ -2036,6 +2249,7 @@ class NativeTransportBinding:
         max_packet_bytes: int,
         timeout_ms: int,
     ) -> NativeTransportListener:
+        self._require_available()
         parsed = self._endpoint(endpoint)
         config = self._server_security_config(security)
         try:
@@ -2084,6 +2298,7 @@ class NativeTransportBinding:
             ),
             owner,
         )
+
     def _listener_endpoint(self, listener: NativeHandle) -> NativeTransportEndpoint:
         owner = _NnrpHandle()
         view = _NnrpBufferView()
@@ -2139,6 +2354,12 @@ class NativeTransportBinding:
     def _close_config(self, config: NativeHandle) -> None:
         if config.is_valid:
             _raise_for_native_ffi_status(self.entrypoints.close(config.to_ffi()))
+
+    def _require_available(self) -> None:
+        if not self.local_available:
+            raise NativeArtifactError(
+                self.diagnostic or f"native transport provider {self.provider.metadata.id!r} is unavailable"
+            )
 
 
 @dataclass(frozen=True)
@@ -3393,7 +3614,9 @@ class NativeRuntimeClient:
 class NativeRuntimeServer:
     entrypoints: NativeRuntimeEntrypoints
     handle: NativeConnectionHandle
+    transport_name: str
     _closed: bool = field(default=False, init=False, repr=False, compare=False)
+    _accept_ticket: NativeHandle | None = field(default=None, init=False, repr=False, compare=False)
 
     def accept_session(
         self,
@@ -3406,26 +3629,67 @@ class NativeRuntimeServer:
         _validate_u64("session_handle_id", session_handle_id)
         _validate_u32("generation", generation)
         _validate_u32("timeout_ms", timeout_ms)
-        request = _NnrpServerAcceptRequest(
-            self.handle.to_ffi(),
+        accept_ticket = self._accept_ticket
+        if accept_ticket is None:
+            begin_request = _NnrpServerAcceptBeginRequest(
+                self.handle.to_ffi(),
+                session_handle_id,
+                generation,
+                0,
+            )
+            out_accept = _NnrpHandle()
+            status = self.entrypoints.server_accept_begin(begin_request, ctypes.byref(out_accept))
+            raise_for_native_status(status)
+            accept_ticket = NativeHandle.from_ffi(out_accept)
+            accept_ticket.require_kind(HANDLE_KIND_SERVER_ACCEPT)
+            object.__setattr__(self, "_accept_ticket", accept_ticket)
+
+        wait_request = _NnrpServerAcceptWaitRequest(accept_ticket.to_ffi(), timeout_ms, 0)
+        status = self.entrypoints.server_accept_wait(wait_request)
+        raise_for_native_status(status)
+
+        claim_request = _NnrpServerAcceptClaimRequest(
+            accept_ticket.to_ffi(),
             session_handle_id,
             generation,
-            timeout_ms,
+            0,
         )
-        out_session = _NnrpHandle()
-        status = self.entrypoints.server_accept(request, ctypes.byref(out_session))
+        result = _NnrpServerAcceptResult()
+        status = self.entrypoints.server_accept_claim(claim_request, ctypes.byref(result))
         raise_for_native_status(status)
+        object.__setattr__(self, "_accept_ticket", None)
+        try:
+            active_transport_id = TransportId(int(result.active_transport_id))
+        except ValueError as error:
+            raise NativeArtifactError(
+                f"native server accept returned unsupported transport id {int(result.active_transport_id)}"
+            ) from error
+        transport_name = NATIVE_TRANSPORT_NAME_BY_ID[active_transport_id]
         return NativeRuntimeServerSession(
             self.entrypoints,
             self.handle,
-            NativeSessionHandle.from_ffi(out_session),
+            NativeSessionHandle.from_ffi(result.session),
+            transport_name,
         )
 
     def close(self) -> None:
         self._ensure_open()
-        status = self.entrypoints.client_close_connection(self.handle.to_ffi())
-        raise_for_native_status(status)
+        first_error: BaseException | None = None
+        accept_ticket = self._accept_ticket
+        if accept_ticket is not None:
+            try:
+                raise_for_native_status(self.entrypoints.server_accept_release(accept_ticket.to_ffi()))
+            except BaseException as error:
+                first_error = error
+            finally:
+                object.__setattr__(self, "_accept_ticket", None)
+        try:
+            raise_for_native_status(self.entrypoints.client_close_connection(self.handle.to_ffi()))
+        except BaseException as error:
+            first_error = first_error or error
         object.__setattr__(self, "_closed", True)
+        if first_error is not None:
+            raise first_error
 
     def _ensure_open(self) -> None:
         if self._closed:
@@ -4482,6 +4746,7 @@ class NativeRuntimeServerSession:
     entrypoints: NativeRuntimeEntrypoints
     server: NativeConnectionHandle
     handle: NativeSessionHandle
+    active_transport_name: str
     _closed: bool = field(default=False, init=False, repr=False, compare=False)
     _next_runtime_frame_id: int = field(default=1, init=False, repr=False, compare=False)
 
@@ -4541,6 +4806,10 @@ class NativeRuntimeServerSession:
             NativeRuntimeEvent.from_ffi(event_buffer[index], self.entrypoints)
             for index in range(int(event_count.value))
         )
+
+    def poll_event(self, *, timeout_ms: int = 0) -> NativeRuntimeEvent | None:
+        events = self.poll_events(max_events=1, timeout_ms=timeout_ms)
+        return events[0] if events else None
 
     def poll_runtime_frames(
         self,
@@ -4801,12 +5070,21 @@ def discover_native_transport_providers(
         return ()
 
     providers: list[NativeTransportProvider] = []
+    transport_ids: set[TransportId] = set()
+    provider_ids: set[str] = set()
     candidate_dirs = [platform_dir / scope for scope in NATIVE_TRANSPORT_SCOPES]
     for candidate_dir in candidate_dirs:
         if not candidate_dir.is_dir():
             continue
         provider = _provider_from_artifact_dir(candidate_dir, selected_platform)
         if provider is not None:
+            transport_id = NATIVE_TRANSPORT_ID_BY_NAME[provider.name]
+            if transport_id in transport_ids:
+                raise NativeArtifactError(f"duplicate native provider for transport {provider.name}")
+            if provider.metadata.id in provider_ids:
+                raise NativeArtifactError(f"duplicate native provider id: {provider.metadata.id}")
+            transport_ids.add(transport_id)
+            provider_ids.add(provider.metadata.id)
             providers.append(provider)
     return tuple(providers)
 
@@ -4888,13 +5166,15 @@ def diagnose_nnrp_endpoint_support(
 ) -> NnrpEndpointSupport:
     endpoint = uri if isinstance(uri, NnrpEndpoint) else parse_nnrp_endpoint(uri)
     try:
+        providers = discover_native_transport_providers(root, native_platform)
         selection = select_native_transport_provider(
             policy,
             root=root,
             native_platform=native_platform,
             supported_transports=supported_transports,
             requested_max_frame_bytes=requested_max_frame_bytes,
-            probe_samples=probe_samples,
+            candidate_readiness=[NativeTransportCandidateReadiness.ready(provider) for provider in providers],
+            probe_observations=_probe_observations_from_samples(providers, tuple(probe_samples or ())),
         )
     except NativeArtifactError as error:
         message = str(error)
@@ -4947,18 +5227,53 @@ def select_native_transport_provider(
         tuple[str | TransportId, ...] | list[str | TransportId] | set[str | TransportId] | None
     ) = None,
     requested_max_frame_bytes: int | None = None,
-    probe_samples: tuple[NativeTransportProbeSample, ...] | list[NativeTransportProbeSample] | None = None,
+    candidate_readiness: (tuple[NativeTransportCandidateReadiness, ...] | list[NativeTransportCandidateReadiness]),
+    probe_observations: (
+        tuple[NativeTransportProbeObservation, ...] | list[NativeTransportProbeObservation] | None
+    ) = None,
 ) -> NativeTransportSelection:
     resolved_policy = _normalize_native_transport_policy(policy)
     providers = discover_native_transport_providers(root, native_platform)
+    return _select_native_transport_provider_from_providers(
+        providers,
+        resolved_policy,
+        supported_transports=supported_transports,
+        requested_max_frame_bytes=requested_max_frame_bytes,
+        candidate_readiness=candidate_readiness,
+        probe_observations=probe_observations,
+    )
+
+
+def _select_native_transport_provider_from_providers(
+    providers: tuple[NativeTransportProvider, ...],
+    policy: TransportPolicy | str | int = TransportPolicy.AUTO,
+    *,
+    supported_transports: (
+        tuple[str | TransportId, ...] | list[str | TransportId] | set[str | TransportId] | None
+    ) = None,
+    requested_max_frame_bytes: int | None = None,
+    candidate_readiness: (tuple[NativeTransportCandidateReadiness, ...] | list[NativeTransportCandidateReadiness]),
+    probe_observations: (
+        tuple[NativeTransportProbeObservation, ...] | list[NativeTransportProbeObservation] | None
+    ) = None,
+    provider_availability: Mapping[str, bool] | None = None,
+    provider_diagnostics: Mapping[str, str | None] | None = None,
+) -> NativeTransportSelection:
+    resolved_policy = _normalize_native_transport_policy(policy)
     supported = _normalize_supported_native_transports(supported_transports)
     if requested_max_frame_bytes is not None:
         _require_bounded_integer("requested_max_frame_bytes", requested_max_frame_bytes, 0xFFFFFFFFFFFFFFFF)
+    readiness = tuple(candidate_readiness)
+    observations = tuple(probe_observations or ())
+    _validate_native_transport_selection_evidence(providers, readiness, observations)
     candidates = _evaluate_native_transport_candidates(
         providers,
         supported,
         resolved_policy,
         requested_max_frame_bytes,
+        readiness,
+        provider_availability or {},
+        provider_diagnostics or {},
     )
     eligible = [index for index, (_, candidate) in enumerate(candidates) if candidate.rejection_reason is None]
     if len(eligible) == 1:
@@ -4972,38 +5287,22 @@ def select_native_transport_provider(
             diagnostic="single eligible native transport selected directly",
         )
 
-    if probe_samples is None:
-        for index in eligible:
-            provider, candidate = candidates[index]
-            candidates[index] = (
-                provider,
-                replace(
-                    candidate,
-                    probe_state=NativeTransportProbeState.MISSING,
-                    rejection_reason=NativeTransportRejectionReason.PROBE_MISSING,
-                ),
-            )
-        raise _native_transport_selection_error(
-            resolved_policy,
-            _ordered_native_transport_diagnostics(candidates),
-        )
-
-    samples = tuple(probe_samples)
     for index in eligible:
         provider, candidate = candidates[index]
-        matching = tuple(_matching_native_probe_samples(provider, samples))
-        metrics = _summarize_native_probe_samples(matching)
-        if metrics is not None:
+        observation = _matching_native_probe_observation(provider, observations)
+        if observation is not None and observation.state is NativeTransportProbeState.SUCCEEDED:
             updated = replace(
                 candidate,
                 probe_state=NativeTransportProbeState.SUCCEEDED,
-                probe=metrics,
+                probe=observation.metrics,
+                diagnostic=observation.diagnostic,
             )
-        elif matching:
+        elif observation is not None:
             updated = replace(
                 candidate,
                 probe_state=NativeTransportProbeState.FAILED,
                 rejection_reason=NativeTransportRejectionReason.PROBE_FAILED,
+                diagnostic=observation.diagnostic,
             )
         else:
             updated = replace(
@@ -5072,20 +5371,31 @@ def _evaluate_native_transport_candidates(
     supported_transports: frozenset[str],
     policy: TransportPolicy,
     requested_max_frame_bytes: int | None,
+    readiness: tuple[NativeTransportCandidateReadiness, ...],
+    provider_availability: Mapping[str, bool],
+    provider_diagnostics: Mapping[str, str | None],
 ) -> list[tuple[NativeTransportProvider, NativeTransportCandidateDiagnostic]]:
     candidates: list[tuple[NativeTransportProvider, NativeTransportCandidateDiagnostic]] = []
     for provider in providers:
         transport_name = provider.name
+        provider_readiness = _matching_native_candidate_readiness(provider, readiness)
+        local_available = provider_availability.get(provider.metadata.id, True)
         peer_supported = transport_name in supported_transports
         within_limits = (
             requested_max_frame_bytes is None or requested_max_frame_bytes <= provider.metadata.limits.max_frame_bytes
         )
         if not _native_transport_policy_allows(policy, transport_name):
             rejection_reason = NativeTransportRejectionReason.POLICY_DISALLOWED
+        elif not local_available:
+            rejection_reason = NativeTransportRejectionReason.LOCAL_UNAVAILABLE
         elif not peer_supported:
             rejection_reason = NativeTransportRejectionReason.PEER_UNSUPPORTED
         elif not within_limits:
             rejection_reason = NativeTransportRejectionReason.LIMIT_EXCEEDED
+        elif not provider_readiness.route_resolved:
+            rejection_reason = NativeTransportRejectionReason.ROUTE_UNRESOLVED
+        elif not provider_readiness.security_satisfied:
+            rejection_reason = NativeTransportRejectionReason.SECURITY_UNSATISFIED
         else:
             rejection_reason = None
         candidates.append(
@@ -5095,11 +5405,16 @@ def _evaluate_native_transport_candidates(
                     transport_name=transport_name,
                     transport_id=NATIVE_TRANSPORT_ID_BY_NAME[transport_name],
                     provider=provider.metadata,
-                    local_available=True,
+                    local_available=local_available,
                     peer_supported=peer_supported,
                     within_limits=within_limits,
                     probe_state=NativeTransportProbeState.NOT_RUN,
                     rejection_reason=rejection_reason,
+                    diagnostic=(
+                        provider_diagnostics.get(provider.metadata.id)
+                        if not local_available
+                        else provider_readiness.diagnostic
+                    ),
                 ),
             )
         )
@@ -5112,6 +5427,23 @@ def summarize_native_provider_probe(
 ) -> NativeTransportProbeMetrics | None:
     matching = tuple(_matching_native_probe_samples(provider, tuple(samples)))
     return _summarize_native_probe_samples(matching)
+
+
+def _probe_observations_from_samples(
+    providers: tuple[NativeTransportProvider, ...],
+    samples: tuple[NativeTransportProbeSample, ...],
+) -> tuple[NativeTransportProbeObservation, ...]:
+    observations: list[NativeTransportProbeObservation] = []
+    for provider in providers:
+        matching = tuple(_matching_native_probe_samples(provider, samples))
+        if not matching:
+            continue
+        metrics = _summarize_native_probe_samples(matching)
+        if metrics is None:
+            observations.append(NativeTransportProbeObservation.failed(provider, "transport probe failed"))
+        else:
+            observations.append(NativeTransportProbeObservation.succeeded(provider, metrics))
+    return tuple(observations)
 
 
 def _summarize_native_probe_samples(
@@ -5231,10 +5563,80 @@ def _matching_native_probe_samples(
     )
 
 
+def _native_transport_provider_key(provider: NativeTransportProvider) -> tuple[TransportId, str]:
+    return NATIVE_TRANSPORT_ID_BY_NAME[provider.name], provider.metadata.id
+
+
+def _matching_native_candidate_readiness(
+    provider: NativeTransportProvider,
+    readiness: tuple[NativeTransportCandidateReadiness, ...],
+) -> NativeTransportCandidateReadiness:
+    provider_key = _native_transport_provider_key(provider)
+    return next(record for record in readiness if (record.transport_id, record.provider_id) == provider_key)
+
+
+def _matching_native_probe_observation(
+    provider: NativeTransportProvider,
+    observations: tuple[NativeTransportProbeObservation, ...],
+) -> NativeTransportProbeObservation | None:
+    provider_key = _native_transport_provider_key(provider)
+    return next(
+        (
+            observation
+            for observation in observations
+            if (observation.transport_id, observation.provider_id) == provider_key
+        ),
+        None,
+    )
+
+
+def _validate_native_transport_selection_evidence(
+    providers: tuple[NativeTransportProvider, ...],
+    readiness: tuple[NativeTransportCandidateReadiness, ...],
+    observations: tuple[NativeTransportProbeObservation, ...],
+) -> None:
+    transport_ids = [NATIVE_TRANSPORT_ID_BY_NAME[provider.name] for provider in providers]
+    provider_ids = [provider.metadata.id for provider in providers]
+    provider_keys = {_native_transport_provider_key(provider) for provider in providers}
+    readiness_keys = [(record.transport_id, record.provider_id) for record in readiness]
+    observation_keys = [(record.transport_id, record.provider_id) for record in observations]
+
+    if len(set(transport_ids)) != len(transport_ids) or len(set(provider_ids)) != len(provider_ids):
+        raise NativeTransportSelectionError(
+            NativeTransportSelectionErrorCode.INVALID_EVIDENCE,
+            "provider registry contains duplicate transport or provider identifiers",
+        )
+    if any(key not in provider_keys for key in readiness_keys):
+        raise NativeTransportSelectionError(
+            NativeTransportSelectionErrorCode.INVALID_EVIDENCE,
+            "candidate readiness contains an unmatched provider key",
+        )
+    if len(set(readiness_keys)) != len(readiness_keys):
+        raise NativeTransportSelectionError(
+            NativeTransportSelectionErrorCode.INVALID_EVIDENCE,
+            "candidate readiness contains a duplicate provider key",
+        )
+    if set(readiness_keys) != provider_keys:
+        raise NativeTransportSelectionError(
+            NativeTransportSelectionErrorCode.INVALID_EVIDENCE,
+            "candidate readiness must contain exactly one record for every provider",
+        )
+    if any(key not in provider_keys for key in observation_keys):
+        raise NativeTransportSelectionError(
+            NativeTransportSelectionErrorCode.INVALID_EVIDENCE,
+            "probe observations contain an unmatched provider key",
+        )
+    if len(set(observation_keys)) != len(observation_keys):
+        raise NativeTransportSelectionError(
+            NativeTransportSelectionErrorCode.INVALID_EVIDENCE,
+            "probe observations contain a duplicate provider key",
+        )
+
+
 def _native_transport_selection_error(
     policy: TransportPolicy,
     candidates: tuple[NativeTransportCandidateDiagnostic, ...],
-) -> NativeArtifactError:
+) -> NativeTransportSelectionError:
     forced_transport = _forced_native_transport_name(policy)
     if forced_transport is not None:
         forced_candidate = next(
@@ -5242,16 +5644,22 @@ def _native_transport_selection_error(
             None,
         )
         if forced_candidate is not None and forced_candidate.rejection_reason is not None:
-            return NativeArtifactError(
+            return NativeTransportSelectionError(
+                NativeTransportSelectionErrorCode.FORCED_TRANSPORT_UNAVAILABLE,
                 f"forced native transport {forced_transport} rejected: {forced_candidate.rejection_reason.value}",
+                policy=policy,
                 candidates=candidates,
             )
-        return NativeArtifactError(
+        return NativeTransportSelectionError(
+            NativeTransportSelectionErrorCode.FORCED_TRANSPORT_UNAVAILABLE,
             f"forced native transport is not available: {forced_transport}",
+            policy=policy,
             candidates=candidates,
         )
-    return NativeArtifactError(
+    return NativeTransportSelectionError(
+        NativeTransportSelectionErrorCode.NO_VIABLE_TRANSPORT,
         "no viable native transport provider after applying policy and remote support",
+        policy=policy,
         candidates=candidates,
     )
 

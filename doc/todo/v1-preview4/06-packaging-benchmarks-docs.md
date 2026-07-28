@@ -1,5 +1,13 @@
 # 06 - Packaging, Benchmarks, And Docs
 
+## Coordinated Route-Contract Release Gate
+
+- [x] Do not publish another Python Preview4 package until route-set client/server behavior and host-level conformance pass.
+- [x] Pin reviewed Rust artifact `1.0.0-preview.4.17`, containing the complete route/security ABI.
+- [x] Inspect every wheel and verify transport-scoped artifacts remain correctly owned.
+- [x] Compare Python public signatures with the frozen `nnrp-doc` route types before release.
+- [x] Record the completed cross-SDK audit and conformance evidence in the release notes.
+
 ## Wheel Packaging
 
 - [x] Package preview4 Rust artifacts into platform wheels.
@@ -12,7 +20,7 @@
 - [x] Keep client/server hot paths coarse at submit, event-batch, result, and runtime-frame boundaries.
 - [x] Reject universal wheels for native preview4 releases.
 - [x] Verify wheel contents per platform.
-- [x] Require Rust ABI `4.0.0` in the release workflow.
+- [x] Require Rust ABI `4.1.0` in the release workflow.
 
 ## Benchmarks
 
@@ -39,7 +47,7 @@
 
 - [x] Run unit tests.
 - [x] Run adapter conformance.
-- [x] Run wire conformance dry-run.
+- [x] Run wire conformance dry-run and the independent-process plain/TLS carrier matrix.
 - [x] Run native wheel inspection.
 - [x] Run real bidirectional complete-packet IPC and WebSocket loopbacks against packaged artifacts.
 - [x] Run benchmark smoke thresholds.

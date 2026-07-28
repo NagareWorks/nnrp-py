@@ -5,6 +5,7 @@ import pytest
 
 from nnrp.tools.wire_conformance import (
     WireCaseResult,
+    WireHostRouteProvider,
     WireObservedFrame,
     WireTargetTransport,
     WireTargetTransportSecurity,
@@ -12,6 +13,7 @@ from nnrp.tools.wire_conformance import (
     build_wire_skipped_results_from_plan,
     build_wire_target_manifest,
     main,
+    parse_wire_host_route_provider,
     parse_wire_target_security,
     parse_wire_target_transport,
     run_wire_harness_plan,
@@ -100,6 +102,55 @@ def test_parse_wire_target_security_reads_frozen_fields() -> None:
         trusted_certificate_der_path="certs/server.der",
         certificate_der_path="certs/server.der",
         private_key_pkcs8_der_path="certs/server-key.der",
+    )
+
+
+def test_build_host_route_only_manifest_uses_frozen_provider_registry() -> None:
+    provider = WireHostRouteProvider(
+        transport="tcp",
+        provider_id="nnrp.transport.tcp.native",
+        installed=True,
+        platforms=["native"],
+        security_modes=["plain", "tls_server_auth"],
+    )
+
+    manifest = build_wire_target_manifest(
+        modes=["suite_as_client", "suite_as_server"],
+        transports=[],
+        host_route_providers=[provider],
+        capabilities=["host.routes"],
+    )
+
+    assert manifest["wire_conformance"]["transports"] == []
+    assert manifest["wire_conformance"]["host_route_providers"] == [
+        {
+            "transport": "tcp",
+            "provider_id": "nnrp.transport.tcp.native",
+            "installed": True,
+            "platforms": ["native"],
+            "security_modes": ["plain", "tls_server_auth"],
+        }
+    ]
+
+
+def test_parse_wire_host_route_provider_reads_frozen_fields() -> None:
+    provider = parse_wire_host_route_provider(
+        json.dumps(
+            {
+                "transport": "ipc",
+                "provider_id": "nnrp.transport.ipc.native",
+                "installed": True,
+                "platforms": ["native"],
+                "security_modes": ["plain"],
+            }
+        )
+    )
+    assert provider == WireHostRouteProvider(
+        transport="ipc",
+        provider_id="nnrp.transport.ipc.native",
+        installed=True,
+        platforms=["native"],
+        security_modes=["plain"],
     )
 
 
@@ -206,7 +257,7 @@ def test_parse_wire_target_security_rejects_incomplete_or_ambiguous_values(value
                 "transports": [],
                 "capabilities": ["control.cancel_abort"],
             },
-            "transports must not be empty",
+            "wire target must declare transports or host_route_providers",
         ),
         (
             {
@@ -261,6 +312,14 @@ def test_parse_wire_target_security_rejects_incomplete_or_ambiguous_values(value
             {
                 "modes": ["suite_as_client"],
                 "transports": [WireTargetTransport("tcp", "127.0.0.1:1", tls=True)],
+                "capabilities": ["control.cancel_abort"],
+            },
+            "requires security material",
+        ),
+        (
+            {
+                "modes": ["suite_as_client"],
+                "transports": [WireTargetTransport("ipc", "unix:///tmp/nnrp.sock", tls=True)],
                 "capabilities": ["control.cancel_abort"],
             },
             "does not use TLS",
@@ -350,6 +409,78 @@ def test_wire_target_manifest_cli_accepts_manifest_subcommand(tmp_path) -> None:
     assert manifest["wire_conformance"]["modes"] == ["suite_as_server"]
 
 
+def test_wire_target_manifest_cli_writes_host_route_only_target(tmp_path) -> None:
+    output_path = tmp_path / "target.json"
+    provider = json.dumps(
+        {
+            "transport": "quic",
+            "provider_id": "example.transport.quic.uninstalled",
+            "installed": False,
+            "platforms": ["native"],
+            "security_modes": ["tls_server_auth"],
+        }
+    )
+
+    assert main(
+        [
+            "manifest",
+            "--mode",
+            "suite_as_server",
+            "--host-route-provider",
+            provider,
+            "--capability",
+            "host.routes",
+            "--output",
+            str(output_path),
+        ]
+    ) == 0
+
+    manifest = json.loads(output_path.read_text(encoding="utf-8"))
+    assert manifest["wire_conformance"]["transports"] == []
+    assert manifest["wire_conformance"]["host_route_providers"][0]["installed"] is False
+
+
+@pytest.mark.parametrize(
+    ("capabilities", "providers"),
+    [
+        (["host.routes"], []),
+        (
+            ["control.cancel_abort"],
+            [
+                WireHostRouteProvider(
+                    "tcp",
+                    "nnrp.transport.tcp.native",
+                    True,
+                    ["native"],
+                    ["plain"],
+                )
+            ],
+        ),
+    ],
+)
+def test_host_route_capability_and_provider_registry_are_atomic(capabilities, providers) -> None:
+    with pytest.raises(ValueError, match="must be declared together"):
+        build_wire_target_manifest(
+            modes=["suite_as_client"],
+            transports=[WireTargetTransport("tcp", "127.0.0.1:19091")],
+            host_route_providers=providers,
+            capabilities=capabilities,
+        )
+
+
+def test_host_route_provider_registry_rejects_duplicate_transport() -> None:
+    with pytest.raises(ValueError, match="duplicate host-route provider transport"):
+        build_wire_target_manifest(
+            modes=["suite_as_client"],
+            transports=[],
+            host_route_providers=[
+                WireHostRouteProvider("tcp", "one", True, ["native"], ["plain"]),
+                WireHostRouteProvider("tcp", "two", False, ["native"], ["plain"]),
+            ],
+            capabilities=["host.routes"],
+        )
+
+
 def test_wire_target_manifest_cli_writes_tls_security(tmp_path) -> None:
     output_path = tmp_path / "target.json"
     security = json.dumps(
@@ -379,6 +510,39 @@ def test_wire_target_manifest_cli_writes_tls_security(tmp_path) -> None:
     ) == 0
 
     transport = json.loads(output_path.read_text(encoding="utf-8"))["wire_conformance"]["transports"][0]
+    assert transport["security"]["server_name"] == "localhost"
+
+
+def test_wire_target_manifest_cli_enables_optional_tcp_tls_from_security(tmp_path) -> None:
+    output_path = tmp_path / "target.json"
+    security = json.dumps(
+        {
+            "transport": "tcp",
+            "server_name": "localhost",
+            "trusted_certificate_der_path": "certs/server.der",
+            "certificate_der_path": "certs/server.der",
+            "private_key_pkcs8_der_path": "certs/server-key.der",
+        }
+    )
+
+    assert main(
+        [
+            "manifest",
+            "--mode",
+            "suite_as_server",
+            "--transport",
+            "tcp=127.0.0.1:19091",
+            "--transport-security",
+            security,
+            "--capability",
+            "control.cancel_abort",
+            "--output",
+            str(output_path),
+        ]
+    ) == 0
+
+    transport = json.loads(output_path.read_text(encoding="utf-8"))["wire_conformance"]["transports"][0]
+    assert transport["tls"] is True
     assert transport["security"]["server_name"] == "localhost"
 
 

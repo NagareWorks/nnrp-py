@@ -15,7 +15,7 @@
   - [x] Maximum frame bytes.
   - [x] Registered platform limitations.
 - [x] Reject aggregate and legacy provider manifest shapes.
-- [x] Reject provider names that are not advertised by the native artifact.
+- [x] Reject provider names that are not advertised by the native artifact and reject duplicate transport/provider ids.
 - [x] Keep application-facing `nnrp://` / `nnrps://` endpoints separate from provider-local locators.
 
 ## TCP And QUIC Preview4 Runtime Continuity
@@ -53,11 +53,11 @@
 - [x] Select the installed transport directly for single-provider installations.
 - [x] Probe installed transports by policy for multi-provider installations.
 - [x] Preserve explicit user transport selection.
-- [x] Match probe samples by transport id and stable provider id.
-- [x] Compute per-sample throughput and exact odd/even medians.
+- [x] Require exact readiness and observation evidence keyed by transport id and stable provider id; reject duplicate, unmatched, or incomplete evidence before selection.
+- [x] Summarize raw probe samples into succeeded/failed observations with per-sample throughput and exact odd/even medians.
 - [x] Apply the frozen success, throughput, RTT, cost, preference, transport-id, and provider-id comparator.
 - [x] Surface typed probe metrics and complete ordered candidate diagnostics.
-- [x] Carry complete candidate diagnostics on selection errors.
+- [x] Carry complete candidate diagnostics on typed invalid-evidence, forced-unavailable, and no-viable selection errors.
 - [x] Remove the Python-specific weighted score API.
 
 ## Public Binding Surface
@@ -87,4 +87,36 @@
 - [x] Add carrier-backed E2E tests for TCP, QUIC, IPC, and WebSocket.
   - [x] Cover client/server handshake and submit/result exchange.
   - [x] Cover runtime control and object/cache events.
+  - [x] Cover route-local TCP TLS through packaged artifacts and the independent wire target.
   - [x] Cover ownership transfer failure and idempotent role close.
+
+## Host Route Cardinality
+
+- [x] Replace singular production role routing with the frozen route maps.
+  - [x] Add `NativeClientProviderRoute` and a canonical transport-keyed client mapping.
+  - [x] Add `NativeServerProviderRoute` and a canonical transport-keyed server mapping.
+  - [x] Keep the exact owned client/server security fields on each route.
+  - [x] Remove role-level `provider_endpoint`, `security`, and explicit single-transport options.
+  - [x] Keep singular endpoint/security only on low-level one-provider packet APIs.
+  - [x] Report configured known-but-uninstalled routes as `local-unavailable`.
+  - [x] Apply the exact rejection precedence when multiple checks fail.
+- [x] Complete native client route orchestration.
+  - [x] Resolve every installed route independently.
+  - [x] Probe every eligible Auto/Prefer route.
+  - [x] Preserve unresolved and security-incompatible candidates in diagnostics.
+  - [x] Transfer only the selected carrier to the Rust role runtime.
+  - [x] Fail Force without fallback.
+- [x] Complete native server listener-set orchestration.
+  - [x] Resolve every policy-allowed installed route.
+  - [x] Bind every eligible Auto/Prefer route into one logical server.
+  - [x] Accept sessions from every bound listener.
+  - [x] Expose the actual listener transport as `active_transport_name` on every accepted session.
+  - [x] Expose actual bound provider endpoints, including assigned ports.
+  - [x] Roll back all listeners when any required bind or adoption fails.
+  - [x] Fail and close the complete logical server after a terminal provider-listener failure.
+  - [x] Close every listener and accepted session exactly once.
+- [x] Enforce route-local application security intent.
+  - [x] Add TCP TLS client and server routes.
+  - [x] Keep QUIC and native WSS credentials isolated by route.
+  - [x] Reject IPC, plain TCP, and WS for `nnrps://` with `security-unsatisfied`.
+  - [x] Add `route-unresolved` and `security-unsatisfied` to Python diagnostics.

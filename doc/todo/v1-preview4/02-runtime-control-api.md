@@ -21,6 +21,9 @@
 
 ## Server Controls
 
+- [x] Expose one wire-ordered application event at a time through `NativeRuntimeServerSession.poll_event()`.
+  - [x] Keep `poll_events()` as the coarse bounded native batch surface.
+  - [x] Return `None` when the bounded wait completes without an event.
 - [x] Add server API for progress events.
   - [x] Progress stage.
   - [x] Optional percent.

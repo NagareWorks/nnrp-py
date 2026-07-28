@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -36,6 +37,7 @@ from nnrp.native import (
     NativeTransportProbeMetrics,
     NativeTransportProbeState,
     NativeTransportRejectionReason,
+    NativeTransportSelection,
     NativeTransportSelectionError,
     NativeTransportSelectionErrorCode,
     NativeWouldBlockError,
@@ -66,17 +68,52 @@ class FakeTransportEntrypoints:
 
 
 class FakeTransportBinding:
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        transport_name: str = "tcp",
+        *,
+        local_available: bool = True,
+        diagnostic: str | None = None,
+        provider_id: str | None = None,
+    ) -> None:
+        self.transport_name = transport_name
+        self._local_available = local_available
+        self._diagnostic = diagnostic
+        self._provider_id = provider_id
         self.entrypoints = FakeTransportEntrypoints()
         self.connections: list[NativeTransportConnection] = []
         self.connect_security: list[object] = []
 
+    @property
+    def kind(self) -> str:
+        return self.transport_name
+
+    @property
+    def provider(self):
+        provider = fake_provider(self.transport_name)
+        if self._provider_id is not None:
+            provider.metadata = replace(provider.metadata, id=self._provider_id)
+        return provider
+
+    @property
+    def local_available(self) -> bool:
+        return self._local_available
+
+    @property
+    def diagnostic(self) -> str | None:
+        return self._diagnostic
+
+    def _probe(self, *_args) -> NativeTransportProbeMetrics:
+        assert self.local_available
+        return NativeTransportProbeMetrics(1, 1, 4096, 12)
+
     def _connect(self, endpoint, security, connect_timeout_ms: int, io_timeout_ms: int) -> NativeTransportConnection:
+        assert self.local_available
         assert (connect_timeout_ms, io_timeout_ms) == (0, 0)
         self.connect_security.append(security)
         connection = NativeTransportConnection(
             self.entrypoints,
-            SimpleNamespace(name="tcp"),
+            SimpleNamespace(name=self.transport_name),
             endpoint,
             NativeHandle(HANDLE_KIND_TRANSPORT_CONNECTION, len(self.connections) + 1, 1, 0),
         )
@@ -87,13 +124,13 @@ class FakeTransportBinding:
 @contextmanager
 def connect_native_client_connection(*, backend: FakeBackend, options=None):
     binding = FakeTransportBinding()
+    selection = native_selection("tcp")
     route = SimpleNamespace(
         endpoint=parse_native_transport_endpoint("tcp://localhost:4433"),
         security=None,
     )
     with (
-        patch.object(client_native_module, "_select_client_transport", return_value=("tcp", route)),
-        patch.object(client_native_module, "load_native_transport_binding", return_value=binding),
+        patch.object(client_native_module, "_select_client_transport", return_value=(selection, route, binding)),
         _connect_native_client_connection(
             "nnrp://localhost",
             fallback=backend,
@@ -106,13 +143,13 @@ def connect_native_client_connection(*, backend: FakeBackend, options=None):
 @contextmanager
 def connect_native_client_session(*, backend: FakeBackend, options=None):
     binding = FakeTransportBinding()
+    selection = native_selection("tcp")
     route = SimpleNamespace(
         endpoint=parse_native_transport_endpoint("tcp://localhost:4433"),
         security=None,
     )
     with (
-        patch.object(client_native_module, "_select_client_transport", return_value=("tcp", route)),
-        patch.object(client_native_module, "load_native_transport_binding", return_value=binding),
+        patch.object(client_native_module, "_select_client_transport", return_value=(selection, route, binding)),
         _connect_native_client_session(
             "nnrp://localhost",
             fallback=backend,
@@ -460,9 +497,11 @@ def test_connect_native_client_connection_routes_results_for_multiple_sessions()
 def test_connect_native_client_connection_passes_carrier_ownership_to_backend() -> None:
     backend = FakeBackend()
 
-    with connect_native_client_connection(backend=backend):
+    with connect_native_client_connection(backend=backend) as connection:
         carrier = backend.connections[0].transport_connection
         assert carrier.connected is True
+        assert connection.active_transport_name == "tcp"
+        assert connection.transport_selection.selected_provider.name == "tcp"
 
     assert carrier.connected is False
 
@@ -1032,19 +1071,36 @@ def native_candidate(
     )
 
 
+def fake_provider(transport_name: str):
+    return SimpleNamespace(
+        name=transport_name,
+        metadata=official_provider_metadata(transport_name),
+    )
+
+
+def native_selection(transport_name: str) -> NativeTransportSelection:
+    provider = fake_provider(transport_name)
+    return NativeTransportSelection(
+        selected_provider=provider,
+        candidates=(native_candidate(transport_name),),
+        policy=client_native_module.TransportPolicy.AUTO,
+    )
+
+
 def test_select_client_transport_returns_resolved_single_route(monkeypatch: pytest.MonkeyPatch) -> None:
     provider = SimpleNamespace(name="tcp", metadata=official_provider_metadata("tcp"))
+    transport = FakeTransportBinding()
     monkeypatch.setattr(client_native_module, "discover_native_transport_providers", lambda *_args: (provider,))
     monkeypatch.setattr(
         client_native_module,
-        "select_native_transport_provider",
+        "_select_native_transport_provider_from_providers",
         lambda *_args, **_kwargs: SimpleNamespace(
             selected_transport_name="tcp",
             candidates=(native_candidate("tcp"),),
         ),
     )
 
-    selected, route = client_native_module._select_client_transport(
+    selection, route, binding = client_native_module._select_client_transport(
         client_native_module.parse_nnrp_endpoint("nnrp://localhost"),
         provider_routes=None,
         transport_policy="auto",
@@ -1052,10 +1108,112 @@ def test_select_client_transport_returns_resolved_single_route(monkeypatch: pyte
         root=None,
         native_platform=None,
         library=None,
+        transports=(transport,),
     )
 
-    assert selected == "tcp"
+    assert selection.selected_transport_name == "tcp"
+    assert binding.kind == "tcp"
     assert route.endpoint == parse_native_transport_endpoint("tcp://localhost:4433")
+
+
+def test_explicit_client_transport_bindings_are_authoritative(monkeypatch: pytest.MonkeyPatch) -> None:
+    transport = FakeTransportBinding()
+    monkeypatch.setattr(
+        client_native_module,
+        "discover_native_transport_providers",
+        lambda *_args: (_ for _ in ()).throw(AssertionError("explicit transports must bypass discovery")),
+    )
+
+    resolved = client_native_module._resolve_client_transport_bindings(
+        (transport,),
+        artifact_path=None,
+        root=None,
+        native_platform=None,
+        library=None,
+    )
+
+    assert resolved == (transport,)
+
+
+def test_explicit_client_transport_bindings_reject_duplicate_kind() -> None:
+    with pytest.raises(NativeTransportSelectionError) as caught:
+        client_native_module._resolve_client_transport_bindings(
+            (FakeTransportBinding(), FakeTransportBinding()),
+            artifact_path=None,
+            root=None,
+            native_platform=None,
+            library=None,
+        )
+
+    assert caught.value.code is NativeTransportSelectionErrorCode.INVALID_EVIDENCE
+
+
+def test_unavailable_client_binding_preserves_provider_identity_without_probe() -> None:
+    provider_id = "example.transport.quic.uninstalled"
+    binding = FakeTransportBinding(
+        "quic",
+        local_available=False,
+        diagnostic="provider package is not installed",
+        provider_id=provider_id,
+    )
+
+    with pytest.raises(NativeTransportSelectionError) as caught:
+        client_native_module._select_client_transport(
+            client_native_module.parse_nnrp_endpoint("nnrp://localhost"),
+            provider_routes=None,
+            transport_policy="force_quic",
+            artifact_path=None,
+            root=None,
+            native_platform=None,
+            library=None,
+            transports=(binding,),
+        )
+
+    candidate = next(value for value in caught.value.candidates if value.provider.id == provider_id)
+    assert candidate.local_available is False
+    assert candidate.rejection_reason is NativeTransportRejectionReason.LOCAL_UNAVAILABLE
+    assert candidate.diagnostic == "provider package is not installed"
+
+
+def test_installed_client_binding_does_not_imply_peer_transport_support() -> None:
+    binding = FakeTransportBinding("ipc")
+
+    with pytest.raises(NativeTransportSelectionError) as caught:
+        client_native_module._select_client_transport(
+            client_native_module.parse_nnrp_endpoint("nnrp://localhost"),
+            provider_routes=None,
+            transport_policy="force_ipc",
+            artifact_path=None,
+            root=None,
+            native_platform=None,
+            library=None,
+            transports=(binding,),
+        )
+
+    candidate = next(value for value in caught.value.candidates if value.transport_name == "ipc")
+    assert candidate.local_available is True
+    assert candidate.peer_supported is False
+    assert candidate.rejection_reason is NativeTransportRejectionReason.PEER_UNSUPPORTED
+
+
+def test_explicit_client_provider_route_declares_peer_transport_support() -> None:
+    binding = FakeTransportBinding("ipc")
+
+    selection, route, selected_binding = client_native_module._select_client_transport(
+        client_native_module.parse_nnrp_endpoint("nnrp://localhost"),
+        provider_routes={"ipc": NativeClientProviderRoute(provider_endpoint="unix:///tmp/nnrp.sock")},
+        transport_policy="force_ipc",
+        artifact_path=None,
+        root=None,
+        native_platform=None,
+        library=None,
+        transports=(binding,),
+    )
+
+    candidate = next(value for value in selection.candidates if value.transport_name == "ipc")
+    assert candidate.peer_supported is True
+    assert route.endpoint == parse_native_transport_endpoint("unix:///tmp/nnrp.sock")
+    assert selected_binding is binding
 
 
 def test_connect_client_keeps_security_on_its_selected_route(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1065,7 +1223,7 @@ def test_connect_client_keeps_security_on_its_selected_route(monkeypatch: pytest
     monkeypatch.setattr(client_native_module, "discover_native_transport_providers", lambda *_args: (provider,))
     monkeypatch.setattr(
         client_native_module,
-        "select_native_transport_provider",
+        "_select_native_transport_provider_from_providers",
         lambda *_args, **_kwargs: SimpleNamespace(
             selected_transport_name="tcp",
             candidates=(native_candidate("tcp"),),
@@ -1100,6 +1258,25 @@ def test_select_client_transport_probes_every_eligible_route(monkeypatch: pytest
         )
 
     class FakeProbeBinding:
+        def __init__(self, transport_name: str) -> None:
+            self.transport_name = transport_name
+
+        @property
+        def kind(self) -> str:
+            return self.transport_name
+
+        @property
+        def provider(self):
+            return fake_provider(self.transport_name)
+
+        @property
+        def local_available(self) -> bool:
+            return True
+
+        @property
+        def diagnostic(self) -> None:
+            return None
+
         def _probe(self, *_args):
             return NativeTransportProbeMetrics(
                 success_count=2,
@@ -1108,15 +1285,15 @@ def test_select_client_transport_probes_every_eligible_route(monkeypatch: pytest
                 median_throughput_bytes_per_sec=4096,
             )
 
-    monkeypatch.setattr(client_native_module, "select_native_transport_provider", select_provider)
+    monkeypatch.setattr(client_native_module, "_select_native_transport_provider_from_providers", select_provider)
     monkeypatch.setattr(client_native_module, "discover_native_transport_providers", lambda *_args: providers)
     monkeypatch.setattr(
         client_native_module,
         "load_native_transport_binding",
-        lambda *_args, **_kwargs: FakeProbeBinding(),
+        lambda transport_name, **_kwargs: FakeProbeBinding(transport_name),
     )
 
-    selected, _route = client_native_module._select_client_transport(
+    selection, _route, _binding = client_native_module._select_client_transport(
         client_native_module.parse_nnrp_endpoint("nnrp://localhost"),
         provider_routes={
             "websocket": NativeClientProviderRoute(provider_endpoint="ws://localhost/nnrp"),
@@ -1126,9 +1303,10 @@ def test_select_client_transport_probes_every_eligible_route(monkeypatch: pytest
         root=None,
         native_platform=None,
         library=None,
+        transports=tuple(FakeProbeBinding(provider.name) for provider in providers),
     )
 
-    assert selected == "tcp"
+    assert selection.selected_transport_name == "tcp"
     assert [(record.transport_id, record.route_resolved) for record in selected_readiness] == [
         (NATIVE_TRANSPORT_ID_BY_NAME["tcp"], True),
         (NATIVE_TRANSPORT_ID_BY_NAME["websocket"], True),
@@ -1153,12 +1331,28 @@ def test_select_client_transport_records_probe_failure_observation(monkeypatch: 
         def __init__(self, transport_name: str) -> None:
             self.transport_name = transport_name
 
+        @property
+        def kind(self) -> str:
+            return self.transport_name
+
+        @property
+        def provider(self):
+            return fake_provider(self.transport_name)
+
+        @property
+        def local_available(self) -> bool:
+            return True
+
+        @property
+        def diagnostic(self) -> None:
+            return None
+
         def _probe(self, *_args):
             if self.transport_name == "tcp":
                 raise RuntimeError("connection refused")
             return NativeTransportProbeMetrics(1, 1, 4096, 12)
 
-    monkeypatch.setattr(client_native_module, "select_native_transport_provider", select_provider)
+    monkeypatch.setattr(client_native_module, "_select_native_transport_provider_from_providers", select_provider)
     monkeypatch.setattr(client_native_module, "discover_native_transport_providers", lambda *_args: providers)
     monkeypatch.setattr(
         client_native_module,
@@ -1166,7 +1360,7 @@ def test_select_client_transport_records_probe_failure_observation(monkeypatch: 
         lambda transport_name, **_kwargs: FakeProbeBinding(transport_name),
     )
 
-    selected, _route = client_native_module._select_client_transport(
+    selection, _route, _binding = client_native_module._select_client_transport(
         client_native_module.parse_nnrp_endpoint("nnrp://localhost"),
         provider_routes={"websocket": NativeClientProviderRoute(provider_endpoint="ws://localhost/nnrp")},
         transport_policy="auto",
@@ -1174,15 +1368,17 @@ def test_select_client_transport_records_probe_failure_observation(monkeypatch: 
         root=None,
         native_platform=None,
         library=None,
+        transports=tuple(FakeProbeBinding(provider.name) for provider in providers),
     )
 
-    assert selected == "websocket"
+    assert selection.selected_transport_name == "websocket"
     assert selected_observations[0].state is NativeTransportProbeState.FAILED
     assert selected_observations[0].diagnostic == "transport probe failed: connection refused"
 
 
 def test_select_client_transport_preserves_invalid_evidence_error(monkeypatch: pytest.MonkeyPatch) -> None:
     provider = SimpleNamespace(name="tcp", metadata=official_provider_metadata("tcp"))
+    transport = FakeTransportBinding()
     expected = NativeTransportSelectionError(
         NativeTransportSelectionErrorCode.INVALID_EVIDENCE,
         "duplicate readiness",
@@ -1190,7 +1386,7 @@ def test_select_client_transport_preserves_invalid_evidence_error(monkeypatch: p
     monkeypatch.setattr(client_native_module, "discover_native_transport_providers", lambda *_args: (provider,))
     monkeypatch.setattr(
         client_native_module,
-        "select_native_transport_provider",
+        "_select_native_transport_provider_from_providers",
         lambda *_args, **_kwargs: (_ for _ in ()).throw(expected),
     )
 
@@ -1203,6 +1399,7 @@ def test_select_client_transport_preserves_invalid_evidence_error(monkeypatch: p
             root=None,
             native_platform=None,
             library=None,
+            transports=(transport,),
         )
 
     assert caught.value is expected
@@ -1243,7 +1440,7 @@ def test_select_client_transport_reports_host_route_rejection(
     monkeypatch.setattr(client_native_module, "discover_native_transport_providers", lambda *_args: providers)
     monkeypatch.setattr(
         client_native_module,
-        "select_native_transport_provider",
+        "_select_native_transport_provider_from_providers",
         lambda *_args, **_kwargs: (_ for _ in ()).throw(
             NativeTransportSelectionError(
                 NativeTransportSelectionErrorCode.NO_VIABLE_TRANSPORT,
@@ -1264,6 +1461,7 @@ def test_select_client_transport_reports_host_route_rejection(
             root=None,
             native_platform=None,
             library=None,
+            transports=tuple(FakeTransportBinding(name) for name in installed_names),
         )
 
     forced_name = policy.removeprefix("force_")

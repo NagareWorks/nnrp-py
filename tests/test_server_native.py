@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from types import SimpleNamespace
 
 import pytest
@@ -11,6 +12,8 @@ from nnrp.native import (
     NativeArtifactError,
     NativeStatus,
     NativeTransportRejectionReason,
+    NativeTransportSelectionError,
+    NativeTransportSelectionErrorCode,
     NativeWouldBlockError,
     parse_native_transport_endpoint,
 )
@@ -71,15 +74,46 @@ class FakeListener:
 
 
 class FakeServerBinding:
-    def __init__(self, transport_name: str, *, adoption_error: Exception | None = None) -> None:
+    def __init__(
+        self,
+        transport_name: str,
+        *,
+        adoption_error: Exception | None = None,
+        local_available: bool = True,
+        diagnostic: str | None = None,
+        provider_id: str | None = None,
+    ) -> None:
         self.transport_name = transport_name
         self.adoption_error = adoption_error
+        self._local_available = local_available
+        self._diagnostic = diagnostic
+        self._provider_id = provider_id
         self.listen_calls: list[tuple[object, object, int, int]] = []
         self.adopt_calls: list[tuple[int, int]] = []
         self.listeners: list[FakeListener] = []
         self.runtime_server = FakeRuntimeServer(transport_name)
 
+    @property
+    def kind(self) -> str:
+        return self.transport_name
+
+    @property
+    def provider(self):
+        provider = fake_provider(self.transport_name)
+        if self._provider_id is not None:
+            provider.metadata = replace(provider.metadata, id=self._provider_id)
+        return provider
+
+    @property
+    def local_available(self) -> bool:
+        return self._local_available
+
+    @property
+    def diagnostic(self) -> str | None:
+        return self._diagnostic
+
     def _listen(self, endpoint, security, accept_timeout_ms: int, io_timeout_ms: int) -> FakeListener:
+        assert self.local_available
         self.listen_calls.append((endpoint, security, accept_timeout_ms, io_timeout_ms))
         listener = FakeListener(endpoint)
         self.listeners.append(listener)
@@ -136,6 +170,52 @@ def test_listen_native_server_owns_multi_listener_role_lifecycle(monkeypatch: py
     assert session.close_calls == 1
     assert all(binding.runtime_server._closed for binding in bindings.values())
     assert all(binding.runtime_server.close_calls == 1 for binding in bindings.values())
+
+
+def test_explicit_server_transport_bindings_are_authoritative(monkeypatch: pytest.MonkeyPatch) -> None:
+    transport = FakeServerBinding("tcp")
+    monkeypatch.setattr(
+        server_native_module,
+        "discover_native_transport_providers",
+        lambda: (_ for _ in ()).throw(AssertionError("explicit transports must bypass discovery")),
+    )
+
+    resolved = server_native_module._resolve_server_transport_bindings((transport,))
+
+    assert resolved == (transport,)
+
+
+def test_explicit_server_transport_bindings_reject_duplicate_kind() -> None:
+    with pytest.raises(NativeTransportSelectionError) as caught:
+        server_native_module._resolve_server_transport_bindings(
+            (FakeServerBinding("tcp"), FakeServerBinding("tcp"))
+        )
+
+    assert caught.value.code is NativeTransportSelectionErrorCode.INVALID_EVIDENCE
+
+
+def test_unavailable_server_binding_preserves_provider_identity_without_listen() -> None:
+    provider_id = "example.transport.quic.uninstalled"
+    binding = FakeServerBinding(
+        "quic",
+        local_available=False,
+        diagnostic="provider package is not installed",
+        provider_id=provider_id,
+    )
+
+    with pytest.raises(NativeTransportSelectionError) as caught:
+        with listen_native_server(
+            "nnrp://localhost",
+            transports=(binding,),
+            transport_policy="force_quic",
+        ):
+            pass
+
+    candidate = next(value for value in caught.value.candidates if value.provider.id == provider_id)
+    assert candidate.local_available is False
+    assert candidate.rejection_reason is NativeTransportRejectionReason.LOCAL_UNAVAILABLE
+    assert candidate.diagnostic == "provider package is not installed"
+    assert binding.listen_calls == []
 
 
 def test_listen_native_server_rolls_back_adopted_servers_after_later_failure(

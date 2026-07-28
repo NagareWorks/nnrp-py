@@ -1338,6 +1338,26 @@ def test_native_transport_binding_requires_client_role_entrypoints() -> None:
         binding.adopt_client(carrier, connection_id=11, generation=2)
 
 
+def test_unavailable_native_transport_binding_rejects_every_execution_path() -> None:
+    provider = SimpleNamespace(
+        name="tcp",
+        transport_slots=("tcp",),
+        metadata=SimpleNamespace(id="example.transport.tcp.uninstalled"),
+    )
+    binding = NativeTransportBinding.unavailable(provider, "provider package is not installed")
+
+    assert binding.local_available is False
+    assert binding.diagnostic == "provider package is not installed"
+    calls = (
+        lambda: binding._probe(_test_transport_endpoint("tcp"), None, 1, 1, 0, 0),
+        lambda: binding._connect(_test_transport_endpoint("tcp"), None, 0, 0),
+        lambda: binding._listen(_test_transport_endpoint("tcp"), None, 0, 0),
+    )
+    for call in calls:
+        with pytest.raises(NativeArtifactError, match="provider package is not installed"):
+            call()
+
+
 def test_native_transport_connection_remains_owned_when_client_role_adoption_fails() -> None:
     transport_entrypoints = SimpleNamespace(close=FakeFunction(NativeStatus.ok().to_ffi()))
     role_library = FakeRuntimeLibrary(status=_NnrpFfiStatus(FFI_STATUS_INTERNAL_ERROR, 0, 0, 0))

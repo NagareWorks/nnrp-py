@@ -2060,15 +2060,30 @@ class NativeTransportBinding:
 
     def __init__(
         self,
-        entrypoints: _NativeTransportEntrypoints,
+        entrypoints: _NativeTransportEntrypoints | None,
         provider: NativeTransportProvider,
         role_entrypoints: NativeRuntimeEntrypoints | None = None,
+        *,
+        unavailable_diagnostic: str | None = None,
     ) -> None:
         if provider.name not in provider.transport_slots:
             raise NativeArtifactError(f"native provider {provider.name!r} does not own its transport slot")
+        if entrypoints is None and not unavailable_diagnostic:
+            raise ValueError("unavailable native transport bindings require a diagnostic")
+        if entrypoints is not None and unavailable_diagnostic is not None:
+            raise ValueError("available native transport bindings must not declare an unavailable diagnostic")
         self.entrypoints = entrypoints
         self.provider = provider
         self._role_entrypoints = role_entrypoints
+        self._unavailable_diagnostic = unavailable_diagnostic
+
+    @classmethod
+    def unavailable(
+        cls,
+        provider: NativeTransportProvider,
+        diagnostic: str,
+    ) -> NativeTransportBinding:
+        return cls(None, provider, unavailable_diagnostic=diagnostic)
 
     def adopt_client(
         self,
@@ -2077,6 +2092,7 @@ class NativeTransportBinding:
         connection_id: int,
         generation: int,
     ) -> NativeRuntimeConnection:
+        self._require_available()
         if connection._entrypoints is not self.entrypoints:
             raise NativeArtifactError("native carrier must be adopted by its owning transport artifact")
         if self._role_entrypoints is None:
@@ -2094,6 +2110,7 @@ class NativeTransportBinding:
         server_id: int,
         generation: int,
     ) -> NativeRuntimeServer:
+        self._require_available()
         if listener._entrypoints is not self.entrypoints:
             raise NativeArtifactError("native listener must be adopted by its owning transport artifact")
         if self._role_entrypoints is None:
@@ -2108,6 +2125,14 @@ class NativeTransportBinding:
     def kind(self) -> str:
         return self.provider.name
 
+    @property
+    def local_available(self) -> bool:
+        return self.entrypoints is not None
+
+    @property
+    def diagnostic(self) -> str | None:
+        return self._unavailable_diagnostic
+
     async def probe(
         self,
         endpoint: str | NativeTransportEndpoint,
@@ -2118,6 +2143,7 @@ class NativeTransportBinding:
         max_packet_bytes: int = 0,
         timeout_ms: int = 0,
     ) -> NativeTransportProbeMetrics:
+        self._require_available()
         return await asyncio.to_thread(
             self._probe,
             endpoint,
@@ -2137,6 +2163,7 @@ class NativeTransportBinding:
         max_packet_bytes: int,
         timeout_ms: int,
     ) -> NativeTransportProbeMetrics:
+        self._require_available()
         _require_bounded_integer("sample_count", sample_count, 0xFFFFFFFF)
         _require_bounded_integer("probe_payload_bytes", probe_payload_bytes, 0xFFFFFFFF)
         parsed = self._endpoint(endpoint)
@@ -2166,6 +2193,7 @@ class NativeTransportBinding:
         max_packet_bytes: int = 0,
         timeout_ms: int = 0,
     ) -> NativeTransportConnection:
+        self._require_available()
         return await asyncio.to_thread(
             self._connect,
             endpoint,
@@ -2181,6 +2209,7 @@ class NativeTransportBinding:
         max_packet_bytes: int,
         timeout_ms: int,
     ) -> NativeTransportConnection:
+        self._require_available()
         parsed = self._endpoint(endpoint)
         config = self._client_security_config(security)
         try:
@@ -2204,6 +2233,7 @@ class NativeTransportBinding:
         max_packet_bytes: int = 0,
         timeout_ms: int = 0,
     ) -> NativeTransportListener:
+        self._require_available()
         return await asyncio.to_thread(
             self._listen,
             endpoint,
@@ -2219,6 +2249,7 @@ class NativeTransportBinding:
         max_packet_bytes: int,
         timeout_ms: int,
     ) -> NativeTransportListener:
+        self._require_available()
         parsed = self._endpoint(endpoint)
         config = self._server_security_config(security)
         try:
@@ -2323,6 +2354,12 @@ class NativeTransportBinding:
     def _close_config(self, config: NativeHandle) -> None:
         if config.is_valid:
             _raise_for_native_ffi_status(self.entrypoints.close(config.to_ffi()))
+
+    def _require_available(self) -> None:
+        if not self.local_available:
+            raise NativeArtifactError(
+                self.diagnostic or f"native transport provider {self.provider.metadata.id!r} is unavailable"
+            )
 
 
 @dataclass(frozen=True)
@@ -5197,6 +5234,32 @@ def select_native_transport_provider(
 ) -> NativeTransportSelection:
     resolved_policy = _normalize_native_transport_policy(policy)
     providers = discover_native_transport_providers(root, native_platform)
+    return _select_native_transport_provider_from_providers(
+        providers,
+        resolved_policy,
+        supported_transports=supported_transports,
+        requested_max_frame_bytes=requested_max_frame_bytes,
+        candidate_readiness=candidate_readiness,
+        probe_observations=probe_observations,
+    )
+
+
+def _select_native_transport_provider_from_providers(
+    providers: tuple[NativeTransportProvider, ...],
+    policy: TransportPolicy | str | int = TransportPolicy.AUTO,
+    *,
+    supported_transports: (
+        tuple[str | TransportId, ...] | list[str | TransportId] | set[str | TransportId] | None
+    ) = None,
+    requested_max_frame_bytes: int | None = None,
+    candidate_readiness: (tuple[NativeTransportCandidateReadiness, ...] | list[NativeTransportCandidateReadiness]),
+    probe_observations: (
+        tuple[NativeTransportProbeObservation, ...] | list[NativeTransportProbeObservation] | None
+    ) = None,
+    provider_availability: Mapping[str, bool] | None = None,
+    provider_diagnostics: Mapping[str, str | None] | None = None,
+) -> NativeTransportSelection:
+    resolved_policy = _normalize_native_transport_policy(policy)
     supported = _normalize_supported_native_transports(supported_transports)
     if requested_max_frame_bytes is not None:
         _require_bounded_integer("requested_max_frame_bytes", requested_max_frame_bytes, 0xFFFFFFFFFFFFFFFF)
@@ -5209,6 +5272,8 @@ def select_native_transport_provider(
         resolved_policy,
         requested_max_frame_bytes,
         readiness,
+        provider_availability or {},
+        provider_diagnostics or {},
     )
     eligible = [index for index, (_, candidate) in enumerate(candidates) if candidate.rejection_reason is None]
     if len(eligible) == 1:
@@ -5307,17 +5372,22 @@ def _evaluate_native_transport_candidates(
     policy: TransportPolicy,
     requested_max_frame_bytes: int | None,
     readiness: tuple[NativeTransportCandidateReadiness, ...],
+    provider_availability: Mapping[str, bool],
+    provider_diagnostics: Mapping[str, str | None],
 ) -> list[tuple[NativeTransportProvider, NativeTransportCandidateDiagnostic]]:
     candidates: list[tuple[NativeTransportProvider, NativeTransportCandidateDiagnostic]] = []
     for provider in providers:
         transport_name = provider.name
         provider_readiness = _matching_native_candidate_readiness(provider, readiness)
+        local_available = provider_availability.get(provider.metadata.id, True)
         peer_supported = transport_name in supported_transports
         within_limits = (
             requested_max_frame_bytes is None or requested_max_frame_bytes <= provider.metadata.limits.max_frame_bytes
         )
         if not _native_transport_policy_allows(policy, transport_name):
             rejection_reason = NativeTransportRejectionReason.POLICY_DISALLOWED
+        elif not local_available:
+            rejection_reason = NativeTransportRejectionReason.LOCAL_UNAVAILABLE
         elif not peer_supported:
             rejection_reason = NativeTransportRejectionReason.PEER_UNSUPPORTED
         elif not within_limits:
@@ -5335,12 +5405,16 @@ def _evaluate_native_transport_candidates(
                     transport_name=transport_name,
                     transport_id=NATIVE_TRANSPORT_ID_BY_NAME[transport_name],
                     provider=provider.metadata,
-                    local_available=True,
+                    local_available=local_available,
                     peer_supported=peer_supported,
                     within_limits=within_limits,
                     probe_state=NativeTransportProbeState.NOT_RUN,
                     rejection_reason=rejection_reason,
-                    diagnostic=provider_readiness.diagnostic,
+                    diagnostic=(
+                        provider_diagnostics.get(provider.metadata.id)
+                        if not local_available
+                        else provider_readiness.diagnostic
+                    ),
                 ),
             )
         )

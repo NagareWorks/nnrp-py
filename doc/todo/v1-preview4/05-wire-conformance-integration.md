@@ -42,16 +42,16 @@
 
 ## Host Route E2E
 
-- [ ] Run suite-owned multi-route client scenarios.
-  - [ ] Cover at least two resolved providers under Auto/Prefer.
-  - [ ] Cover forced unresolved and security-incompatible routes without fallback.
-  - [ ] Verify the Rust runtime adopts only the selected carrier.
-- [ ] Run suite-owned multi-listener server scenarios.
-  - [ ] Accept a real session through each of two simultaneously bound providers.
-  - [ ] Verify the actual bound endpoint of every listener.
-  - [ ] Verify active transport identity per accepted session.
-  - [ ] Verify atomic rollback after an injected bind failure.
-  - [ ] Verify a terminal listener failure closes the logical set instead of shrinking it.
-- [ ] Run the route-local security matrix for plain TCP, TCP TLS, QUIC, IPC, WS, and WSS.
-- [ ] Verify known-but-uninstalled routes and combined failures use exact rejection precedence.
-- [ ] Fail CI when any claimed host-route scenario is skipped or adapter-only.
+- [x] Run suite-owned multi-route client scenarios.
+  - [x] Cover at least two resolved providers under Auto/Prefer.
+  - [x] Cover forced unresolved and security-incompatible routes without fallback.
+  - [x] Verify the Rust runtime adopts only the selected carrier.
+- [x] Run suite-owned multi-listener server scenarios.
+  - [x] Accept a real session through each of two simultaneously bound providers.
+  - [x] Verify the actual bound endpoint of every listener.
+  - [x] Verify active transport identity per accepted session.
+  - [x] Verify atomic rollback after an injected bind failure.
+  - [x] Verify a terminal listener failure closes the logical set instead of shrinking it.
+- [x] Run the route-local security matrix for plain TCP, TCP TLS, QUIC, IPC, WS, and WSS.
+- [x] Verify known-but-uninstalled routes and combined failures use exact rejection precedence.
+- [x] Fail CI when any claimed host-route scenario is skipped or adapter-only.

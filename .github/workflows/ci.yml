@@ -247,7 +247,7 @@ jobs:
   wire-conformance:
     runs-on: ubuntu-latest
     env:
-      NNRP_RS_SOURCE_COMMIT: caaca5d5fb21c66265e09a26c9247c42bdd03adf
+      NNRP_RS_SOURCE_COMMIT: 3d193aea566420a2ff55b9a1f252aebbfa7e1a24
 
     steps:
       - name: Checkout

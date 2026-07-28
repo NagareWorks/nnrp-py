@@ -62,7 +62,7 @@ def test_ci_runs_independent_process_wire_conformance() -> None:
     workflow = _read_ci_workflow()
 
     assert "wire-conformance:" in workflow
-    assert "NNRP_RS_SOURCE_COMMIT: caaca5d5fb21c66265e09a26c9247c42bdd03adf" in workflow
+    assert "NNRP_RS_SOURCE_COMMIT: 3d193aea566420a2ff55b9a1f252aebbfa7e1a24" in workflow
     assert "Checkout pinned nnrp-rs source" in workflow
     assert "ref: ${{ env.NNRP_RS_SOURCE_COMMIT }}" in workflow
     for transport in ("tcp", "quic", "ipc", "websocket"):
@@ -116,5 +116,9 @@ def test_ci_wire_conformance_declares_preview4_modes_transports_and_capabilities
     assert '"validate-wire-results"' in script
     assert 'outcome -ne "passed"' in script
     assert "Expected six Preview4 wire scenarios" in script
+    assert "nnrp-wire-host-route-target" in script
+    assert '"--host-route-target", $hostRouteTargetExecutable' in script
+    assert "Expected ten Preview4 host-route scenarios" in script
+    assert 'provider_id = "example.transport.quic.uninstalled"' in script
     assert '$mode -in @("suite_as_client", "suite_as_server")' in script
     assert 'transport = "tcp"' in script

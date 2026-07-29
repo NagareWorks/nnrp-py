@@ -138,7 +138,6 @@ class RuntimeFrameHeader:
     message_type: MessageType
     flags: HeaderFlags = HeaderFlags.NONE
     session_id: int = 0
-    generation: int = 0
     frame_id: int = 0
     view_id: int = 0
     route_id: int = 0

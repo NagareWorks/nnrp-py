@@ -324,7 +324,6 @@ def _runtime_frame_header_from_header(header: NnrpHeader) -> RuntimeFrameHeader:
         message_type=header.msg_type,
         flags=header.flags,
         session_id=header.session_id,
-        generation=0,
         frame_id=header.frame_id,
         view_id=header.view_id,
         route_id=header.route_id,

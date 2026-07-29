@@ -10,7 +10,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from nnrp.core import FrameSubmitMetadata, MessageType
+from nnrp.core import FrameSubmitMetadata, HeaderFlags, MessageType, NnrpHeader, WireFormat
 from nnrp.native import (
     NativeRuntimeBackend,
     NativeRuntimeError,
@@ -39,20 +39,24 @@ from nnrp.runtime import (
     ResultDropReasonCode,
     ResultDropReasonMetadata,
     RouteHintMetadata,
+    RuntimeFrameHeader,
     RuntimeObjectKind,
     RuntimeRole,
     SchedulingMetadata,
     SupersedeMetadata,
     TraceContextMetadata,
     decode_runtime_control_metadata,
+    decode_websocket_binary_frame,
     encode_runtime_control_metadata,
     encode_runtime_object_metadata,
+    encode_websocket_binary_frame,
 )
 from nnrp.schema import TOKEN_DELTA_SCHEMA_ID, TOKEN_DELTA_SCHEMA_VERSION, StandardProfile
 
 _RESULTS_SCHEMA_URL = "https://raw.githubusercontent.com/NagareWorks/nnrp-conformance/main/schemas/adapter-case-results.schema.json"
 _DEFAULT_IMPLEMENTATION_NAME = "nnrp-py"
 _CASE_DISPATCH = {
+    "l0.header.fixed_shape.golden": "_execute_common_header_roundtrip",
     "l1.handshake.basic": "_execute_handshake_basic",
     "l1.session.open_close": "_execute_session_open_close",
     "l1.frame_submit.tensor.inline": "_execute_inline_tensor_submit",
@@ -247,6 +251,41 @@ class _AdapterCaseExecution:
             operation_id=self._int_parameter("operation_id", 1),
             frame_id=self._int_parameter("frame_id", 1),
             body=self._payload_parameter("payload", b"tensor"),
+        )
+
+    def _execute_common_header_roundtrip(self) -> dict[str, Any]:
+        golden = bytes.fromhex(
+            "4e4e5250010010282100000003020100060504004433221188776655aa99ccbb0807060504030201"
+        )
+        wire_header = NnrpHeader.unpack(golden)
+        if wire_header.pack() != golden:
+            raise ValueError("preview4 common header did not preserve the canonical wire bytes")
+
+        runtime_header = RuntimeFrameHeader(
+            message_type=MessageType.FRAME_SUBMIT,
+            flags=HeaderFlags.ACK_REQUIRED | HeaderFlags.KEYFRAME,
+            session_id=0x11223344,
+            frame_id=0x55667788,
+            view_id=0x99AA,
+            route_id=0xBBCC,
+            trace_id=0x0102030405060708,
+            version_major=1,
+            wire_format=WireFormat.CURRENT,
+        )
+        runtime_frame = encode_websocket_binary_frame(runtime_header, metadata=b"meta", body=b"body")
+        if decode_websocket_binary_frame(runtime_frame).header != runtime_header:
+            raise ValueError("public runtime frame header did not preserve all caller-controlled wire fields")
+
+        return self._evidence(
+            "common-header-roundtrip",
+            header_hex=golden.hex(),
+            message_type=int(wire_header.msg_type),
+            flags=int(wire_header.flags),
+            session_id=wire_header.session_id,
+            frame_id=wire_header.frame_id,
+            view_id=wire_header.view_id,
+            route_id=wire_header.route_id,
+            trace_id=wire_header.trace_id,
         )
 
     def _execute_handshake_basic(self) -> dict[str, Any]:

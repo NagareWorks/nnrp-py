@@ -67,6 +67,67 @@ def test_build_adapter_case_results_report_executes_supported_cases() -> None:
     assert [result["outcome"] for result in report["results"]] == ["pass", "pass", "skip"]
 
 
+def test_build_adapter_case_results_report_executes_preview4_common_header_golden(tmp_path: Path) -> None:
+    evidence_dir = tmp_path / "evidence"
+    report = build_adapter_case_results_report(
+        {
+            "protocol_version": "nnrp-1-preview4",
+            "artifacts": {"evidence_dir": str(evidence_dir)},
+            "cases": [{"id": "l0.header.fixed_shape.golden"}],
+        }
+    )
+
+    result = report["results"][0]
+    assert result["outcome"] == "pass"
+    evidence = json.loads((evidence_dir / "l0-header-fixed_shape-golden.json").read_text())
+    assert evidence["header_hex"] == (
+        "4e4e5250010010282100000003020100060504004433221188776655aa99ccbb0807060504030201"
+    )
+    assert evidence["session_id"] == 0x11223344
+    assert evidence["frame_id"] == 0x55667788
+    assert evidence["view_id"] == 0x99AA
+    assert evidence["route_id"] == 0xBBCC
+    assert evidence["trace_id"] == 0x0102030405060708
+
+
+def test_preview4_common_header_case_rejects_wire_reencoding_drift(monkeypatch: pytest.MonkeyPatch) -> None:
+    class DriftingHeader:
+        @classmethod
+        def unpack(cls, _payload: bytes) -> "DriftingHeader":
+            return cls()
+
+        @staticmethod
+        def pack() -> bytes:
+            return b"drift"
+
+    monkeypatch.setattr(adapter_conformance, "NnrpHeader", DriftingHeader)
+    report = build_adapter_case_results_report(
+        {
+            "protocol_version": "nnrp-1-preview4",
+            "cases": [{"id": "l0.header.fixed_shape.golden"}],
+        }
+    )
+
+    assert report["results"][0]["outcome"] == "fail"
+    assert "canonical wire bytes" in report["results"][0]["message"]
+
+
+def test_preview4_common_header_case_rejects_runtime_projection_drift(monkeypatch: pytest.MonkeyPatch) -> None:
+    class DriftingRuntimeFrame:
+        header = None
+
+    monkeypatch.setattr(adapter_conformance, "decode_websocket_binary_frame", lambda _frame: DriftingRuntimeFrame())
+    report = build_adapter_case_results_report(
+        {
+            "protocol_version": "nnrp-1-preview4",
+            "cases": [{"id": "l0.header.fixed_shape.golden"}],
+        }
+    )
+
+    assert report["results"][0]["outcome"] == "fail"
+    assert "caller-controlled wire fields" in report["results"][0]["message"]
+
+
 def test_build_adapter_case_results_report_marks_runtime_smoke_failures() -> None:
     class RejectingBackend:
         def connect(self, *, connection_id: int, generation: int, transport_connection: object) -> object:

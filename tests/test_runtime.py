@@ -694,7 +694,9 @@ def test_websocket_binary_frame_rejects_incomplete_inputs() -> None:
     with pytest.raises(ValueError, match="incomplete WebSocket binary frame in batch"):
         decode_websocket_binary_frame_batch(frame[:-1])
 
-    assert decode_websocket_binary_frame_batch(frame + frame, limit=1) == [decode_websocket_binary_frame(frame)]
+    assert decode_websocket_binary_frame_batch(frame, limit=1) == [decode_websocket_binary_frame(frame)]
+    with pytest.raises(ValueError, match="contains more than 1 frames"):
+        decode_websocket_binary_frame_batch(frame + frame, limit=1)
 
 
 def test_websocket_binary_frame_rejects_text_frames_and_non_contiguous_views() -> None:

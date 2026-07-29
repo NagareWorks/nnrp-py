@@ -253,7 +253,9 @@ def decode_websocket_binary_frame_batch(
     batch_bytes = _require_websocket_binary_payload("batch", batch)
     frames: list[DecodedRuntimeFrame] = []
     cursor = 0
-    while cursor < len(batch_bytes) and (limit == 0 or len(frames) < limit):
+    while cursor < len(batch_bytes):
+        if limit != 0 and len(frames) >= limit:
+            raise ValueError(f"WebSocket batch contains more than {limit} frames")
         if len(batch_bytes) - cursor < HEADER_LENGTH:
             raise ValueError("incomplete WebSocket binary frame in batch")
         header = NnrpHeader.unpack(batch_bytes[cursor : cursor + HEADER_LENGTH])

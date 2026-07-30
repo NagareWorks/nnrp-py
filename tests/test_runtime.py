@@ -1,3 +1,5 @@
+from dataclasses import fields
+
 import pytest
 
 from nnrp.client import ClientDialPolicy
@@ -657,9 +659,24 @@ def test_websocket_binary_frame_roundtrip_and_batch_decode() -> None:
     batch = decode_websocket_binary_frame_batch(first + second)
 
     assert decoded.header == header
+    assert first[:40].hex() == "4e4e5250010037280100000004000000040000000300000009000000010002006300000000000000"
     assert decoded.metadata == b"meta"
     assert decoded.body == b"body"
     assert [entry.header.message_type for entry in batch] == [MessageType.PROGRESS, MessageType.CACHE_MISS]
+
+
+def test_runtime_frame_header_contains_exactly_the_caller_controlled_wire_fields() -> None:
+    assert [field.name for field in fields(RuntimeFrameHeader)] == [
+        "message_type",
+        "flags",
+        "session_id",
+        "frame_id",
+        "view_id",
+        "route_id",
+        "trace_id",
+        "version_major",
+        "wire_format",
+    ]
 
 
 def test_websocket_binary_frame_rejects_incomplete_inputs() -> None:
@@ -677,7 +694,9 @@ def test_websocket_binary_frame_rejects_incomplete_inputs() -> None:
     with pytest.raises(ValueError, match="incomplete WebSocket binary frame in batch"):
         decode_websocket_binary_frame_batch(frame[:-1])
 
-    assert decode_websocket_binary_frame_batch(frame + frame, limit=1) == [decode_websocket_binary_frame(frame)]
+    assert decode_websocket_binary_frame_batch(frame, limit=1) == [decode_websocket_binary_frame(frame)]
+    with pytest.raises(ValueError, match="contains more than 1 frames"):
+        decode_websocket_binary_frame_batch(frame + frame, limit=1)
 
 
 def test_websocket_binary_frame_rejects_text_frames_and_non_contiguous_views() -> None:

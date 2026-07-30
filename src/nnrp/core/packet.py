@@ -46,6 +46,13 @@ from nnrp.core.messages.data import (
     TileIndexMode,
     TypedPayloadDescriptor,
 )
+from nnrp.schema import (
+    TOKEN_DELTA_SCHEMA_ID,
+    TOKEN_DELTA_SCHEMA_VERSION,
+    StandardProfile,
+    StreamSemantics,
+    TypedPayloadDescriptorFlags,
+)
 
 LENGTH_ENTRY_STRUCT = struct.Struct("<I")
 TILE_ID_ENTRY_STRUCT = struct.Struct("<H")
@@ -500,7 +507,10 @@ class TypedPayloadFrame:
     payload_kind: PayloadKind
     payload: bytes
     profile_id: int = 0
-    descriptor_flags: int = 0
+    descriptor_flags: TypedPayloadDescriptorFlags = TypedPayloadDescriptorFlags.NONE
+    schema_id: int = 0
+    schema_version: int = 0
+    stream_semantics: int = int(StreamSemantics.UNSPECIFIED)
 
 
 @dataclass(frozen=True, slots=True)
@@ -745,23 +755,36 @@ def build_typed_payload_frame(
     payload: bytes,
     *,
     profile_id: int = 0,
-    descriptor_flags: int = 0,
+    descriptor_flags: TypedPayloadDescriptorFlags | int = TypedPayloadDescriptorFlags.NONE,
+    schema_id: int = 0,
+    schema_version: int = 0,
+    stream_semantics: StreamSemantics | int = StreamSemantics.UNSPECIFIED,
 ) -> TypedPayloadFrame:
     body = bytes(payload)
-    descriptor = TypedPayloadDescriptor(
-        payload_kind=payload_kind,
-        descriptor_flags=descriptor_flags,
-        profile_id=profile_id,
-        payload_offset=0,
-        payload_length=len(body),
-    )
-    if descriptor.payload_kind is PayloadKind.TENSOR:
+    normalized_kind = PayloadKind(payload_kind)
+    raw_kind = int(normalized_kind)
+    if raw_kind == 0 or raw_kind & (raw_kind - 1):
+        raise ValueError(f"payload_kind must contain exactly one current payload kind bit, got 0x{raw_kind:08x}")
+    if normalized_kind is PayloadKind.TENSOR:
         raise ValueError("tensor payloads must be encoded through tensor body blocks, not typed payload frames")
+    descriptor = TypedPayloadDescriptor(
+        profile_id=profile_id,
+        payload_kind=normalized_kind,
+        descriptor_flags=descriptor_flags,
+        schema_id=schema_id,
+        schema_version=schema_version,
+        stream_semantics=stream_semantics,
+        offset=0,
+        length=len(body),
+    )
     return TypedPayloadFrame(
-        payload_kind=descriptor.payload_kind,
+        payload_kind=normalized_kind,
         payload=body,
         profile_id=descriptor.profile_id,
-        descriptor_flags=descriptor.descriptor_flags,
+        descriptor_flags=TypedPayloadDescriptorFlags(descriptor.descriptor_flags),
+        schema_id=descriptor.schema_id,
+        schema_version=descriptor.schema_version,
+        stream_semantics=descriptor.stream_semantics,
     )
 
 
@@ -775,22 +798,27 @@ def parse_typed_payload_frame(
         frame.payload,
         profile_id=frame.profile_id,
         descriptor_flags=frame.descriptor_flags,
+        schema_id=frame.schema_id,
+        schema_version=frame.schema_version,
+        stream_semantics=frame.stream_semantics,
     )
     if expected_kind is not None:
-        expected = TypedPayloadDescriptor(
-            payload_kind=expected_kind,
-            descriptor_flags=0,
-            profile_id=0,
-            payload_offset=0,
-            payload_length=0,
-        ).payload_kind
+        expected = PayloadKind(expected_kind)
         if normalized.payload_kind is not expected:
             raise ValueError(f"expected {expected.name} typed payload frame, got {normalized.payload_kind.name}")
     return normalized
 
 
-def build_token_chunk_frame(payload: bytes, *, profile_id: int = 0) -> TypedPayloadFrame:
-    return build_typed_payload_frame(PayloadKind.TOKEN_CHUNK, payload, profile_id=profile_id)
+def build_token_chunk_frame(payload: bytes, *, profile_id: int = int(StandardProfile.TOKEN)) -> TypedPayloadFrame:
+    return build_typed_payload_frame(
+        PayloadKind.TOKEN_CHUNK,
+        payload,
+        profile_id=profile_id,
+        descriptor_flags=TypedPayloadDescriptorFlags.PARTIAL,
+        schema_id=TOKEN_DELTA_SCHEMA_ID,
+        schema_version=TOKEN_DELTA_SCHEMA_VERSION,
+        stream_semantics=StreamSemantics.APPEND,
+    )
 
 
 def build_audio_chunk_frame(payload: bytes, *, profile_id: int = 0) -> TypedPayloadFrame:
@@ -871,14 +899,20 @@ def pack_typed_payload_frames(
             frame.payload,
             profile_id=frame.profile_id,
             descriptor_flags=frame.descriptor_flags,
+            schema_id=frame.schema_id,
+            schema_version=frame.schema_version,
+            stream_semantics=frame.stream_semantics,
         )
         descriptors.append(
             TypedPayloadDescriptor(
+                profile_id=normalized.profile_id,
                 payload_kind=normalized.payload_kind,
                 descriptor_flags=normalized.descriptor_flags,
-                profile_id=normalized.profile_id,
-                payload_offset=payload_offset,
-                payload_length=len(normalized.payload),
+                schema_id=normalized.schema_id,
+                schema_version=normalized.schema_version,
+                stream_semantics=normalized.stream_semantics,
+                offset=payload_offset,
+                length=len(normalized.payload),
             )
         )
         payload_region.extend(normalized.payload)
@@ -890,6 +924,8 @@ def pack_typed_payload_frames(
 def unpack_typed_payload_frames(
     descriptor_region: bytes | memoryview,
     payload_region: bytes | memoryview,
+    *,
+    payload_kind_bitmap: PayloadKind | int,
 ) -> tuple[TypedPayloadFrame, ...]:
     descriptors = unpack_typed_payload_descriptors(descriptor_region)
     payload_view = memoryview(payload_region)
@@ -898,14 +934,16 @@ def unpack_typed_payload_frames(
         payload_region_length=len(payload_view),
         label="typed payload frame region",
     )
+    _validate_typed_payload_kind_union(PayloadKind(payload_kind_bitmap), descriptors)
     return tuple(
         TypedPayloadFrame(
             payload_kind=descriptor.payload_kind,
-            payload=bytes(
-                payload_view[descriptor.payload_offset : descriptor.payload_offset + descriptor.payload_length]
-            ),
+            payload=bytes(payload_view[descriptor.offset : descriptor.offset + descriptor.length]),
             profile_id=descriptor.profile_id,
-            descriptor_flags=descriptor.descriptor_flags,
+            descriptor_flags=TypedPayloadDescriptorFlags(descriptor.descriptor_flags),
+            schema_id=descriptor.schema_id,
+            schema_version=descriptor.schema_version,
+            stream_semantics=descriptor.stream_semantics,
         )
         for descriptor in descriptors
     )
@@ -1105,6 +1143,29 @@ def unpack_body(body: bytes | memoryview) -> BodyView:
     )
 
 
+def unpack_current_tensor_body(
+    body: BodyView,
+    *,
+    section_count: int,
+    tile_count: int,
+) -> TensorBodyView:
+    blocks = {block.header.object_kind: block for block in unpack_inline_object_blocks(body.inline_object_region)}
+    tile_index = blocks.get(CacheObjectKind.TILE_INDEX_BLOCK)
+    section_table = blocks.get(CacheObjectKind.TENSOR_SECTION_TABLE)
+    sections = ()
+    if section_table is not None:
+        sections = unpack_tensor_body(
+            section_table.payload,
+            tile_index_bytes=0,
+            section_count=section_count,
+            tile_count=tile_count,
+        ).sections
+    return TensorBodyView(
+        tile_index_block=tile_index.payload if tile_index is not None else memoryview(b""),
+        sections=sections,
+    )
+
+
 def _split_inline_object_region(payload: bytes | memoryview) -> tuple[memoryview, ...]:
     view = memoryview(payload)
     cursor = 0
@@ -1234,11 +1295,11 @@ def _validate_body_metadata_contract(
             f"{body_view.prelude.typed_payload_frame_bytes}"
         )
     for descriptor in descriptors:
-        if not (payload_kind_bitmap & descriptor.payload_kind):
-            raise ValueError(
-                "typed payload descriptor kind is not declared by payload_kind_bitmap: "
-                f"{descriptor.payload_kind.name} not in 0x{int(payload_kind_bitmap):08x}"
-            )
+        if descriptor.payload_kind == PayloadKind.TENSOR:
+            raise ValueError("tensor payloads must use tensor body blocks, not typed payload descriptors")
+        if descriptor.profile_id == int(StandardProfile.TENSOR):
+            raise ValueError("tensor payloads must use tensor body blocks, not typed payload descriptors")
+    _validate_typed_payload_kind_union(payload_kind_bitmap, descriptors)
 
 
 def _validate_frame_submit_object_contract(
@@ -1423,8 +1484,12 @@ def _validate_descriptor_offsets(
 ) -> None:
     previous_end = -1
     for descriptor in descriptors:
-        start = descriptor.payload_offset
-        end = descriptor.payload_offset + descriptor.payload_length
+        if isinstance(descriptor, TypedPayloadDescriptor):
+            start = descriptor.offset
+            end = descriptor.offset + descriptor.length
+        else:
+            start = descriptor.payload_offset
+            end = descriptor.payload_offset + descriptor.payload_length
         if start < previous_end:
             raise ValueError(
                 f"{label} descriptors must be ordered by non-overlapping ascending offsets: {start} < {previous_end}"
@@ -1432,6 +1497,21 @@ def _validate_descriptor_offsets(
         if end > payload_region_length:
             raise ValueError(f"{label} is shorter than descriptor table requires: {end} > {payload_region_length}")
         previous_end = end
+
+
+def _validate_typed_payload_kind_union(
+    payload_kind_bitmap: PayloadKind,
+    descriptors: Sequence[TypedPayloadDescriptor],
+) -> None:
+    descriptor_union = PayloadKind.NONE
+    for descriptor in descriptors:
+        descriptor_union |= descriptor.payload_kind
+    expected_union = payload_kind_bitmap & ~PayloadKind.TENSOR
+    if descriptor_union != expected_union:
+        raise ValueError(
+            "payload_kind_bitmap non-tensor bits must equal the typed descriptor kind union: "
+            f"0x{int(expected_union):08x} != 0x{int(descriptor_union):08x}"
+        )
 
 
 def unpack_tile_index_block(
@@ -1594,12 +1674,13 @@ def build_frame_submit_packet(
         section_payloads = _pack_section_sequence(sections, tile_count=len(tile_ids))
         tile_index_block = pack_tile_index_block(tile_ids, mode=tile_index_mode, tile_base_id=tile_base_id)
         if submit_mode is SubmitMode.INLINE:
-            body = bytearray(camera_block)
-            _append_zero_padding(body)
-            body.extend(tile_index_block)
-            for section_payload in section_payloads:
-                _append_zero_padding(body)
-                body.extend(section_payload)
+            inline_object_region = _build_submit_inline_object_region(
+                camera_block=camera_block,
+                tile_index_payload=tile_index_block,
+                section_payloads=section_payloads,
+                has_tile_ids=bool(tile_ids),
+            )
+            body = bytearray(pack_body(inline_object_region=inline_object_region))
             inline_camera_bytes = len(camera_block)
             inline_tile_index_bytes = len(tile_index_block)
         else:
@@ -1641,7 +1722,7 @@ def build_frame_submit_packet(
             )
         section_payloads = ()
         tile_index_block = b""
-        body = bytearray()
+        body = bytearray(pack_body())
         inline_camera_bytes = 0
         inline_tile_index_bytes = 0
     if submit_mode is not SubmitMode.INLINE and object_ref_mask != provided_reference_mask:
@@ -1675,7 +1756,7 @@ def build_frame_submit_packet(
         payload_kind_bitmap=payload_kind_bitmap,
         payload_frame_count=payload_frame_count,
     )
-    if submit_mode is not SubmitMode.INLINE and tensor_enabled:
+    if tensor_enabled:
         validate_frame_submit_body(metadata, body)
 
     return NnrpPacket.build(
@@ -1809,10 +1890,13 @@ def build_result_push_packet(
                 "covered_tile_count + dropped_tile_count must equal tile_count: "
                 f"{resolved_covered_tile_count} + {dropped_tile_count} != {len(tile_ids)}"
             )
-        body = bytearray(tile_index_block)
-        for section_payload in section_payloads:
-            _append_zero_padding(body)
-            body.extend(section_payload)
+        body = pack_body(
+            inline_object_region=_build_result_inline_object_region(
+                tile_index_payload=tile_index_block,
+                section_payloads=section_payloads,
+                has_tile_ids=bool(tile_ids),
+            )
+        )
     else:
         if tile_ids:
             raise ValueError("non-tensor RESULT_PUSH current builder does not accept tile_ids")
@@ -1828,7 +1912,7 @@ def build_result_push_packet(
             )
         section_payloads = ()
         tile_index_block = b""
-        body = bytearray()
+        body = pack_body()
     metadata = ResultPushMetadata(
         status_code=status_code,
         result_flags=result_flags,
@@ -1851,6 +1935,7 @@ def build_result_push_packet(
         payload_frame_count=payload_frame_count,
     )
     validate_result_push_tensor_coverage(metadata)
+    validate_result_push_body(metadata, body)
 
     return NnrpPacket.build(
         version_major=version_major,
@@ -1863,7 +1948,7 @@ def build_result_push_packet(
         route_id=route_id,
         trace_id=trace_id,
         metadata=metadata.pack(),
-        body=bytes(body),
+        body=body,
     )
 
 

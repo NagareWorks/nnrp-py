@@ -72,6 +72,7 @@ from nnrp.core import (
     parse_video_chunk_frame,
     unpack_extension_frames,
     unpack_inline_object_block,
+    unpack_inline_object_blocks,
     unpack_object_reference_blocks,
     unpack_tensor_body,
     unpack_tile_index_block,
@@ -274,16 +275,27 @@ def test_inline_object_block_roundtrip_and_padding_validation() -> None:
 
 def test_typed_payload_frame_helpers_roundtrip_and_expected_kind_validation() -> None:
     frames = (
-        build_token_chunk_frame(b"tok", profile_id=1),
-        build_audio_chunk_frame(b"aud", profile_id=2),
-        build_video_chunk_frame(b"vid", profile_id=3),
-        build_structured_event_frame(b'{"phase":"run"}', profile_id=4),
-        build_tool_delta_frame(b'{"delta":1}', profile_id=5),
-        build_opaque_bytes_frame(b"bin", profile_id=6),
+        build_token_chunk_frame(b"tok"),
+        build_audio_chunk_frame(b"aud", profile_id=0x104),
+        build_video_chunk_frame(b"vid", profile_id=0x105),
+        build_structured_event_frame(b'{"phase":"run"}', profile_id=0x106),
+        build_tool_delta_frame(b'{"delta":1}', profile_id=0x107),
+        build_opaque_bytes_frame(b"bin", profile_id=0x108),
     )
 
     descriptors, payload_region = pack_typed_payload_frames(frames)
-    decoded = unpack_typed_payload_frames(descriptors, payload_region)
+    decoded = unpack_typed_payload_frames(
+        descriptors,
+        payload_region,
+        payload_kind_bitmap=(
+            PayloadKind.TOKEN_CHUNK
+            | PayloadKind.AUDIO_CHUNK
+            | PayloadKind.VIDEO_CHUNK
+            | PayloadKind.STRUCTURED_EVENT
+            | PayloadKind.TOOL_DELTA
+            | PayloadKind.OPAQUE_BYTES
+        ),
+    )
 
     assert parse_token_chunk_frame(decoded[0]) == frames[0]
     assert parse_audio_chunk_frame(decoded[1]) == frames[1]
@@ -336,6 +348,7 @@ def test_frame_submit_typed_payload_packet_validates_current_body_contract() -> 
     typed_frames = unpack_typed_payload_frames(
         body_view.typed_payload_descriptor_region,
         body_view.typed_payload_frame_region,
+        payload_kind_bitmap=metadata.payload_kind_bitmap,
     )
 
     assert metadata.tile_count == 0
@@ -372,6 +385,7 @@ def test_frame_submit_mixed_packet_validates_tensor_and_typed_regions() -> None:
     typed_frames = unpack_typed_payload_frames(
         body_view.typed_payload_descriptor_region,
         body_view.typed_payload_frame_region,
+        payload_kind_bitmap=metadata.payload_kind_bitmap,
     )
 
     assert metadata.camera_bytes == len(b"camera!!")
@@ -385,7 +399,22 @@ def test_result_push_typed_payload_packet_validates_non_tensor_current_body_cont
     packet = build_result_push_typed_payload_packet(
         session_id=7,
         frame_id=703,
-        frames=(build_structured_event_frame(b'{"state":"ok"}'), build_tool_delta_frame(b'{"step":2}')),
+        frames=(
+            build_typed_payload_frame(
+                PayloadKind.STRUCTURED_EVENT,
+                b'{"state":"ok"}',
+                profile_id=0x0103,
+                schema_id=0x2001,
+                schema_version=1,
+            ),
+            build_typed_payload_frame(
+                PayloadKind.TOOL_DELTA,
+                b'{"step":2}',
+                profile_id=0x0103,
+                schema_id=0x2002,
+                schema_version=1,
+            ),
+        ),
     )
 
     metadata = ResultPushMetadata.unpack(packet.metadata)
@@ -393,6 +422,7 @@ def test_result_push_typed_payload_packet_validates_non_tensor_current_body_cont
     typed_frames = unpack_typed_payload_frames(
         body_view.typed_payload_descriptor_region,
         body_view.typed_payload_frame_region,
+        payload_kind_bitmap=metadata.payload_kind_bitmap,
     )
 
     assert metadata.tile_count == 0
@@ -424,6 +454,7 @@ def test_result_push_mixed_packet_validates_tensor_and_typed_regions() -> None:
     typed_frames = unpack_typed_payload_frames(
         body_view.typed_payload_descriptor_region,
         body_view.typed_payload_frame_region,
+        payload_kind_bitmap=metadata.payload_kind_bitmap,
     )
 
     assert metadata.tile_count == 2
@@ -631,9 +662,15 @@ def test_build_result_push_packet_assembles_body() -> None:
     )
 
     metadata = ResultPushMetadata.unpack(packet.metadata)
+    body = validate_result_push_body(metadata, packet.body)
+    section_block = next(
+        block
+        for block in unpack_inline_object_blocks(body.inline_object_region)
+        if block.header.object_kind is CacheObjectKind.TENSOR_SECTION_TABLE
+    )
     tensor_body = unpack_tensor_body(
-        packet.body,
-        tile_index_bytes=metadata.tile_index_bytes,
+        section_block.payload,
+        tile_index_bytes=0,
         section_count=metadata.section_count,
         tile_count=metadata.tile_count,
     )

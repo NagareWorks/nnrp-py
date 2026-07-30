@@ -17,8 +17,33 @@ from nnrp import (
     token_delta_payload_descriptor,
     token_delta_schema_descriptor,
 )
+from nnrp.client import SubmitRequest
 from nnrp.core import MessageType
+from nnrp.runtime import (
+    InFlightPolicy,
+    NativeRuntimeEvent,
+    RuntimeEventMetadata,
+    RuntimeEventMetadataKind,
+    RuntimeEventTail,
+    RuntimeFrameHeader,
+    SessionCloseMetadata,
+    SessionCloseReason,
+)
 from nnrp.tools.benchmark import build_benchmark_results_report, main, write_benchmark_results
+
+
+def _runtime_event(
+    message_type: MessageType,
+    metadata_kind: RuntimeEventMetadataKind,
+    metadata: object,
+    *,
+    body: bytes = b"",
+) -> NativeRuntimeEvent:
+    return NativeRuntimeEvent(
+        RuntimeFrameHeader(message_type),
+        RuntimeEventMetadata(metadata_kind, metadata),
+        RuntimeEventTail.with_body(body) if body else RuntimeEventTail.none(),
+    )
 
 
 def _plan_document() -> dict[str, object]:
@@ -546,7 +571,13 @@ def test_close_native_role_sessions_completes_session_close_handshake() -> None:
             assert timeout_ms == 5_000
             assert close_started.wait(timeout=1)
             calls.append("server-receive-close")
-            return (SimpleNamespace(kind=benchmark.EVENT_KIND_SESSION_CLOSED),)
+            return (
+                _runtime_event(
+                    MessageType.SESSION_CLOSE,
+                    RuntimeEventMetadataKind.SESSION_CLOSE,
+                    SessionCloseMetadata(SessionCloseReason.NORMAL, InFlightPolicy.DRAIN, 0, 0, 0, 0),
+                ),
+            )
 
         def close(self) -> None:
             calls.append("server-close")
@@ -591,9 +622,7 @@ def test_benchmark_environment_records_release_candidate_identity(monkeypatch: p
 
     assert environment["sdk_commit"] == "0123456789abcdef"
     assert environment["nnrp_rs_artifact"] == "1.0.0-preview.4.17"
-    assert environment["notes"].startswith(
-        "candidate_wheel=nnrp_py-1.0.0rc4.post9-py3-none-linux.whl; sdk_version="
-    )
+    assert environment["notes"].startswith("candidate_wheel=nnrp_py-1.0.0rc4.post9-py3-none-linux.whl; sdk_version=")
 
 
 def test_build_benchmark_results_report_measures_native_scenarios_when_artifacts_are_available(
@@ -978,16 +1007,11 @@ class FakeNativeSession:
 
     def submit_operation(
         self,
-        *,
-        operation_id: int,
-        frame_id: int,
-        metadata=None,
-        body: bytes | bytearray | memoryview = b"",
+        request: SubmitRequest,
     ) -> "FakeNativeOperation":
-        del metadata
-        self.entrypoints.client_submit(operation_id, frame_id, body)
-        operation = FakeNativeOperation(self, operation_id, frame_id, bytes(body))
-        self.connection.submitted_payloads.append(bytes(body))
+        self.entrypoints.client_submit(request.operation_id, request.frame_id, request.body)
+        operation = FakeNativeOperation(self, request.operation_id, request.frame_id, request.body)
+        self.connection.submitted_payloads.append(request.body)
         assert self.connection.server_session is not None
         self.connection.server_session.pending_submits.append(operation)
         return operation
@@ -1059,11 +1083,25 @@ class FakeNativeServerSession:
 
     def send_progress(self, metadata, body=b"") -> None:
         self.entrypoints.runtime_frame_send(MessageType.PROGRESS, metadata, body)
-        self.connection.runtime_events.append(SimpleNamespace(message_type=int(MessageType.PROGRESS)))
+        self.connection.runtime_events.append(
+            _runtime_event(
+                MessageType.PROGRESS,
+                RuntimeEventMetadataKind.PROGRESS,
+                metadata,
+                body=bytes(body),
+            )
+        )
 
     def send_partial_result(self, metadata, body=b"") -> None:
         self.entrypoints.runtime_frame_send(MessageType.PARTIAL_RESULT, metadata, body)
-        self.connection.runtime_events.append(SimpleNamespace(message_type=int(MessageType.PARTIAL_RESULT)))
+        self.connection.runtime_events.append(
+            _runtime_event(
+                MessageType.PARTIAL_RESULT,
+                RuntimeEventMetadataKind.PARTIAL_RESULT,
+                metadata,
+                body=bytes(body),
+            )
+        )
 
 
 class FakeNativeObjectMetadataBuffer:

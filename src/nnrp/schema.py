@@ -1,4 +1,4 @@
-"""Preview3 schema/profile registry descriptors.
+"""Current schema/profile registry descriptors.
 
 This module exposes host-friendly views of the frozen public descriptor fields.
 It deliberately does not decode profile-private payload bodies; Rust remains the
@@ -12,8 +12,10 @@ from dataclasses import dataclass
 from enum import IntEnum, IntFlag
 from typing import Protocol
 
+from nnrp.core.enums import PayloadKind
+
 SCHEMA_DESCRIPTOR_HEADER_LENGTH = 32
-TYPED_PAYLOAD_DESCRIPTOR_V3_LENGTH = 24
+TYPED_PAYLOAD_DESCRIPTOR_LENGTH = 24
 SCHEMA_FLAGS_KNOWN_MASK = 0x000F
 DESCRIPTOR_FLAGS_KNOWN_MASK = 0x000F
 TOKEN_DELTA_SCHEMA_ID = 0x0000_1001
@@ -21,7 +23,7 @@ TOKEN_DELTA_SCHEMA_VERSION = 3
 TOKEN_DELTA_SCHEMA_HASH = 0x6E6E_7270_746F_6B33
 
 _SCHEMA_DESCRIPTOR_HEADER_STRUCT = struct.Struct("<IIHHBBHIHHQ")
-_TYPED_PAYLOAD_DESCRIPTOR_STRUCT = struct.Struct("<HHIIHHII")
+_TYPED_PAYLOAD_DESCRIPTOR_STRUCT = struct.Struct("<HBBIIHHII")
 
 
 class StandardProfile(IntEnum):
@@ -77,16 +79,16 @@ class SchemaCodec(Protocol):
     def parse_typed_payload_descriptor(
         self,
         payload: bytes | bytearray | memoryview,
-    ) -> Preview3TypedPayloadDescriptor:
+    ) -> TypedPayloadDescriptor:
         ...
 
-    def write_typed_payload_descriptor(self, descriptor: Preview3TypedPayloadDescriptor) -> bytes:
+    def write_typed_payload_descriptor(self, descriptor: TypedPayloadDescriptor) -> bytes:
         ...
 
     def validate_typed_payload_binding(
         self,
         schemas: tuple[SchemaDescriptorHeader, ...],
-        descriptor: Preview3TypedPayloadDescriptor,
+        descriptor: TypedPayloadDescriptor,
     ) -> None:
         ...
 
@@ -252,8 +254,9 @@ class SchemaRegistryCatalog:
 
 
 @dataclass(frozen=True, slots=True)
-class Preview3TypedPayloadDescriptor:
+class TypedPayloadDescriptor:
     profile_id: int | StandardProfile
+    payload_kind: PayloadKind
     descriptor_flags: int | TypedPayloadDescriptorFlags
     schema_id: int
     schema_version: int
@@ -263,6 +266,7 @@ class Preview3TypedPayloadDescriptor:
 
     def __post_init__(self) -> None:
         _validate_u16("profile_id", int(self.profile_id))
+        _validate_single_payload_kind(self.payload_kind)
         _validate_mask("descriptor_flags", int(self.descriptor_flags), DESCRIPTOR_FLAGS_KNOWN_MASK)
         _validate_u32("schema_id", self.schema_id)
         _validate_u32("schema_version", self.schema_version)
@@ -279,12 +283,13 @@ class Preview3TypedPayloadDescriptor:
         return bool(int(self.descriptor_flags) & int(TypedPayloadDescriptorFlags.PARTIAL))
 
     @classmethod
-    def unpack(cls, payload: bytes | bytearray | memoryview) -> Preview3TypedPayloadDescriptor:
+    def unpack(cls, payload: bytes | bytearray | memoryview) -> TypedPayloadDescriptor:
         data = bytes(payload)
-        if len(data) != TYPED_PAYLOAD_DESCRIPTOR_V3_LENGTH:
-            raise ValueError(f"expected {TYPED_PAYLOAD_DESCRIPTOR_V3_LENGTH} bytes, got {len(data)}")
+        if len(data) != TYPED_PAYLOAD_DESCRIPTOR_LENGTH:
+            raise ValueError(f"expected {TYPED_PAYLOAD_DESCRIPTOR_LENGTH} bytes, got {len(data)}")
         (
             profile_id,
+            payload_kind,
             descriptor_flags,
             schema_id,
             schema_version,
@@ -297,6 +302,7 @@ class Preview3TypedPayloadDescriptor:
             raise ValueError("typed payload descriptor reserved0 must be 0")
         return cls(
             profile_id=profile_id,
+            payload_kind=PayloadKind(payload_kind),
             descriptor_flags=descriptor_flags,
             schema_id=schema_id,
             schema_version=schema_version,
@@ -308,6 +314,7 @@ class Preview3TypedPayloadDescriptor:
     def pack(self) -> bytes:
         return _TYPED_PAYLOAD_DESCRIPTOR_STRUCT.pack(
             int(self.profile_id),
+            int(self.payload_kind),
             int(self.descriptor_flags),
             self.schema_id,
             self.schema_version,
@@ -334,14 +341,15 @@ def token_delta_payload_descriptor(
     length: int,
     terminal: bool = False,
     partial: bool = True,
-) -> Preview3TypedPayloadDescriptor:
+) -> TypedPayloadDescriptor:
     flags = TypedPayloadDescriptorFlags.NONE
     if terminal:
         flags |= TypedPayloadDescriptorFlags.TERMINAL
     if partial:
         flags |= TypedPayloadDescriptorFlags.PARTIAL
-    return Preview3TypedPayloadDescriptor(
+    return TypedPayloadDescriptor(
         profile_id=StandardProfile.TOKEN,
+        payload_kind=PayloadKind.TOKEN_CHUNK,
         descriptor_flags=flags,
         schema_id=TOKEN_DELTA_SCHEMA_ID,
         schema_version=TOKEN_DELTA_SCHEMA_VERSION,
@@ -359,9 +367,10 @@ def tensor_payload_descriptor(
     offset: int,
     length: int,
     descriptor_flags: int | TypedPayloadDescriptorFlags = TypedPayloadDescriptorFlags.NONE,
-) -> Preview3TypedPayloadDescriptor:
-    return Preview3TypedPayloadDescriptor(
+) -> TypedPayloadDescriptor:
+    return TypedPayloadDescriptor(
         profile_id=StandardProfile.TENSOR,
+        payload_kind=PayloadKind.TENSOR,
         descriptor_flags=descriptor_flags,
         schema_id=schema_id,
         schema_version=schema_version,
@@ -377,9 +386,11 @@ def unspecified_payload_descriptor(
     length: int,
     schema_id: int = 0,
     schema_version: int = 0,
-) -> Preview3TypedPayloadDescriptor:
-    return Preview3TypedPayloadDescriptor(
+    payload_kind: PayloadKind = PayloadKind.OPAQUE_BYTES,
+) -> TypedPayloadDescriptor:
+    return TypedPayloadDescriptor(
         profile_id=StandardProfile.UNSPECIFIED,
+        payload_kind=payload_kind,
         descriptor_flags=TypedPayloadDescriptorFlags.NONE,
         schema_id=schema_id,
         schema_version=schema_version,
@@ -410,7 +421,7 @@ def unpack_schema_descriptor(
 
 
 def pack_typed_payload_descriptor(
-    descriptor: Preview3TypedPayloadDescriptor,
+    descriptor: TypedPayloadDescriptor,
     *,
     codec: SchemaCodec | None = None,
 ) -> bytes:
@@ -423,15 +434,15 @@ def unpack_typed_payload_descriptor(
     payload: bytes | bytearray | memoryview,
     *,
     codec: SchemaCodec | None = None,
-) -> Preview3TypedPayloadDescriptor:
+) -> TypedPayloadDescriptor:
     if codec is not None:
         return codec.parse_typed_payload_descriptor(payload)
-    return Preview3TypedPayloadDescriptor.unpack(payload)
+    return TypedPayloadDescriptor.unpack(payload)
 
 
 def validate_typed_payload_binding(
     schemas: tuple[SchemaDescriptorHeader, ...],
-    descriptor: Preview3TypedPayloadDescriptor,
+    descriptor: TypedPayloadDescriptor,
     *,
     codec: SchemaCodec | None = None,
 ) -> None:
@@ -457,6 +468,12 @@ def _validate_mask(name: str, value: int, known_mask: int) -> None:
     unknown_bits = value & ~known_mask
     if unknown_bits:
         raise ValueError(f"{name} contains unknown bits: 0x{unknown_bits:04x}")
+
+
+def _validate_single_payload_kind(value: PayloadKind | int) -> None:
+    raw_value = int(PayloadKind(value))
+    if raw_value == 0 or raw_value & (raw_value - 1):
+        raise ValueError(f"payload_kind must contain exactly one current payload kind bit, got 0x{raw_value:08x}")
 
 
 def _validate_u8(name: str, value: int) -> None:
@@ -486,8 +503,8 @@ __all__ = [
     "TOKEN_DELTA_SCHEMA_HASH",
     "TOKEN_DELTA_SCHEMA_ID",
     "TOKEN_DELTA_SCHEMA_VERSION",
-    "TYPED_PAYLOAD_DESCRIPTOR_V3_LENGTH",
-    "Preview3TypedPayloadDescriptor",
+    "TYPED_PAYLOAD_DESCRIPTOR_LENGTH",
+    "TypedPayloadDescriptor",
     "SchemaDescriptorFlags",
     "SchemaDescriptorHeader",
     "SchemaCodec",

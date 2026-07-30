@@ -14,7 +14,9 @@ from nnrp.runtime.types import (
     DecodedRuntimeControlMetadata,
     DecodedRuntimeFrame,
     DecodedRuntimeObjectMetadata,
+    InFlightPolicy,
     MemoryLocationHint,
+    NativeRuntimeEvent,
     ObjectDeltaMetadata,
     ObjectDescriptorMetadata,
     ObjectReferenceMetadata,
@@ -29,10 +31,16 @@ from nnrp.runtime.types import (
     ResultDropReasonMetadata,
     RetryAfterMetadata,
     RouteHintMetadata,
+    RuntimeEventMetadata,
+    RuntimeEventMetadataKind,
+    RuntimeEventTail,
+    RuntimeEventTailKind,
     RuntimeFrameHeader,
     RuntimeObjectKind,
     RuntimeRole,
     SchedulingMetadata,
+    SessionCloseMetadata,
+    SessionCloseReason,
     SupersedeMetadata,
     TraceContextMetadata,
     _FixedRuntimeMetadata,
@@ -253,7 +261,9 @@ def decode_websocket_binary_frame_batch(
     batch_bytes = _require_websocket_binary_payload("batch", batch)
     frames: list[DecodedRuntimeFrame] = []
     cursor = 0
-    while cursor < len(batch_bytes) and (limit == 0 or len(frames) < limit):
+    while cursor < len(batch_bytes):
+        if limit != 0 and len(frames) >= limit:
+            raise ValueError(f"WebSocket batch contains more than {limit} frames")
         if len(batch_bytes) - cursor < HEADER_LENGTH:
             raise ValueError("incomplete WebSocket binary frame in batch")
         header = NnrpHeader.unpack(batch_bytes[cursor : cursor + HEADER_LENGTH])
@@ -324,7 +334,6 @@ def _runtime_frame_header_from_header(header: NnrpHeader) -> RuntimeFrameHeader:
         message_type=header.msg_type,
         flags=header.flags,
         session_id=header.session_id,
-        generation=0,
         frame_id=header.frame_id,
         view_id=header.view_id,
         route_id=header.route_id,
@@ -365,6 +374,7 @@ __all__ = [
     "DecodedRuntimeFrame",
     "DecodedRuntimeObjectMetadata",
     "MemoryLocationHint",
+    "InFlightPolicy",
     "ObjectDeltaMetadata",
     "ObjectDescriptorMetadata",
     "ObjectReferenceMetadata",
@@ -379,9 +389,16 @@ __all__ = [
     "ResultDropReasonMetadata",
     "RetryAfterMetadata",
     "RouteHintMetadata",
+    "RuntimeEventMetadata",
+    "RuntimeEventMetadataKind",
+    "RuntimeEventTail",
+    "RuntimeEventTailKind",
     "RuntimeFrameHeader",
+    "NativeRuntimeEvent",
     "RuntimeObjectKind",
     "RuntimeRole",
+    "SessionCloseMetadata",
+    "SessionCloseReason",
     "SchedulingMetadata",
     "SupersedeMetadata",
     "TraceContextMetadata",

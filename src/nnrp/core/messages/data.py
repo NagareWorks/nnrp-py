@@ -8,6 +8,8 @@ from enum import IntEnum, IntFlag
 from typing import ClassVar, TypeVar
 
 from nnrp.core.messages.control import CacheObjectKind, LossTolerance, PayloadKind
+from nnrp.schema import TYPED_PAYLOAD_DESCRIPTOR_LENGTH
+from nnrp.schema import TypedPayloadDescriptor as TypedPayloadDescriptor
 
 
 class InputProfile(IntEnum):
@@ -109,7 +111,6 @@ RESULT_PUSH_STRUCT = struct.Struct("<HHHHHHHHHHIIQQBBHIHHIHH")
 BODY_REGION_PRELUDE_STRUCT = struct.Struct("<IIIIIIII")
 INLINE_OBJECT_BLOCK_HEADER_STRUCT = struct.Struct("<HHHHII")
 OBJECT_REFERENCE_BLOCK_STRUCT = struct.Struct("<HHIQQ")
-TYPED_PAYLOAD_DESCRIPTOR_STRUCT = struct.Struct("<BBHIII")
 EXTENSION_FRAME_DESCRIPTOR_STRUCT = struct.Struct("<HHHHII")
 TENSOR_SECTION_DESC_STRUCT = struct.Struct("<HBBBBHIIIII I")
 
@@ -118,7 +119,6 @@ RESULT_PUSH_METADATA_LENGTH = RESULT_PUSH_STRUCT.size
 BODY_REGION_PRELUDE_LENGTH = BODY_REGION_PRELUDE_STRUCT.size
 INLINE_OBJECT_BLOCK_HEADER_LENGTH = INLINE_OBJECT_BLOCK_HEADER_STRUCT.size
 OBJECT_REFERENCE_BLOCK_LENGTH = OBJECT_REFERENCE_BLOCK_STRUCT.size
-TYPED_PAYLOAD_DESCRIPTOR_LENGTH = TYPED_PAYLOAD_DESCRIPTOR_STRUCT.size
 EXTENSION_FRAME_DESCRIPTOR_LENGTH = EXTENSION_FRAME_DESCRIPTOR_STRUCT.size
 TENSOR_SECTION_DESC_LENGTH = TENSOR_SECTION_DESC_STRUCT.size
 
@@ -359,56 +359,6 @@ class ObjectReferenceBlock(_FixedWidthMetadata):
             cache_namespace=cache_namespace,
             cache_key_hi=cache_key_hi,
             cache_key_lo=cache_key_lo,
-        )
-
-
-@dataclass(slots=True)
-class TypedPayloadDescriptor(_FixedWidthMetadata):
-    """Fixed-width descriptor for one logical typed payload frame."""
-
-    STRUCT: ClassVar[struct.Struct] = TYPED_PAYLOAD_DESCRIPTOR_STRUCT
-
-    payload_kind: PayloadKind
-    descriptor_flags: int
-    profile_id: int
-    payload_offset: int
-    payload_length: int
-    reserved: int = 0
-
-    def __post_init__(self) -> None:
-        self.payload_kind = _coerce_single_payload_kind(self.payload_kind)
-        if self.descriptor_flags != 0:
-            raise ValueError("descriptor_flags must be 0 in current typed payload descriptors")
-        if self.reserved != 0:
-            raise ValueError("reserved must be 0 in current typed payload descriptors")
-
-    def pack(self) -> bytes:
-        return self.STRUCT.pack(
-            int(self.payload_kind),
-            self.descriptor_flags,
-            self.profile_id,
-            self.payload_offset,
-            self.payload_length,
-            self.reserved,
-        )
-
-    @classmethod
-    def _from_tuple(cls, values: tuple[int, ...]) -> TypedPayloadDescriptor:
-        (
-            payload_kind,
-            descriptor_flags,
-            profile_id,
-            payload_offset,
-            payload_length,
-            reserved,
-        ) = values
-        return cls(
-            payload_kind=_coerce_single_payload_kind(payload_kind),
-            descriptor_flags=descriptor_flags,
-            profile_id=profile_id,
-            payload_offset=payload_offset,
-            payload_length=payload_length,
-            reserved=reserved,
         )
 
 

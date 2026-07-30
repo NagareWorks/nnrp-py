@@ -26,11 +26,11 @@ from nnrp.client.profile import ClientProfile, resolve_client_hello_transport_po
 from nnrp.core import (
     TENSOR_PROFILE_CACHE_OBJECT_BITMAP,
     BudgetPolicy,
-    CacheObjectKind,
     ClientHelloMetadata,
     ClientHelloTransportPolicyExtension,
     ControlExtensionEntry,
     FlowUpdateMetadata,
+    FrameSubmitMetadata,
     HeaderFlags,
     InputProfile,
     MessageType,
@@ -49,26 +49,24 @@ from nnrp.core import (
     TransportPolicy,
     TypedPayloadFrame,
     WireFormat,
-    build_audio_chunk_frame,
     build_client_hello_transport_policy_extension,
     build_flow_update_packet,
-    build_frame_submit_mixed_packet,
     build_frame_submit_packet,
     build_frame_submit_typed_payload_packet,
-    build_opaque_bytes_frame,
     build_session_migrate_packet,
-    build_structured_event_frame,
-    build_token_chunk_frame,
-    build_tool_delta_frame,
     build_typed_payload_frame,
-    build_video_chunk_frame,
     pack_control_extension_block,
-    unpack_inline_object_blocks,
-    unpack_tensor_body,
+    unpack_current_tensor_body,
     unpack_tile_index_block,
     unpack_typed_payload_frames,
     validate_result_push_body,
-    validate_result_push_tensor_coverage,
+)
+from nnrp.schema import (
+    TOKEN_DELTA_SCHEMA_ID,
+    TOKEN_DELTA_SCHEMA_VERSION,
+    StandardProfile,
+    StreamSemantics,
+    TypedPayloadDescriptorFlags,
 )
 
 _PAYLOAD_KIND_ORDER = (
@@ -302,7 +300,10 @@ class TypedPayload:
     payload_kind: PayloadKind
     payload: bytes
     profile_id: int = 0
-    descriptor_flags: int = 0
+    descriptor_flags: int | TypedPayloadDescriptorFlags = TypedPayloadDescriptorFlags.NONE
+    schema_id: int = 0
+    schema_version: int = 0
+    stream_semantics: int | StreamSemantics = StreamSemantics.UNSPECIFIED
 
     def __post_init__(self) -> None:
         frame = build_typed_payload_frame(
@@ -310,11 +311,17 @@ class TypedPayload:
             self.payload,
             profile_id=self.profile_id,
             descriptor_flags=self.descriptor_flags,
+            schema_id=self.schema_id,
+            schema_version=self.schema_version,
+            stream_semantics=self.stream_semantics,
         )
         object.__setattr__(self, "payload_kind", frame.payload_kind)
         object.__setattr__(self, "payload", frame.payload)
         object.__setattr__(self, "profile_id", frame.profile_id)
         object.__setattr__(self, "descriptor_flags", frame.descriptor_flags)
+        object.__setattr__(self, "schema_id", frame.schema_id)
+        object.__setattr__(self, "schema_version", frame.schema_version)
+        object.__setattr__(self, "stream_semantics", frame.stream_semantics)
 
     @classmethod
     def from_core_frame(cls, frame: TypedPayloadFrame) -> TypedPayload:
@@ -323,15 +330,27 @@ class TypedPayload:
             payload=frame.payload,
             profile_id=frame.profile_id,
             descriptor_flags=frame.descriptor_flags,
+            schema_id=frame.schema_id,
+            schema_version=frame.schema_version,
+            stream_semantics=frame.stream_semantics,
         )
 
     @classmethod
-    def token_chunk(cls, payload: bytes, *, profile_id: int = 0, descriptor_flags: int = 0) -> TypedPayload:
+    def token_chunk(
+        cls,
+        payload: bytes,
+        *,
+        profile_id: int = int(StandardProfile.TOKEN),
+        descriptor_flags: int | TypedPayloadDescriptorFlags = TypedPayloadDescriptorFlags.PARTIAL,
+    ) -> TypedPayload:
         return cls(
             payload_kind=PayloadKind.TOKEN_CHUNK,
             payload=payload,
             profile_id=profile_id,
             descriptor_flags=descriptor_flags,
+            schema_id=TOKEN_DELTA_SCHEMA_ID,
+            schema_version=TOKEN_DELTA_SCHEMA_VERSION,
+            stream_semantics=StreamSemantics.APPEND,
         )
 
     @classmethod
@@ -392,60 +411,236 @@ class TypedPayload:
         )
 
     def to_core_frame(self) -> TypedPayloadFrame:
-        if self.descriptor_flags != 0:
-            raise ValueError("descriptor_flags must be 0 in current typed payload descriptors")
-        builders = {
-            PayloadKind.TOKEN_CHUNK: build_token_chunk_frame,
-            PayloadKind.AUDIO_CHUNK: build_audio_chunk_frame,
-            PayloadKind.VIDEO_CHUNK: build_video_chunk_frame,
-            PayloadKind.STRUCTURED_EVENT: build_structured_event_frame,
-            PayloadKind.TOOL_DELTA: build_tool_delta_frame,
-            PayloadKind.OPAQUE_BYTES: build_opaque_bytes_frame,
-        }
-        builder = builders.get(self.payload_kind)
-        if builder is None:
-            return build_typed_payload_frame(
-                self.payload_kind,
-                self.payload,
-                profile_id=self.profile_id,
-                descriptor_flags=self.descriptor_flags,
-            )
-        return builder(self.payload, profile_id=self.profile_id)
+        return build_typed_payload_frame(
+            self.payload_kind,
+            self.payload,
+            profile_id=self.profile_id,
+            descriptor_flags=self.descriptor_flags,
+            schema_id=self.schema_id,
+            schema_version=self.schema_version,
+            stream_semantics=self.stream_semantics,
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class SubmitHeaderContext:
+    flags: HeaderFlags = HeaderFlags.NONE
+    view_id: int = 0
+    route_id: int = 0
+    trace_id: int = 0
+
+
+@dataclass(frozen=True, slots=True)
+class SubmitIdentity:
+    operation_id: int
+    frame_id: int
+    header: SubmitHeaderContext = field(default_factory=SubmitHeaderContext)
+
+
+@dataclass(frozen=True, slots=True)
+class SubmitPolicy:
+    frame_class: int = 0
+    latency_budget_ms: int = 0
+    target_fps_x100: int = 0
+    retry_of_frame: int = 0
+    budget_policy: BudgetPolicy = BudgetPolicy.NONE
+    loss_tolerance_policy: int = 0xFF
+    dependency_frame_id: int = 0
+
+
+@dataclass(frozen=True, slots=True)
+class SubmitObjectReferences:
+    camera: ObjectReferenceBlock | None = None
+    tile_index: ObjectReferenceBlock | None = None
+    tensor_section_table: ObjectReferenceBlock | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class TensorSubmitInput:
+    identity: SubmitIdentity
+    policy: SubmitPolicy
+    src_width: int
+    src_height: int
+    tile_width: int
+    tile_height: int
+    tile_ids: tuple[int, ...]
+    sections: tuple[TensorSectionData, ...]
+    camera_block: bytes = b""
+    input_profile: InputProfile = InputProfile.UNSPECIFIED
+    tile_index_mode: TileIndexMode = TileIndexMode.RAW_U16
+    tile_base_id: int = 0
+    references: SubmitObjectReferences = field(default_factory=SubmitObjectReferences)
+
+
+@dataclass(frozen=True, slots=True)
+class TokenChunk:
+    payload: bytes
+    descriptor_flags: TypedPayloadDescriptorFlags = TypedPayloadDescriptorFlags.PARTIAL
+
+
+@dataclass(frozen=True, slots=True)
+class TokenSubmitInput:
+    identity: SubmitIdentity
+    policy: SubmitPolicy
+    chunks: tuple[TokenChunk, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class TypedPayloadInputFrame:
+    profile_id: int
+    payload_kind: PayloadKind
+    payload: bytes
+    descriptor_flags: TypedPayloadDescriptorFlags = TypedPayloadDescriptorFlags.NONE
+    schema_id: int = 0
+    schema_version: int = 0
+    stream_semantics: StreamSemantics = StreamSemantics.UNSPECIFIED
+
+    def to_core_frame(self) -> TypedPayloadFrame:
+        return build_typed_payload_frame(
+            self.payload_kind,
+            self.payload,
+            profile_id=self.profile_id,
+            descriptor_flags=self.descriptor_flags,
+            schema_id=self.schema_id,
+            schema_version=self.schema_version,
+            stream_semantics=self.stream_semantics,
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class TypedPayloadSubmitInput:
+    identity: SubmitIdentity
+    policy: SubmitPolicy
+    frames: tuple[TypedPayloadInputFrame, ...]
 
 
 @dataclass(frozen=True, slots=True)
 class SubmitRequest:
-    frame_id: int
     operation_id: int
-    src_width: int = 0
-    src_height: int = 0
-    tile_width: int = 0
-    tile_height: int = 0
-    tile_ids: tuple[int, ...] = ()
-    sections: tuple[TensorSectionData, ...] = ()
-    camera_block: bytes = b""
-    frame_class: int = 0
-    input_profile: InputProfile = InputProfile.UNSPECIFIED
-    tile_index_mode: TileIndexMode = TileIndexMode.RAW_U16
-    latency_budget_ms: int = 0
-    target_fps_x100: int = 0
-    retry_of_frame: int = 0
-    tile_base_id: int = 0
-    submit_mode: SubmitMode = SubmitMode.INLINE
-    object_ref_mask: int = 0
-    camera_reference: ObjectReferenceBlock | None = None
-    tile_index_reference: ObjectReferenceBlock | None = None
-    tensor_section_table_reference: ObjectReferenceBlock | None = None
-    budget_policy: BudgetPolicy = BudgetPolicy.NONE
-    dependency_frame_id: int = 0
-    loss_tolerance_policy: int = 0xFF
-    payload_kind_bitmap: PayloadKind = PayloadKind.TENSOR
-    payload_frame_count: int = 0
-    typed_payloads: tuple[TypedPayload, ...] = ()
-    view_id: int = 0
-    route_id: int = 0
-    trace_id: int = 0
-    flags: HeaderFlags = HeaderFlags.NONE
+    frame_id: int
+    header: SubmitHeaderContext
+    metadata: FrameSubmitMetadata
+    body: bytes
+
+    @classmethod
+    def tensor(cls, value: TensorSubmitInput) -> SubmitRequest:
+        refs = value.references
+        provided_ref_count = sum(
+            reference is not None for reference in (refs.camera, refs.tile_index, refs.tensor_section_table)
+        )
+        inline_count = sum(
+            (
+                bool(value.camera_block) and refs.camera is None,
+                bool(value.tile_ids) and refs.tile_index is None,
+                bool(value.sections) and refs.tensor_section_table is None,
+            )
+        )
+        submit_mode = (
+            SubmitMode.MIXED
+            if provided_ref_count and inline_count
+            else SubmitMode.REFERENCE
+            if provided_ref_count
+            else SubmitMode.INLINE
+        )
+        object_ref_mask = (
+            (1 if refs.camera is not None else 0)
+            | (2 if refs.tile_index is not None else 0)
+            | (4 if refs.tensor_section_table is not None else 0)
+        )
+        packet = build_frame_submit_packet(
+            session_id=0,
+            frame_id=value.identity.frame_id,
+            operation_id=value.identity.operation_id,
+            src_width=value.src_width,
+            src_height=value.src_height,
+            tile_width=value.tile_width,
+            tile_height=value.tile_height,
+            tile_ids=value.tile_ids,
+            sections=value.sections,
+            camera_block=value.camera_block,
+            frame_class=value.policy.frame_class,
+            input_profile=value.input_profile,
+            tile_index_mode=value.tile_index_mode,
+            latency_budget_ms=value.policy.latency_budget_ms,
+            target_fps_x100=value.policy.target_fps_x100,
+            retry_of_frame=value.policy.retry_of_frame,
+            tile_base_id=value.tile_base_id,
+            submit_mode=submit_mode,
+            object_ref_mask=object_ref_mask,
+            camera_reference=refs.camera,
+            tile_index_reference=refs.tile_index,
+            tensor_section_table_reference=refs.tensor_section_table,
+            budget_policy=value.policy.budget_policy,
+            dependency_frame_id=value.policy.dependency_frame_id,
+            loss_tolerance_policy=value.policy.loss_tolerance_policy,
+            flags=value.identity.header.flags,
+            view_id=value.identity.header.view_id,
+            route_id=value.identity.header.route_id,
+            trace_id=value.identity.header.trace_id,
+        )
+        return cls._from_packet(value.identity, packet)
+
+    @classmethod
+    def token(cls, value: TokenSubmitInput) -> SubmitRequest:
+        frames = tuple(
+            build_typed_payload_frame(
+                PayloadKind.TOKEN_CHUNK,
+                chunk.payload,
+                profile_id=int(StandardProfile.TOKEN),
+                descriptor_flags=chunk.descriptor_flags,
+                schema_id=TOKEN_DELTA_SCHEMA_ID,
+                schema_version=TOKEN_DELTA_SCHEMA_VERSION,
+                stream_semantics=StreamSemantics.APPEND,
+            )
+            for chunk in value.chunks
+        )
+        return cls._typed_payload(value.identity, value.policy, frames)
+
+    @classmethod
+    def typed_payload(cls, value: TypedPayloadSubmitInput) -> SubmitRequest:
+        return cls._typed_payload(
+            value.identity,
+            value.policy,
+            tuple(frame.to_core_frame() for frame in value.frames),
+        )
+
+    @classmethod
+    def _typed_payload(
+        cls,
+        identity: SubmitIdentity,
+        policy: SubmitPolicy,
+        frames: tuple[TypedPayloadFrame, ...],
+    ) -> SubmitRequest:
+        packet = build_frame_submit_typed_payload_packet(
+            session_id=0,
+            frame_id=identity.frame_id,
+            operation_id=identity.operation_id,
+            frames=frames,
+            frame_class=policy.frame_class,
+            latency_budget_ms=policy.latency_budget_ms,
+            target_fps_x100=policy.target_fps_x100,
+            retry_of_frame=policy.retry_of_frame,
+            budget_policy=policy.budget_policy,
+            dependency_frame_id=policy.dependency_frame_id,
+            loss_tolerance_policy=policy.loss_tolerance_policy,
+            flags=identity.header.flags,
+            view_id=identity.header.view_id,
+            route_id=identity.header.route_id,
+            trace_id=identity.header.trace_id,
+        )
+        return cls._from_packet(identity, packet)
+
+    @classmethod
+    def _from_packet(cls, identity: SubmitIdentity, packet: NnrpPacket) -> SubmitRequest:
+        if identity.operation_id <= 0 or identity.frame_id <= 0:
+            raise ValueError("submit operation_id and frame_id must be non-zero")
+        return cls(
+            operation_id=identity.operation_id,
+            frame_id=identity.frame_id,
+            header=identity.header,
+            metadata=FrameSubmitMetadata.unpack(packet.metadata),
+            body=bytes(packet.body),
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -828,93 +1023,21 @@ class ClientSession:
         frame_id = int(request.frame_id)
         if self._current_min_frame_id > 0 or self._current_last_submitted_frame_id is not None:
             self._validate_migrated_current_frame_id(frame_id)
-        typed_payloads = tuple(payload for payload in request.typed_payloads)
-        if typed_payloads:
-            _validate_typed_payload_request(request)
-            typed_frames = tuple(payload.to_core_frame() for payload in typed_payloads)
-            if _current_request_has_tensor_body(request):
-                packet = build_frame_submit_mixed_packet(
-                    session_id=self.session_id,
-                    frame_id=frame_id,
-                    operation_id=request.operation_id,
-                    src_width=request.src_width,
-                    src_height=request.src_height,
-                    tile_width=request.tile_width,
-                    tile_height=request.tile_height,
-                    tile_ids=request.tile_ids,
-                    sections=request.sections,
-                    frames=typed_frames,
-                    camera_block=request.camera_block,
-                    frame_class=request.frame_class,
-                    input_profile=request.input_profile,
-                    tile_index_mode=request.tile_index_mode,
-                    latency_budget_ms=request.latency_budget_ms,
-                    target_fps_x100=request.target_fps_x100,
-                    retry_of_frame=request.retry_of_frame,
-                    tile_base_id=request.tile_base_id,
-                    budget_policy=request.budget_policy,
-                    dependency_frame_id=request.dependency_frame_id,
-                    loss_tolerance_policy=request.loss_tolerance_policy,
-                    wire_format=WireFormat.CURRENT,
-                    flags=request.flags,
-                    view_id=request.view_id,
-                    route_id=request.route_id,
-                    trace_id=request.trace_id,
-                )
-            else:
-                packet = build_frame_submit_typed_payload_packet(
-                    session_id=self.session_id,
-                    frame_id=frame_id,
-                    operation_id=request.operation_id,
-                    frames=typed_frames,
-                    frame_class=request.frame_class,
-                    latency_budget_ms=request.latency_budget_ms,
-                    target_fps_x100=request.target_fps_x100,
-                    retry_of_frame=request.retry_of_frame,
-                    budget_policy=request.budget_policy,
-                    dependency_frame_id=request.dependency_frame_id,
-                    loss_tolerance_policy=request.loss_tolerance_policy,
-                    wire_format=WireFormat.CURRENT,
-                    flags=request.flags,
-                    view_id=request.view_id,
-                    route_id=request.route_id,
-                    trace_id=request.trace_id,
-                )
-        else:
-            packet = build_frame_submit_packet(
-                session_id=self.session_id,
-                frame_id=frame_id,
-                operation_id=request.operation_id,
-                src_width=request.src_width,
-                src_height=request.src_height,
-                tile_width=request.tile_width,
-                tile_height=request.tile_height,
-                tile_ids=request.tile_ids,
-                sections=request.sections,
-                camera_block=request.camera_block,
-                frame_class=request.frame_class,
-                input_profile=request.input_profile,
-                tile_index_mode=request.tile_index_mode,
-                latency_budget_ms=request.latency_budget_ms,
-                target_fps_x100=request.target_fps_x100,
-                retry_of_frame=request.retry_of_frame,
-                tile_base_id=request.tile_base_id,
-                submit_mode=request.submit_mode,
-                object_ref_mask=request.object_ref_mask,
-                camera_reference=request.camera_reference,
-                tile_index_reference=request.tile_index_reference,
-                tensor_section_table_reference=request.tensor_section_table_reference,
-                budget_policy=request.budget_policy,
-                dependency_frame_id=request.dependency_frame_id,
-                loss_tolerance_policy=request.loss_tolerance_policy,
-                payload_kind_bitmap=request.payload_kind_bitmap,
-                payload_frame_count=request.payload_frame_count,
-                wire_format=WireFormat.CURRENT,
-                flags=request.flags,
-                view_id=request.view_id,
-                route_id=request.route_id,
-                trace_id=request.trace_id,
-            )
+        if request.metadata.operation_id != request.operation_id:
+            raise ValueError("submit metadata operation_id does not match request operation_id")
+        packet = NnrpPacket.build(
+            version_major=1,
+            wire_format=WireFormat.CURRENT,
+            msg_type=MessageType.FRAME_SUBMIT,
+            flags=request.header.flags,
+            session_id=self.session_id,
+            frame_id=frame_id,
+            view_id=request.header.view_id,
+            route_id=request.header.route_id,
+            trace_id=request.header.trace_id,
+            metadata=request.metadata.pack(),
+            body=request.body,
+        )
         submit_stream_id = await self.send_submit_packet(packet)
         if self._current_min_frame_id > 0 or self._current_last_submitted_frame_id is not None:
             self._current_last_submitted_frame_id = frame_id
@@ -941,51 +1064,21 @@ class ClientSession:
                 tensor_body=None,
                 typed_payloads=(),
             )
-        if _current_metadata_uses_composed_body(
-            payload_kind_bitmap=metadata.payload_kind_bitmap,
-            payload_frame_count=metadata.payload_frame_count,
-        ):
-            body_view = validate_result_push_body(metadata, packet.body)
-            typed_payloads = tuple(
-                TypedPayload.from_core_frame(frame)
-                for frame in unpack_typed_payload_frames(
-                    body_view.typed_payload_descriptor_region,
-                    body_view.typed_payload_frame_region,
-                )
+        body_view = validate_result_push_body(metadata, packet.body)
+        typed_payloads = tuple(
+            TypedPayload.from_core_frame(frame)
+            for frame in unpack_typed_payload_frames(
+                body_view.typed_payload_descriptor_region,
+                body_view.typed_payload_frame_region,
+                payload_kind_bitmap=metadata.payload_kind_bitmap,
             )
-            if metadata.payload_kind_bitmap & PayloadKind.TENSOR:
-                inline_blocks = {
-                    int(block.header.object_kind): block
-                    for block in unpack_inline_object_blocks(body_view.inline_object_region)
-                }
-                tile_index_inline = inline_blocks.get(int(CacheObjectKind.TILE_INDEX_BLOCK))
-                section_inline = inline_blocks.get(int(CacheObjectKind.TENSOR_SECTION_TABLE))
-                section_views = ()
-                if section_inline is not None:
-                    section_views = unpack_tensor_body(
-                        section_inline.payload,
-                        tile_index_bytes=0,
-                        section_count=metadata.section_count,
-                        tile_count=metadata.tile_count,
-                    ).sections
-                tensor_body = TensorBodyView(
-                    tile_index_block=(tile_index_inline.payload if tile_index_inline is not None else memoryview(b"")),
-                    sections=section_views,
-                )
-        elif metadata.payload_kind_bitmap & PayloadKind.TENSOR:
-            tensor_body = unpack_tensor_body(
-                packet.body,
-                tile_index_bytes=metadata.tile_index_bytes,
+        )
+        if metadata.payload_kind_bitmap & PayloadKind.TENSOR:
+            tensor_body = unpack_current_tensor_body(
+                body_view,
                 section_count=metadata.section_count,
                 tile_count=metadata.tile_count,
             )
-            unpack_tile_index_block(
-                tensor_body.tile_index_block,
-                mode=TileIndexMode.RAW_U16 if metadata.tile_index_bytes else TileIndexMode.DENSE_RANGE,
-                tile_count=metadata.tile_count,
-                tile_base_id=metadata.tile_base_id,
-            )
-            validate_result_push_tensor_coverage(metadata)
         return Result(
             packet=packet,
             metadata=metadata,
@@ -1487,30 +1580,6 @@ def _resolve_client_auth_block(*, auth_block: bytes, requested_model: str | None
     if auth_block:
         raise ValueError("requested_model cannot be combined with auth_block")
     return requested_model.encode("utf-8")
-
-
-def _validate_typed_payload_request(request: SubmitRequest) -> None:
-    if request.submit_mode is not SubmitMode.INLINE:
-        raise ValueError("typed payload submit helper currently supports SubmitMode.INLINE only")
-    if request.object_ref_mask:
-        raise ValueError("typed payload submit helper does not support object references")
-    if request.camera_reference is not None:
-        raise ValueError("typed payload submit helper does not support camera_reference")
-    if request.tile_index_reference is not None:
-        raise ValueError("typed payload submit helper does not support tile_index_reference")
-    if request.tensor_section_table_reference is not None:
-        raise ValueError("typed payload submit helper does not support tensor_section_table_reference")
-
-
-def _current_request_has_tensor_body(request: SubmitRequest) -> bool:
-    return bool(request.camera_block or request.tile_ids or request.sections)
-
-
-def _current_metadata_uses_composed_body(*, payload_kind_bitmap: PayloadKind, payload_frame_count: int) -> bool:
-    return bool(payload_frame_count) or payload_kind_bitmap not in {
-        PayloadKind.NONE,
-        PayloadKind.TENSOR,
-    }
 
 
 def _build_client_hello_helper_extensions(

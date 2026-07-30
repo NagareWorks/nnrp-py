@@ -13,10 +13,19 @@ import pytest
 
 import nnrp.native as native_module
 from nnrp.cache import CacheLeaseOutcome, CacheLeaseOwnerScope, CacheObjectIdentity
-from nnrp.core import MessageType
+from nnrp.client import (
+    SubmitHeaderContext,
+    SubmitIdentity,
+    SubmitPolicy,
+    SubmitRequest,
+    TokenChunk,
+    TokenSubmitInput,
+)
+from nnrp.core import HeaderFlags, MessageType, WireFormat
 from nnrp.core.messages.control import (
     CacheInvalidateMetadata,
     CacheInvalidateScope,
+    FlowUpdateMetadata,
     ResultHintBudgetPolicy,
     ResultHintCongestionState,
     ResultHintMetadata,
@@ -95,6 +104,7 @@ from nnrp.native import (
     NativeInvalidArgumentError,
     NativeInvalidHandleError,
     NativeInvalidStateError,
+    NativeLifecycleEvent,
     NativeMutableBufferView,
     NativeObjectDescriptor,
     NativeObjectDescriptorHandle,
@@ -112,9 +122,7 @@ from nnrp.native import (
     NativeRuntimeConnection,
     NativeRuntimeDiagnostic,
     NativeRuntimeEntrypoints,
-    NativeRuntimeEvent,
     NativeRuntimeFeatureFlag,
-    NativeRuntimeFrameEvent,
     NativeRuntimeOperation,
     NativeRuntimePollResult,
     NativeRuntimeResult,
@@ -140,6 +148,7 @@ from nnrp.native import (
     NativeWouldBlockError,
     NnrpEndpoint,
     NnrpEndpointSupport,
+    _native_event_from_ffi,
     _NnrpBufferView,
     _NnrpBufferViewMut,
     _NnrpCacheLeaseRequest,
@@ -156,6 +165,7 @@ from nnrp.native import (
     _NnrpProtocolVersion,
     _NnrpRoleEventPollRequest,
     _NnrpRuntimeCapabilities,
+    _NnrpRuntimeFrameHeader,
     _NnrpRuntimeFrameSendRequest,
     _NnrpRuntimeObjectDescriptor,
     _NnrpSchemaDescriptorHeader,
@@ -206,6 +216,7 @@ from nnrp.runtime import (
     CapabilityMetadata,
     ControlRequestMetadata,
     MemoryLocationHint,
+    NativeRuntimeEvent,
     ObjectDeltaMetadata,
     ObjectDescriptorMetadata,
     ObjectReferenceMetadata,
@@ -231,11 +242,11 @@ from nnrp.runtime import (
     encode_runtime_object_metadata,
 )
 from nnrp.schema import (
-    Preview3TypedPayloadDescriptor,
     SchemaDescriptorHeader,
     SchemaRegistryAction,
     StandardProfile,
     StreamSemantics,
+    TypedPayloadDescriptor,
     TypedPayloadDescriptorFlags,
     token_delta_schema_descriptor,
 )
@@ -246,8 +257,8 @@ class FakeLibrary:
         self,
         *,
         abi_major: int = 4,
-        abi_minor: int = 1,
-        abi_patch: int = 1,
+        abi_minor: int = 3,
+        abi_patch: int = 0,
         protocol_major: int = 1,
         wire_format: int = 0,
         transport_slots: int = TRANSPORT_SLOT_TCP,
@@ -474,6 +485,7 @@ class FakeRuntimeLibrary(FakeEntrypointLibrary):
             return _NnrpFfiStatus(FFI_STATUS_INVALID_HANDLE, 0, 0, 0)
         self._event_payload_owner = ctypes.create_string_buffer(_read_buffer_view(request.payload), request.payload.len)
         self.event_kind = EVENT_KIND_RESULT_PUSHED
+        self.event_message_type = int(MessageType.RESULT_PUSH)
         return self.status
 
     def _runtime_frame_send(self, request: _NnrpRuntimeFrameSendRequest) -> _NnrpFfiStatus:
@@ -510,7 +522,7 @@ class FakeRuntimeLibrary(FakeEntrypointLibrary):
         source: _NnrpBufferView,
         out_descriptor: object,
     ) -> _NnrpFfiStatus:
-        descriptor = Preview3TypedPayloadDescriptor.unpack(_read_buffer_view(source))
+        descriptor = TypedPayloadDescriptor.unpack(_read_buffer_view(source))
         _write_typed_payload_descriptor(out_descriptor, descriptor)
         return self.status
 
@@ -837,11 +849,10 @@ class FakeRuntimeLibrary(FakeEntrypointLibrary):
         target.has_event = 1 if self._event_payload_owner is not None else 0
         if self._event_payload_owner is not None:
             target.event.kind = self.event_kind
-            target.event.message_type = self.event_message_type
+            _write_event_header(target.event, message_type=self.event_message_type, frame_id=7)
             target.event.connection = _NnrpHandle(HANDLE_KIND_CONNECTION, 12, 2, 0)
             target.event.session = handle
             target.event.operation = _NnrpHandle(HANDLE_KIND_OPERATION, 99, 1, 0)
-            target.event.frame_id = 7
             target.event.payload_owner = _NnrpHandle()
             target.event.payload = _NnrpBufferView(
                 ctypes.cast(self._event_payload_owner, ctypes.c_void_p),
@@ -871,11 +882,10 @@ class FakeRuntimeLibrary(FakeEntrypointLibrary):
         events = ctypes.cast(out_events, ctypes.POINTER(_NnrpEvent))
         for index in range(event_capacity):
             events[index].kind = self.event_kind
-            events[index].message_type = self.event_message_type
+            _write_event_header(events[index], message_type=self.event_message_type, frame_id=7 + index)
             events[index].connection = _NnrpHandle(HANDLE_KIND_CONNECTION, 12, 2, 0)
             events[index].session = request.scope
             events[index].operation = _NnrpHandle(HANDLE_KIND_OPERATION, 99 + index, 1, 0)
-            events[index].frame_id = 7 + index
             events[index].payload_owner = _NnrpHandle()
             events[index].payload = _NnrpBufferView(
                 ctypes.cast(self._event_payload_owner, ctypes.c_void_p),
@@ -915,11 +925,10 @@ class BatchControlRuntimeLibrary(FakeRuntimeLibrary):
             kind, payload = self._batch_events[index]
             owner = self._batch_payload_owners[index]
             events[index].kind = kind
-            events[index].message_type = 0
+            _write_event_header(events[index], message_type=0, frame_id=7 + index)
             events[index].connection = _NnrpHandle(HANDLE_KIND_CONNECTION, 12, 2, 0)
             events[index].session = request.scope
             events[index].operation = _NnrpHandle(HANDLE_KIND_OPERATION, 99 + index, 1, 0)
-            events[index].frame_id = 7 + index
             events[index].payload_owner = _NnrpHandle()
             events[index].payload = _NnrpBufferView(ctypes.cast(owner, ctypes.c_void_p), len(payload))
             events[index].diagnostic.status = NativeStatus.ok().to_ffi()
@@ -956,11 +965,10 @@ class OwnedBatchRuntimeLibrary(FakeRuntimeLibrary):
         for index in range(emitted):
             kind, session_id, operation_id, frame_id, owner_id, owner = self._owned_batch_events[index]
             events[index].kind = kind
-            events[index].message_type = 0
+            _write_event_header(events[index], message_type=0, frame_id=frame_id)
             events[index].connection = request.scope
             events[index].session = _NnrpHandle(HANDLE_KIND_SESSION, session_id, 3, 0)
             events[index].operation = _NnrpHandle(HANDLE_KIND_OPERATION, operation_id, 1, 0)
-            events[index].frame_id = frame_id
             events[index].payload_owner = _NnrpHandle(HANDLE_KIND_BUFFER, owner_id, 1, 0)
             events[index].payload = _NnrpBufferView(ctypes.cast(owner, ctypes.c_void_p), len(owner.raw))
             events[index].diagnostic.status = NativeStatus.ok().to_ffi()
@@ -1016,6 +1024,26 @@ def _native_token_result_payload(body: bytes = b"result") -> bytes:
             payload_frame_count=1,
         ).pack()
         + body
+    )
+
+
+def _native_submit_request(
+    operation_id: int = 99,
+    frame_id: int = 7,
+    body: bytes | bytearray | memoryview = b"payload",
+    *,
+    header: SubmitHeaderContext | None = None,
+) -> SubmitRequest:
+    return SubmitRequest.token(
+        TokenSubmitInput(
+            identity=SubmitIdentity(
+                operation_id=operation_id,
+                frame_id=frame_id,
+                header=header or SubmitHeaderContext(),
+            ),
+            policy=SubmitPolicy(),
+            chunks=(TokenChunk(bytes(body)),),
+        )
     )
 
 
@@ -1109,9 +1137,10 @@ def _write_schema_descriptor(out_descriptor: object, descriptor: SchemaDescripto
     target.schema_hash = descriptor.schema_hash
 
 
-def _typed_payload_descriptor_from_ffi(descriptor: _NnrpTypedPayloadDescriptor) -> Preview3TypedPayloadDescriptor:
-    return Preview3TypedPayloadDescriptor(
+def _typed_payload_descriptor_from_ffi(descriptor: _NnrpTypedPayloadDescriptor) -> TypedPayloadDescriptor:
+    return TypedPayloadDescriptor(
         profile_id=descriptor.profile_id,
+        payload_kind=PayloadKind(descriptor.payload_kind),
         descriptor_flags=descriptor.descriptor_flags,
         schema_id=descriptor.schema_id,
         schema_version=descriptor.schema_version,
@@ -1121,11 +1150,12 @@ def _typed_payload_descriptor_from_ffi(descriptor: _NnrpTypedPayloadDescriptor) 
     )
 
 
-def _write_typed_payload_descriptor(out_descriptor: object, descriptor: Preview3TypedPayloadDescriptor) -> None:
+def _write_typed_payload_descriptor(out_descriptor: object, descriptor: TypedPayloadDescriptor) -> None:
     target = getattr(out_descriptor, "_obj", None)
     if target is None:
         target = ctypes.cast(out_descriptor, ctypes.POINTER(_NnrpTypedPayloadDescriptor)).contents
     target.profile_id = int(descriptor.profile_id)
+    target.payload_kind = int(descriptor.payload_kind)
     target.descriptor_flags = int(descriptor.descriptor_flags)
     target.schema_id = descriptor.schema_id
     target.schema_version = descriptor.schema_version
@@ -1133,6 +1163,49 @@ def _write_typed_payload_descriptor(out_descriptor: object, descriptor: Preview3
     target.reserved0 = 0
     target.offset = descriptor.offset
     target.length = descriptor.length
+
+
+def _write_event_header(event: _NnrpEvent, *, message_type: int, frame_id: int) -> None:
+    event.header = _NnrpRuntimeFrameHeader(
+        int(message_type != 0),
+        1,
+        0,
+        message_type,
+        0,
+        41,
+        frame_id,
+        0,
+        0,
+        0,
+    )
+
+
+def _decode_test_wire_event(
+    message_type: MessageType | int,
+    payload: bytes,
+    *,
+    kind: int = EVENT_KIND_RUNTIME_FRAME,
+    frame_id: int = 9,
+    wire_format: int = int(WireFormat.CURRENT),
+) -> NativeRuntimeEvent:
+    library = FakeRuntimeLibrary()
+    entrypoints = NativeRuntimeEntrypoints(library)
+    owner = ctypes.create_string_buffer(payload, max(1, len(payload)))
+    event = _NnrpEvent()
+    event.kind = kind
+    _write_event_header(event, message_type=int(message_type), frame_id=frame_id)
+    event.header.wire_format = wire_format
+    event.connection = _NnrpHandle(HANDLE_KIND_CONNECTION, 12, 2, 0)
+    event.session = _NnrpHandle(HANDLE_KIND_SESSION, 41, 3, 0)
+    event.operation = _NnrpHandle(HANDLE_KIND_OPERATION, 42, 1, 0)
+    event.payload = _NnrpBufferView(
+        ctypes.cast(owner, ctypes.c_void_p) if payload else None,
+        len(payload),
+    )
+    event.diagnostic.status = NativeStatus.ok().to_ffi()
+    decoded = _native_event_from_ffi(event, entrypoints)
+    assert isinstance(decoded, NativeRuntimeEvent)
+    return decoded
 
 
 class SlowSubmitRuntimeLibrary(FakeRuntimeLibrary):
@@ -2671,8 +2744,8 @@ def test_probe_native_artifact_accepts_matching_protocol(tmp_path: Path) -> None
 
     assert result.artifact_path == artifact
     assert result.abi_major == 4
-    assert result.abi_minor == 1
-    assert result.abi_patch == 1
+    assert result.abi_minor == 3
+    assert result.abi_patch == 0
     assert result.protocol_major == 1
     assert result.protocol_wire_format == 0
     assert result.sdk_channel == 3
@@ -2770,7 +2843,7 @@ def test_probe_native_artifact_rejects_abi_mismatch(tmp_path: Path) -> None:
         probe_native_artifact(artifact, library=FakeLibrary(abi_major=2))
 
     with pytest.raises(NativeArtifactError, match="ABI mismatch"):
-        probe_native_artifact(artifact, library=FakeLibrary(abi_patch=0))
+        probe_native_artifact(artifact, library=FakeLibrary(abi_patch=1))
 
 
 def test_probe_native_artifact_rejects_missing_required_feature(tmp_path: Path) -> None:
@@ -2903,8 +2976,9 @@ def test_native_schema_codec_delegates_descriptor_parse_write_and_validation(tmp
         default_stream_semantics=StreamSemantics.APPEND,
         schema_hash=0x6E6E_7270_746F_6B33,
     )
-    descriptor = Preview3TypedPayloadDescriptor(
+    descriptor = TypedPayloadDescriptor(
         profile_id=StandardProfile.TOKEN,
+        payload_kind=PayloadKind.TOKEN_CHUNK,
         descriptor_flags=TypedPayloadDescriptorFlags.PARTIAL,
         schema_id=schema.schema_id,
         schema_version=schema.schema_version,
@@ -2941,8 +3015,9 @@ def test_native_schema_codec_preserves_schema_mismatch_status_fields(tmp_path: P
         default_stream_semantics=StreamSemantics.APPEND,
         schema_hash=0x1111,
     )
-    descriptor = Preview3TypedPayloadDescriptor(
+    descriptor = TypedPayloadDescriptor(
         profile_id=StandardProfile.TOKEN,
+        payload_kind=PayloadKind.TOKEN_CHUNK,
         descriptor_flags=TypedPayloadDescriptorFlags.PARTIAL,
         schema_id=0x1001,
         schema_version=3,
@@ -2973,8 +3048,9 @@ def test_native_schema_registry_delegates_handle_lifecycle_and_binding_validatio
         default_stream_semantics=StreamSemantics.APPEND,
         schema_hash=0x1234,
     )
-    descriptor = Preview3TypedPayloadDescriptor(
+    descriptor = TypedPayloadDescriptor(
         profile_id=StandardProfile.TOKEN,
+        payload_kind=PayloadKind.TOKEN_CHUNK,
         descriptor_flags=TypedPayloadDescriptorFlags.PARTIAL,
         schema_id=schema.schema_id,
         schema_version=schema.schema_version,
@@ -3265,11 +3341,17 @@ def test_native_runtime_client_runs_connection_session_submit_close_roundtrip(tm
         schema_version=6,
         priority_class=NativeSessionPriorityClass.INTERACTIVE,
     )
-    operation = session.submit(operation_id=99, frame_id=7, body=b"payload")
+    first_request = _native_submit_request(
+        header=SubmitHeaderContext(
+            flags=HeaderFlags.ACK_REQUIRED,
+            view_id=3,
+            route_id=4,
+            trace_id=5,
+        )
+    )
+    operation = session.submit(first_request)
     operation_scope = session.submit_operation(
-        operation_id=100,
-        frame_id=8,
-        body=b"payload",
+        _native_submit_request(100, 8),
         scheduling_hint=NativeOperationSchedulingHint(
             parent_operation_id=99,
             operation_group_id=1234,
@@ -3297,12 +3379,16 @@ def test_native_runtime_client_runs_connection_session_submit_close_roundtrip(tm
     assert operation_scope.scheduling_hint.deadline_ms == 250
     submit_request = library.nnrp_client_submit.calls[0][0]
     assert submit_request.frame_id == 7
-    assert submit_request.payload.len == FrameSubmitMetadata.STRUCT.size + 7
+    assert submit_request.header_flags == int(HeaderFlags.ACK_REQUIRED)
+    assert submit_request.view_id == 3
+    assert submit_request.route_id == 4
+    assert submit_request.trace_id == 5
+    assert submit_request.payload.len == FrameSubmitMetadata.STRUCT.size + len(first_request.body)
     first_submit = _read_buffer_view(submit_request.payload)
     first_metadata = FrameSubmitMetadata.unpack(first_submit[: FrameSubmitMetadata.STRUCT.size])
     assert first_metadata.operation_id == 99
     assert first_metadata.payload_kind_bitmap == PayloadKind.TOKEN_CHUNK
-    assert first_submit[FrameSubmitMetadata.STRUCT.size :] == b"payload"
+    assert first_submit[FrameSubmitMetadata.STRUCT.size :] == first_request.body
     scheduled_submit_request = library.nnrp_client_submit.calls[1][0]
     assert scheduled_submit_request.operation_id == 100
     assert not hasattr(scheduled_submit_request, "parent_operation_id")
@@ -3343,6 +3429,7 @@ def test_native_runtime_client_binds_native_ipc_and_websocket_servers(tmp_path: 
     library = FakeRuntimeLibrary(
         event_payload=submit_metadata.pack() + b"server-submit",
         event_kind=EVENT_KIND_SUBMIT_ACCEPTED,
+        event_message_type=int(MessageType.FRAME_SUBMIT),
     )
 
     client = load_native_client(artifact, library=library)
@@ -3387,7 +3474,8 @@ def test_native_runtime_client_binds_native_ipc_and_websocket_servers(tmp_path: 
     assert isinstance(session, NativeRuntimeServerSession)
     assert isinstance(operation, NativeRuntimeServerOperation)
     assert event is not None
-    assert event.session.id == 41
+    assert isinstance(event, NativeRuntimeEvent)
+    assert event.header.session_id == 41
     assert ipc_server.handle.handle.id == 21
     assert websocket_server.handle.handle.id == 22
     assert session.server.handle.id == 21
@@ -3502,11 +3590,15 @@ def test_native_runtime_server_still_closes_connection_when_ticket_release_fails
     assert len(library.nnrp_client_close_connection.calls) == 1
 
 
-def test_native_submit_request_shape_matches_frozen_ffi_without_private_scheduling_fields() -> None:
+def test_native_submit_request_shape_matches_frozen_ffi() -> None:
     assert [name for name, _field_type in _NnrpSubmitRequest._fields_] == [
         "session",
         "operation_id",
         "frame_id",
+        "header_flags",
+        "view_id",
+        "route_id",
+        "trace_id",
         "payload",
     ]
 
@@ -3557,28 +3649,31 @@ def test_native_resumed_session_can_submit_operations(tmp_path: Path) -> None:
         resume_token_bytes=24,
     )
 
-    operation = session.submit_operation(operation_id=99, frame_id=7, body=b"after-resume")
+    request = _native_submit_request(body=b"after-resume")
+    operation = session.submit_operation(request)
 
     assert outcome.resumed is True
     assert operation.session == session.handle
     assert operation.operation_id == 99
     submit_request = library.nnrp_client_submit.calls[0][0]
     assert submit_request.session.id == 41
-    assert submit_request.payload.len == FrameSubmitMetadata.STRUCT.size + len(b"after-resume")
-    assert _read_buffer_view(submit_request.payload)[FrameSubmitMetadata.STRUCT.size :] == b"after-resume"
+    assert _read_buffer_view(submit_request.payload) == request.metadata.pack() + request.body
 
 
 def test_native_role_event_abi_layout_matches_rust_header() -> None:
     layout = (ctypes.sizeof(ctypes.c_void_p), ctypes.alignment(ctypes.c_uint64))
     if layout == (8, 8):
         diagnostic = (48, 32, 40)
-        event = (176, 32, 56, 80, 88, 112, 128)
+        header = (32, 24)
+        event = (200, 8, 40, 64, 88, 112, 136, 152)
     elif layout == (4, 8):
         diagnostic = (48, 32, 40)
-        event = (168, 32, 56, 80, 88, 112, 120)
+        header = (32, 24)
+        event = (192, 8, 40, 64, 88, 112, 136, 144)
     elif layout == (4, 4):
         diagnostic = (40, 28, 36)
-        event = (140, 28, 48, 68, 72, 92, 100)
+        header = (28, 20)
+        event = (160, 4, 32, 52, 72, 92, 112, 120)
     else:
         pytest.fail(f"unsupported FFI ABI layout: {layout}")
 
@@ -3589,26 +3684,34 @@ def test_native_role_event_abi_layout_matches_rust_header() -> None:
     assert _NnrpFfiDiagnostic.related_operation_id.offset == diagnostic[1]
     assert _NnrpFfiDiagnostic.related_frame_id.offset == diagnostic[2]
 
+    assert ctypes.sizeof(_NnrpRuntimeFrameHeader) == header[0]
+    assert _NnrpRuntimeFrameHeader.present.offset == 0
+    assert _NnrpRuntimeFrameHeader.flags.offset == 4
+    assert _NnrpRuntimeFrameHeader.session_id.offset == 8
+    assert _NnrpRuntimeFrameHeader.frame_id.offset == 12
+    assert _NnrpRuntimeFrameHeader.view_id.offset == 16
+    assert _NnrpRuntimeFrameHeader.route_id.offset == 18
+    assert _NnrpRuntimeFrameHeader.trace_id.offset == header[1]
+
     assert ctypes.sizeof(_NnrpEvent) == event[0]
     assert _NnrpEvent.kind.offset == 0
-    assert _NnrpEvent.message_type.offset == 4
-    assert _NnrpEvent.connection.offset == 8
-    assert _NnrpEvent.session.offset == event[1]
-    assert _NnrpEvent.operation.offset == event[2]
-    assert _NnrpEvent.frame_id.offset == event[3]
-    assert _NnrpEvent.payload_owner.offset == event[4]
-    assert _NnrpEvent.payload.offset == event[5]
-    assert _NnrpEvent.diagnostic.offset == event[6]
+    assert _NnrpEvent.header.offset == event[1]
+    assert _NnrpEvent.connection.offset == event[2]
+    assert _NnrpEvent.session.offset == event[3]
+    assert _NnrpEvent.operation.offset == event[4]
+    assert _NnrpEvent.payload_owner.offset == event[5]
+    assert _NnrpEvent.payload.offset == event[6]
+    assert _NnrpEvent.diagnostic.offset == event[7]
 
 
 def test_native_role_request_abi_layout_matches_rust_header() -> None:
     layout = (ctypes.sizeof(ctypes.c_void_p), ctypes.alignment(ctypes.c_uint64))
     if layout == (8, 8):
-        expected = (24, 8, 64, 24, 48, 60, 40, 48, 56, 40, 200, 24)
+        expected = (24, 8, 64, 24, 48, 60, 40, 48, 72, 40, 224, 24)
     elif layout == (4, 8):
-        expected = (24, 8, 56, 16, 40, 52, 40, 48, 48, 40, 192, 24)
+        expected = (24, 8, 56, 16, 40, 52, 40, 48, 64, 40, 216, 24)
     elif layout == (4, 4):
-        expected = (20, 4, 52, 16, 36, 48, 36, 40, 40, 36, 160, 20)
+        expected = (20, 4, 52, 16, 36, 48, 36, 40, 56, 36, 184, 20)
     else:
         pytest.fail(f"unsupported FFI ABI layout: {layout}")
 
@@ -3651,6 +3754,11 @@ def test_native_role_request_abi_layout_matches_rust_header() -> None:
     assert _NnrpSessionOpenRequest.schema_id.offset == handle_size + 12
     assert ctypes.sizeof(_NnrpSubmitRequest) == submit_size
     assert _NnrpSubmitRequest.operation_id.offset == handle_size
+    assert _NnrpSubmitRequest.frame_id.offset == handle_size + 8
+    assert _NnrpSubmitRequest.header_flags.offset == handle_size + 12
+    assert _NnrpSubmitRequest.view_id.offset == handle_size + 16
+    assert _NnrpSubmitRequest.route_id.offset == handle_size + 18
+    assert _NnrpSubmitRequest.trace_id.offset == handle_size + 24
 
     assert ctypes.sizeof(_NnrpRoleEventPollRequest) == role_poll_size
     assert _NnrpRoleEventPollRequest.max_events.offset == handle_size
@@ -3803,8 +3911,7 @@ def test_native_submit_rejects_conflicting_scheduling_hint_scope(tmp_path: Path)
 
     with pytest.raises(NativeHandleError, match="parent_operation_id conflicts"):
         session.submit_operation(
-            operation_id=100,
-            frame_id=8,
+            _native_submit_request(100, 8),
             parent_operation_id=101,
             scheduling_hint=NativeOperationSchedulingHint(parent_operation_id=99),
         )
@@ -3835,8 +3942,8 @@ def test_native_runtime_connection_can_open_multiple_sessions(tmp_path: Path) ->
         schema_version=6,
     )
 
-    first_operation = first_session.submit_operation(operation_id=99, frame_id=7)
-    second_operation = second_session.submit_operation(operation_id=100, frame_id=8)
+    first_operation = first_session.submit_operation(_native_submit_request(99, 7, b""))
+    second_operation = second_session.submit_operation(_native_submit_request(100, 8, b""))
 
     assert first_session.connection == second_session.connection == connection.handle
     assert first_session.handle.handle.id == 41
@@ -3881,7 +3988,7 @@ def test_native_runtime_session_event_snapshot_copies_payload(tmp_path: Path) ->
     result = session.await_event()
 
     assert result.event is not None
-    assert isinstance(result.event, NativeRuntimeEvent)
+    assert isinstance(result.event, NativeLifecycleEvent)
     assert result.event.kind == 6
     assert result.event.payload == b"result"
     assert result.event.connection.id == 12
@@ -3926,26 +4033,23 @@ def test_native_runtime_frame_event_copies_and_releases_owned_payload() -> None:
     library._buffers[777] = owner
     event = _NnrpEvent()
     event.kind = EVENT_KIND_RUNTIME_FRAME
-    event.message_type = int(MessageType.PROGRESS)
+    _write_event_header(event, message_type=int(MessageType.PROGRESS), frame_id=9)
     event.connection = _NnrpHandle(HANDLE_KIND_CONNECTION, 12, 2, 0)
     event.session = _NnrpHandle(HANDLE_KIND_SESSION, 41, 3, 0)
     event.operation = _NnrpHandle(HANDLE_KIND_OPERATION, 42, 1, 0)
-    event.frame_id = 9
     event.payload_owner = _NnrpHandle(HANDLE_KIND_BUFFER, 777, 1, 0)
     event.payload = _NnrpBufferView(ctypes.cast(owner, ctypes.c_void_p), len(payload))
     event.diagnostic.status = NativeStatus.ok().to_ffi()
 
-    snapshot = NativeRuntimeEvent.from_ffi(event, entrypoints)
-    frame = snapshot.to_runtime_frame()
+    snapshot = _native_event_from_ffi(event, entrypoints)
     owner[0] = b"x"
 
     assert 777 not in library._buffers
-    assert isinstance(frame, NativeRuntimeFrameEvent)
-    assert frame.type == "progress"
-    assert frame.metadata == metadata
-    assert frame.body == b"step"
-    assert frame.frame_id == 9
-    assert snapshot.payload == payload
+    assert isinstance(snapshot, NativeRuntimeEvent)
+    assert snapshot.header.message_type is MessageType.PROGRESS
+    assert snapshot.metadata.value == metadata
+    assert snapshot.tail.body == b"step"
+    assert snapshot.header.frame_id == 9
 
 
 @pytest.mark.parametrize(
@@ -3987,39 +4091,21 @@ def test_native_runtime_frame_event_decodes_frozen_payload_families(
     payload: bytes,
     expected_fields: dict[str, bytes],
 ) -> None:
-    event = NativeRuntimeEvent(
-        EVENT_KIND_RUNTIME_FRAME,
-        NativeHandle(HANDLE_KIND_CONNECTION, 12, 2),
-        NativeHandle(HANDLE_KIND_SESSION, 41, 3),
-        NativeHandle(HANDLE_KIND_OPERATION, 42, 1),
-        9,
-        payload,
-        _NATIVE_RUNTIME_DIAGNOSTIC_OK,
-        message_type=int(message_type),
-    )
+    event = _decode_test_wire_event(message_type, payload)
 
-    frame = event.to_runtime_frame()
-
-    assert isinstance(frame, NativeRuntimeFrameEvent)
-    assert frame.message_type is message_type
+    assert event.header.message_type is message_type
     for field_name, expected in expected_fields.items():
-        assert getattr(frame, field_name) == expected
+        assert getattr(event.tail, field_name) == expected
 
 
 def test_native_runtime_event_rejects_unknown_runtime_message_type() -> None:
-    event = NativeRuntimeEvent(
-        EVENT_KIND_RUNTIME_FRAME,
-        NativeHandle.invalid(),
-        NativeHandle.invalid(),
-        NativeHandle.invalid(),
-        0,
-        b"",
-        _NATIVE_RUNTIME_DIAGNOSTIC_OK,
-        message_type=0xFFFF,
-    )
-
     with pytest.raises(NativeProtocolError, match="unknown Preview4 runtime message type"):
-        event.to_runtime_frame()
+        _decode_test_wire_event(0xFFFF, b"")
+
+
+def test_native_runtime_event_reports_unknown_wire_format_separately() -> None:
+    with pytest.raises(NativeProtocolError, match="unknown Preview4 runtime wire format 255"):
+        _decode_test_wire_event(MessageType.PROGRESS, b"", wire_format=255)
 
 
 def test_native_runtime_session_polls_and_iterates_named_runtime_frames(tmp_path: Path) -> None:
@@ -4043,27 +4129,140 @@ def test_native_runtime_session_polls_and_iterates_named_runtime_frames(tmp_path
 
     frames = create_session().poll_runtime_frames(max_events=1)
 
-    async def collect() -> tuple[NativeRuntimeFrameEvent, ...]:
+    async def collect() -> tuple[NativeRuntimeEvent, ...]:
         return tuple([frame async for frame in create_session().iter_runtime_frames(max_events=1)])
 
     async_frames = asyncio.run(collect())
 
-    assert [(frame.type, frame.body) for frame in frames] == [("progress", b"step")]
-    assert [(frame.type, frame.body) for frame in async_frames] == [("progress", b"step")]
+    assert [(frame.header.message_type, frame.tail.body) for frame in frames] == [(MessageType.PROGRESS, b"step")]
+    assert [(frame.header.message_type, frame.tail.body) for frame in async_frames] == [(MessageType.PROGRESS, b"step")]
 
 
-def test_non_runtime_event_has_no_named_runtime_frame() -> None:
-    event = NativeRuntimeEvent(
+def test_native_runtime_session_frame_poll_preserves_lifecycle_events(tmp_path: Path) -> None:
+    artifact = tmp_path / "nnrp_ffi.dll"
+    artifact.write_bytes(b"fake")
+    session = _open_event_session(
+        load_native_client(artifact, library=FakeRuntimeLibrary()).connect(
+            connection_id=12,
+            generation=2,
+            transport_id=TRANSPORT_SLOT_TCP,
+        )
+    )
+    lifecycle = NativeLifecycleEvent(
         EVENT_KIND_CONTROL,
         NativeHandle.invalid(),
         NativeHandle.invalid(),
         NativeHandle.invalid(),
-        0,
+        b"lifecycle",
+        _NATIVE_RUNTIME_DIAGNOSTIC_OK,
+    )
+    runtime = _decode_test_wire_event(
+        MessageType.PROGRESS,
+        encode_runtime_control_metadata(
+            MessageType.PROGRESS,
+            ProgressMetadata(42, 7, 3, 2500, 11, 0),
+        ),
+    )
+    session._pending_events.extend((lifecycle, runtime))
+
+    assert session.poll_runtime_frames(max_events=1) == (runtime,)
+    assert session.poll_event() is lifecycle
+
+
+def test_native_runtime_session_frame_poll_handles_zero_limit_and_would_block(tmp_path: Path) -> None:
+    artifact = tmp_path / "nnrp_ffi.dll"
+    artifact.write_bytes(b"fake")
+    library = FakeRuntimeLibrary()
+    session = _open_event_session(
+        load_native_client(artifact, library=library).connect(
+            connection_id=12,
+            generation=2,
+            transport_id=TRANSPORT_SLOT_TCP,
+        )
+    )
+
+    assert session.poll_runtime_frames(max_events=0) == ()
+    library.status = NativeStatus(FFI_STATUS_WOULD_BLOCK).to_ffi()
+    assert session.poll_runtime_frames(max_events=1) == ()
+
+
+def test_native_runtime_server_frame_poll_preserves_lifecycle_events() -> None:
+    library = FakeRuntimeLibrary()
+    server = NativeRuntimeServer(
+        NativeRuntimeEntrypoints(library),
+        NativeConnectionHandle.from_ffi(_NnrpHandle(HANDLE_KIND_CONNECTION, 21, 1, 0)),
+        "tcp",
+    )
+    session = server.accept_session(session_handle_id=41, generation=3)
+    lifecycle = NativeLifecycleEvent(
+        EVENT_KIND_CONTROL,
+        NativeHandle.invalid(),
+        NativeHandle.invalid(),
+        NativeHandle.invalid(),
+        b"lifecycle",
+        _NATIVE_RUNTIME_DIAGNOSTIC_OK,
+    )
+    runtime = _decode_test_wire_event(
+        MessageType.PROGRESS,
+        encode_runtime_control_metadata(
+            MessageType.PROGRESS,
+            ProgressMetadata(42, 7, 3, 2500, 11, 0),
+        ),
+    )
+    session._pending_events.extend((lifecycle, runtime))
+
+    assert session.poll_runtime_frames(max_events=1) == (runtime,)
+    assert session.poll_event() is lifecycle
+
+
+def test_native_runtime_server_frame_poll_preserves_native_lifecycle_event() -> None:
+    library = FakeRuntimeLibrary(event_payload=b"lifecycle", event_kind=EVENT_KIND_CONTROL)
+    server = NativeRuntimeServer(
+        NativeRuntimeEntrypoints(library),
+        NativeConnectionHandle.from_ffi(_NnrpHandle(HANDLE_KIND_CONNECTION, 21, 1, 0)),
+        "tcp",
+    )
+    session = server.accept_session(session_handle_id=41, generation=3)
+
+    assert session.poll_runtime_frames(max_events=0) == ()
+    assert session.poll_runtime_frames(max_events=1) == ()
+    lifecycle = session.poll_event()
+    assert isinstance(lifecycle, NativeLifecycleEvent)
+    assert lifecycle.payload == b"lifecycle"
+
+
+def test_native_runtime_server_frame_poll_reads_native_runtime_event() -> None:
+    metadata = ProgressMetadata(42, 7, 3, 2500, 11, 0)
+    library = FakeRuntimeLibrary(
+        event_payload=encode_runtime_control_metadata(MessageType.PROGRESS, metadata),
+        event_kind=EVENT_KIND_RUNTIME_FRAME,
+        event_message_type=int(MessageType.PROGRESS),
+    )
+    server = NativeRuntimeServer(
+        NativeRuntimeEntrypoints(library),
+        NativeConnectionHandle.from_ffi(_NnrpHandle(HANDLE_KIND_CONNECTION, 21, 1, 0)),
+        "tcp",
+    )
+    session = server.accept_session(session_handle_id=41, generation=3)
+
+    frames = session.poll_runtime_frames(max_events=1)
+
+    assert len(frames) == 1
+    assert frames[0].header.message_type is MessageType.PROGRESS
+    assert frames[0].metadata.value == metadata
+
+
+def test_local_lifecycle_event_has_no_fabricated_runtime_header() -> None:
+    event = NativeLifecycleEvent(
+        EVENT_KIND_CONTROL,
+        NativeHandle.invalid(),
+        NativeHandle.invalid(),
+        NativeHandle.invalid(),
         b"",
         _NATIVE_RUNTIME_DIAGNOSTIC_OK,
     )
 
-    assert event.to_runtime_frame() is None
+    assert not hasattr(event, "header")
 
 
 def test_native_runtime_sessions_expose_named_preview4_methods_without_raw_frame_api() -> None:
@@ -4317,10 +4516,11 @@ def test_native_submit_payload_boundary_snapshots_mutable_inputs(tmp_path: Path)
     )
     payload = bytearray(b"before")
 
-    session.submit_operation(operation_id=99, frame_id=7, body=payload)
+    request = _native_submit_request(body=payload)
+    session.submit_operation(request)
     payload[:] = b"after!"
 
-    assert library.submitted_payloads[0][FrameSubmitMetadata.STRUCT.size :] == b"before"
+    assert library.submitted_payloads[0] == request.metadata.pack() + request.body
 
 
 def test_native_submit_rejects_metadata_operation_identity_mismatch(tmp_path: Path) -> None:
@@ -4334,10 +4534,11 @@ def test_native_submit_rejects_metadata_operation_identity_mismatch(tmp_path: Pa
             transport_id=TRANSPORT_SLOT_TCP,
         )
     )
-    metadata = replace(native_module._canonical_token_submit_metadata(99), operation_id=100)
+    request = _native_submit_request()
+    request = replace(request, metadata=replace(request.metadata, operation_id=100))
 
     with pytest.raises(ValueError, match="metadata.operation_id must equal"):
-        session.submit_operation(operation_id=99, frame_id=7, metadata=metadata, body=b"payload")
+        session.submit_operation(request)
 
     assert library.nnrp_client_submit.calls == []
 
@@ -4365,7 +4566,7 @@ def test_native_result_keeps_wire_operation_identity_separate_from_handle_identi
             events[0].connection = _NnrpHandle(HANDLE_KIND_CONNECTION, 12, 2, 0)
             events[0].session = request.scope
             events[0].operation = _NnrpHandle(HANDLE_KIND_OPERATION, 500, 1, 0)
-            events[0].frame_id = 7
+            _write_event_header(events[0], message_type=0, frame_id=7)
             events[0].payload = _NnrpBufferView(
                 ctypes.cast(self._event_payload_owner, ctypes.c_void_p),
                 len(self._event_payload_owner.raw),
@@ -4385,7 +4586,7 @@ def test_native_result_keeps_wire_operation_identity_separate_from_handle_identi
         )
     )
 
-    operation = session.submit_operation(operation_id=99, frame_id=7, body=b"request")
+    operation = session.submit_operation(_native_submit_request(body=b"request"))
     result = session.poll_result(operation, max_events=1)
 
     assert operation.handle.handle.id == 500
@@ -4413,7 +4614,7 @@ def test_native_runtime_result_preserves_lifecycle_surface(tmp_path: Path) -> No
 
     assert result.state is NativeOperationLifecycle.COMPLETED
     assert result.operation_id == 99
-    assert result.frame_id == 7
+    assert result.frame_id == 0
     assert result.body == b"result"
     assert result.metadata is not None
     assert result.metadata.payload_kind_bitmap == PayloadKind.TOKEN_CHUNK
@@ -4426,21 +4627,19 @@ def test_native_runtime_result_preserves_lifecycle_surface(tmp_path: Path) -> No
 
 
 def test_native_runtime_result_maps_error_and_drop_events() -> None:
-    base_event = NativeRuntimeEvent(
+    base_event = NativeLifecycleEvent(
         kind=10,
         connection=NativeHandle(HANDLE_KIND_CONNECTION, 12, 2),
         session=NativeHandle(HANDLE_KIND_SESSION, 41, 3),
         operation=NativeHandle(HANDLE_KIND_OPERATION, 99, 1),
-        frame_id=7,
         payload=b"",
         diagnostic=NativeRuntimeDiagnostic(NativeStatus(FFI_STATUS_INTERNAL_ERROR), 12, 41, 99, 7),
     )
-    drop_event = NativeRuntimeEvent(
+    drop_event = NativeLifecycleEvent(
         kind=7,
         connection=NativeHandle(HANDLE_KIND_CONNECTION, 12, 2),
         session=NativeHandle(HANDLE_KIND_SESSION, 41, 3),
         operation=NativeHandle(HANDLE_KIND_OPERATION, 99, 1),
-        frame_id=7,
         payload=b"",
         diagnostic=NativeRuntimeDiagnostic(NativeStatus.ok(), 12, 41, 99, 7),
     )
@@ -4452,42 +4651,32 @@ def test_native_runtime_result_maps_error_and_drop_events() -> None:
 
 
 def test_native_runtime_event_classifies_control_and_credit_updates() -> None:
-    flow_event = NativeRuntimeEvent(
+    flow_metadata = FlowUpdateMetadata()
+    flow_event = _decode_test_wire_event(
+        MessageType.FLOW_UPDATE,
+        flow_metadata.pack(),
         kind=EVENT_KIND_FLOW_UPDATED,
-        connection=NativeHandle(HANDLE_KIND_CONNECTION, 12, 2),
-        session=NativeHandle(HANDLE_KIND_SESSION, 41, 3),
-        operation=NativeHandle(HANDLE_KIND_OPERATION, 99, 1),
         frame_id=7,
-        payload=b"opaque-native-credit-state",
-        diagnostic=NativeRuntimeDiagnostic(NativeStatus.ok(), 12, 41, 99, 7),
     )
-    control_event = NativeRuntimeEvent(
+    control_event = NativeLifecycleEvent(
         kind=EVENT_KIND_CONTROL,
         connection=NativeHandle(HANDLE_KIND_CONNECTION, 12, 2),
         session=NativeHandle(HANDLE_KIND_SESSION, 41, 3),
         operation=NativeHandle(HANDLE_KIND_OPERATION, 99, 1),
-        frame_id=8,
         payload=b"opaque-control-state",
         diagnostic=NativeRuntimeDiagnostic(NativeStatus.ok(), 12, 41, 99, 8),
     )
 
-    update = flow_event.to_credit_update()
+    update = NativeCreditUpdateEvent.from_event(flow_event)
 
-    assert flow_event.kind_name == "flow_updated"
-    assert flow_event.is_flow_update is True
-    assert flow_event.is_control_event is True
-    assert flow_event.is_result_event is False
     assert isinstance(update, NativeCreditUpdateEvent)
-    assert update.connection.id == 12
-    assert update.session.id == 41
-    assert update.operation.id == 99
-    assert update.frame_id == 7
-    assert update.diagnostic.related_session_id == 41
+    assert update.event is flow_event
+    assert update.metadata == flow_metadata
     assert control_event.kind_name == "control"
     assert control_event.is_control_event is True
     assert control_event.is_flow_update is False
-    with pytest.raises(NativeHandleError, match="expected native flow update event"):
-        control_event.to_credit_update()
+    with pytest.raises(NativeHandleError, match="expected FLOW_UPDATE event"):
+        NativeCreditUpdateEvent.from_event(control_event)
 
 
 def test_native_runtime_event_wraps_result_hint_metadata() -> None:
@@ -4497,36 +4686,27 @@ def test_native_runtime_event_wraps_result_hint_metadata() -> None:
         reason=ResultHintReason.SERVER_BUSY,
         retry_after_ms=125,
     )
-    hint_event = NativeRuntimeEvent(
+    hint_event = _decode_test_wire_event(
+        MessageType.RESULT_HINT,
+        metadata.pack(),
         kind=EVENT_KIND_RESULT_HINT,
-        connection=NativeHandle(HANDLE_KIND_CONNECTION, 12, 2),
-        session=NativeHandle(HANDLE_KIND_SESSION, 41, 3),
-        operation=NativeHandle(HANDLE_KIND_OPERATION, 99, 1),
         frame_id=7,
-        payload=metadata.pack(),
-        diagnostic=NativeRuntimeDiagnostic(NativeStatus.ok(), 12, 41, 99, 7),
     )
-    control_event = NativeRuntimeEvent(
+    control_event = _decode_test_wire_event(
+        MessageType.CANCEL,
+        encode_runtime_control_metadata(
+            MessageType.CANCEL,
+            ControlRequestMetadata(99, 1, 0, RuntimeRole.CLIENT, 0, 0),
+        ),
         kind=EVENT_KIND_CONTROL,
-        connection=NativeHandle(HANDLE_KIND_CONNECTION, 12, 2),
-        session=NativeHandle(HANDLE_KIND_SESSION, 41, 3),
-        operation=NativeHandle(HANDLE_KIND_OPERATION, 99, 1),
         frame_id=8,
-        payload=b"opaque-control-state",
-        diagnostic=NativeRuntimeDiagnostic(NativeStatus.ok(), 12, 41, 99, 8),
     )
 
     hint = NativeResultHintEvent.from_event(hint_event)
 
-    assert hint.connection.id == 12
-    assert hint.session.id == 41
-    assert hint.operation.id == 99
-    assert hint.frame_id == 7
-    assert hint.payload == metadata.pack()
     assert hint.event is hint_event
-    assert hint.diagnostic.related_operation_id == 99
     assert hint.metadata == metadata
-    with pytest.raises(NativeHandleError, match="expected native result hint event"):
+    with pytest.raises(NativeHandleError, match="expected RESULT_HINT event"):
         NativeResultHintEvent.from_event(control_event)
 
 
@@ -4710,23 +4890,21 @@ def test_native_runtime_session_poll_events_without_limit_filters_until_empty(
         transport_id=TRANSPORT_SLOT_TCP,
     )
     session = _open_event_session(connection)
-    control_event = NativeRuntimeEvent(
+    control_event = _decode_test_wire_event(
+        MessageType.CANCEL,
+        encode_runtime_control_metadata(
+            MessageType.CANCEL,
+            ControlRequestMetadata(99, 1, 0, RuntimeRole.CLIENT, 0, len(b"control")),
+            tail=b"control",
+        ),
         kind=EVENT_KIND_CONTROL,
-        connection=NativeHandle(HANDLE_KIND_CONNECTION, 12, 2),
-        session=NativeHandle(HANDLE_KIND_SESSION, 41, 3),
-        operation=NativeHandle(HANDLE_KIND_OPERATION, 99, 1),
         frame_id=7,
-        payload=b"control",
-        diagnostic=NativeRuntimeDiagnostic(NativeStatus.ok(), 12, 41, 99, 7),
     )
-    result_event = NativeRuntimeEvent(
+    result_event = _decode_test_wire_event(
+        MessageType.RESULT_PUSH,
+        _native_token_result_payload(),
         kind=EVENT_KIND_RESULT_PUSHED,
-        connection=NativeHandle(HANDLE_KIND_CONNECTION, 12, 2),
-        session=NativeHandle(HANDLE_KIND_SESSION, 41, 3),
-        operation=NativeHandle(HANDLE_KIND_OPERATION, 100, 1),
         frame_id=8,
-        payload=b"result",
-        diagnostic=NativeRuntimeDiagnostic(NativeStatus.ok(), 12, 41, 100, 8),
     )
     queued_events: list[NativeRuntimeEvent] = [control_event, result_event]
 
@@ -4748,7 +4926,11 @@ def test_native_runtime_session_poll_events_without_limit_filters_until_empty(
 def test_native_runtime_session_filters_credit_update_events(tmp_path: Path) -> None:
     artifact = tmp_path / "nnrp_ffi.dll"
     artifact.write_bytes(b"fake")
-    library = FakeRuntimeLibrary(event_payload=b"credits", event_kind=EVENT_KIND_FLOW_UPDATED)
+    library = FakeRuntimeLibrary(
+        event_payload=FlowUpdateMetadata().pack(),
+        event_kind=EVENT_KIND_FLOW_UPDATED,
+        event_message_type=int(MessageType.FLOW_UPDATE),
+    )
     connection = load_native_client(artifact, library=library).connect(
         connection_id=12,
         generation=2,
@@ -4761,13 +4943,11 @@ def test_native_runtime_session_filters_credit_update_events(tmp_path: Path) -> 
     async_control_events = asyncio.run(_collect_async_events_by_kind(session, EVENT_KIND_CONTROL))
 
     assert len(updates) == 1
-    assert updates[0].connection.id == 12
-    assert updates[0].session.id == 41
-    assert updates[0].operation.id == 99
-    assert updates[0].frame_id == 7
-    assert updates[0].diagnostic.status.succeeded is True
+    assert updates[0].event.header.session_id == 41
+    assert updates[0].event.header.frame_id == 7
+    assert updates[0].metadata == FlowUpdateMetadata()
     assert len(async_updates) == 1
-    assert async_updates[0].session.id == 41
+    assert async_updates[0].event.header.session_id == 41
     assert async_control_events == []
     assert not hasattr(updates[0], "credits")
 
@@ -4781,7 +4961,11 @@ def test_native_runtime_session_filters_result_hint_events(tmp_path: Path) -> No
         reason=ResultHintReason.BUDGET_EXCEEDED,
         retry_after_ms=250,
     )
-    library = FakeRuntimeLibrary(event_payload=metadata.pack(), event_kind=EVENT_KIND_RESULT_HINT)
+    library = FakeRuntimeLibrary(
+        event_payload=metadata.pack(),
+        event_kind=EVENT_KIND_RESULT_HINT,
+        event_message_type=int(MessageType.RESULT_HINT),
+    )
     connection = load_native_client(artifact, library=library).connect(
         connection_id=12,
         generation=2,
@@ -4794,10 +4978,8 @@ def test_native_runtime_session_filters_result_hint_events(tmp_path: Path) -> No
 
     assert len(hints) == 1
     assert hints[0].metadata == metadata
-    assert hints[0].connection.id == 12
-    assert hints[0].session.id == 41
-    assert hints[0].operation.id == 99
-    assert hints[0].frame_id == 7
+    assert hints[0].event.header.session_id == 41
+    assert hints[0].event.header.frame_id == 7
     assert len(async_hints) == 1
     assert async_hints[0].metadata.retry_after_ms == 250
 
@@ -4805,7 +4987,11 @@ def test_native_runtime_session_filters_result_hint_events(tmp_path: Path) -> No
 def test_native_runtime_session_wraps_payload_family_events(tmp_path: Path) -> None:
     artifact = tmp_path / "nnrp_ffi.dll"
     artifact.write_bytes(b"fake")
-    library = FakeRuntimeLibrary(event_payload=b'{"delta":"ok"}', event_kind=EVENT_KIND_RESULT_PUSHED)
+    library = FakeRuntimeLibrary(
+        event_payload=_native_token_result_payload(b'{"delta":"ok"}'),
+        event_kind=EVENT_KIND_RESULT_PUSHED,
+        event_message_type=int(MessageType.RESULT_PUSH),
+    )
     connection = load_native_client(artifact, library=library).connect(
         connection_id=12,
         generation=2,
@@ -4839,14 +5025,22 @@ def test_native_runtime_session_wraps_payload_family_events(tmp_path: Path) -> N
 def test_native_runtime_session_dispatches_callbacks(tmp_path: Path) -> None:
     artifact = tmp_path / "nnrp_ffi.dll"
     artifact.write_bytes(b"fake")
-    result_library = FakeRuntimeLibrary(event_payload=b'{"delta":"ok"}', event_kind=EVENT_KIND_RESULT_PUSHED)
+    result_library = FakeRuntimeLibrary(
+        event_payload=_native_token_result_payload(b'{"delta":"ok"}'),
+        event_kind=EVENT_KIND_RESULT_PUSHED,
+        event_message_type=int(MessageType.RESULT_PUSH),
+    )
     result_connection = load_native_client(artifact, library=result_library).connect(
         connection_id=12,
         generation=2,
         transport_id=TRANSPORT_SLOT_TCP,
     )
     result_session = _open_event_session(result_connection)
-    credit_library = FakeRuntimeLibrary(event_payload=b"credits", event_kind=EVENT_KIND_FLOW_UPDATED)
+    credit_library = FakeRuntimeLibrary(
+        event_payload=FlowUpdateMetadata().pack(),
+        event_kind=EVENT_KIND_FLOW_UPDATED,
+        event_message_type=int(MessageType.FLOW_UPDATE),
+    )
     credit_connection = load_native_client(artifact, library=credit_library).connect(
         connection_id=12,
         generation=2,
@@ -4859,7 +5053,10 @@ def test_native_runtime_session_dispatches_callbacks(tmp_path: Path) -> None:
     credit_frames: list[int] = []
     hint_retries: list[int] = []
 
-    raw_count = result_session.dispatch_events(lambda event: raw_payloads.append(event.payload), max_events=1)
+    raw_count = result_session.dispatch_events(
+        lambda event: raw_payloads.append(event.tail.body) if isinstance(event, NativeRuntimeEvent) else None,
+        max_events=1,
+    )
     structured_count = result_session.dispatch_structured_events(
         lambda event: structured_payloads.append(event.payload),
         max_events=1,
@@ -4869,12 +5066,13 @@ def test_native_runtime_session_dispatches_callbacks(tmp_path: Path) -> None:
         max_events=1,
     )
     credit_count = credit_session.dispatch_credit_updates(
-        lambda update: credit_frames.append(update.frame_id),
+        lambda update: credit_frames.append(update.event.header.frame_id),
         max_events=1,
     )
     hint_library = FakeRuntimeLibrary(
         event_payload=ResultHintMetadata(retry_after_ms=75).pack(),
         event_kind=EVENT_KIND_RESULT_HINT,
+        event_message_type=int(MessageType.RESULT_HINT),
     )
     hint_connection = load_native_client(artifact, library=hint_library).connect(
         connection_id=12,
@@ -4902,14 +5100,26 @@ def test_native_runtime_session_dispatches_callbacks(tmp_path: Path) -> None:
 def test_native_runtime_session_dispatches_payload_family_callbacks_by_event_kind(tmp_path: Path) -> None:
     artifact = tmp_path / "nnrp_ffi.dll"
     artifact.write_bytes(b"fake")
-    result_library = FakeRuntimeLibrary(event_payload=b'{"result":true}', event_kind=EVENT_KIND_RESULT_PUSHED)
+    result_library = FakeRuntimeLibrary(
+        event_payload=_native_token_result_payload(b'{"result":true}'),
+        event_kind=EVENT_KIND_RESULT_PUSHED,
+        event_message_type=int(MessageType.RESULT_PUSH),
+    )
     result_connection = load_native_client(artifact, library=result_library).connect(
         connection_id=12,
         generation=2,
         transport_id=TRANSPORT_SLOT_TCP,
     )
     result_session = _open_event_session(result_connection)
-    control_library = FakeRuntimeLibrary(event_payload=b'{"control":true}', event_kind=EVENT_KIND_CONTROL)
+    control_library = FakeRuntimeLibrary(
+        event_payload=encode_runtime_control_metadata(
+            MessageType.CANCEL,
+            ControlRequestMetadata(99, 1, 0, RuntimeRole.CLIENT, 0, len(b'{"control":true}')),
+            tail=b'{"control":true}',
+        ),
+        event_kind=EVENT_KIND_CONTROL,
+        event_message_type=int(MessageType.CANCEL),
+    )
     control_connection = load_native_client(artifact, library=control_library).connect(
         connection_id=12,
         generation=2,
@@ -4921,27 +5131,31 @@ def test_native_runtime_session_dispatches_payload_family_callbacks_by_event_kin
 
     structured_count = control_session.dispatch_payload_family_events(
         "structured_event",
-        lambda event: structured_events.append((event.payload_family, event.payload, event.event.kind)),
+        lambda event: structured_events.append((event.payload_family, event.payload, event.event.header.message_type)),
         max_events=1,
         event_kind=EVENT_KIND_CONTROL,
     )
     tool_count = result_session.dispatch_payload_family_events(
         "tool_delta",
-        lambda event: tool_deltas.append((event.payload_family, event.payload, event.event.kind)),
+        lambda event: tool_deltas.append((event.payload_family, event.payload, event.event.header.message_type)),
         max_events=1,
         event_kind=EVENT_KIND_RESULT_PUSHED,
     )
 
     assert structured_count == 1
     assert tool_count == 1
-    assert structured_events == [("structured_event", b'{"control":true}', EVENT_KIND_CONTROL)]
-    assert tool_deltas == [("tool_delta", b'{"result":true}', EVENT_KIND_RESULT_PUSHED)]
+    assert structured_events == [("structured_event", b'{"control":true}', MessageType.CANCEL)]
+    assert tool_deltas == [("tool_delta", b'{"result":true}', MessageType.RESULT_PUSH)]
 
 
 def test_native_runtime_session_maps_callback_rejection(tmp_path: Path) -> None:
     artifact = tmp_path / "nnrp_ffi.dll"
     artifact.write_bytes(b"fake")
-    library = FakeRuntimeLibrary(event_payload=b"payload", event_kind=EVENT_KIND_RESULT_PUSHED)
+    library = FakeRuntimeLibrary(
+        event_payload=_native_token_result_payload(b"payload"),
+        event_kind=EVENT_KIND_RESULT_PUSHED,
+        event_message_type=int(MessageType.RESULT_PUSH),
+    )
     connection = load_native_client(artifact, library=library).connect(
         connection_id=12,
         generation=2,
@@ -4962,7 +5176,11 @@ def test_native_runtime_session_maps_callback_rejection(tmp_path: Path) -> None:
 def test_native_payload_family_event_rejects_unknown_family_and_non_payload_event(tmp_path: Path) -> None:
     artifact = tmp_path / "nnrp_ffi.dll"
     artifact.write_bytes(b"fake")
-    result_library = FakeRuntimeLibrary(event_payload=b"payload", event_kind=EVENT_KIND_RESULT_PUSHED)
+    result_library = FakeRuntimeLibrary(
+        event_payload=_native_token_result_payload(b"payload"),
+        event_kind=EVENT_KIND_RESULT_PUSHED,
+        event_message_type=int(MessageType.RESULT_PUSH),
+    )
     result_connection = load_native_client(artifact, library=result_library).connect(
         connection_id=12,
         generation=2,
@@ -4973,7 +5191,11 @@ def test_native_payload_family_event_rejects_unknown_family_and_non_payload_even
     with pytest.raises(NativeHandleError, match="unknown native payload family"):
         result_session.poll_payload_family_events("private_family", max_events=1)
 
-    flow_library = FakeRuntimeLibrary(event_payload=b"credits", event_kind=EVENT_KIND_FLOW_UPDATED)
+    flow_library = FakeRuntimeLibrary(
+        event_payload=FlowUpdateMetadata().pack(),
+        event_kind=EVENT_KIND_FLOW_UPDATED,
+        event_message_type=int(MessageType.FLOW_UPDATE),
+    )
     flow_connection = load_native_client(artifact, library=flow_library).connect(
         connection_id=12,
         generation=2,
@@ -5038,7 +5260,10 @@ def test_native_runtime_connection_rejects_use_after_close(tmp_path: Path) -> No
 def test_native_runtime_session_submits_and_polls_result(tmp_path: Path) -> None:
     artifact = tmp_path / "nnrp_ffi.dll"
     artifact.write_bytes(b"fake")
-    library = FakeRuntimeLibrary(event_payload=_native_token_result_payload())
+    library = FakeRuntimeLibrary(
+        event_payload=_native_token_result_payload(),
+        event_message_type=int(MessageType.RESULT_PUSH),
+    )
     session = (
         load_native_client(artifact, library=library)
         .connect(connection_id=12, generation=2, transport_id=TRANSPORT_SLOT_TCP)
@@ -5051,19 +5276,16 @@ def test_native_runtime_session_submits_and_polls_result(tmp_path: Path) -> None
         )
     )
 
+    request = _native_submit_request()
     result = session.submit_and_poll_result(
-        operation_id=99,
-        frame_id=7,
-        body=b"payload",
+        request,
         state=NativeOperationLifecycle.PARTIAL,
         max_events=1,
         timeout_ms=25,
     )
     async_result = asyncio.run(
         session.async_submit_and_poll_result(
-            operation_id=99,
-            frame_id=7,
-            body=b"payload",
+            request,
             max_events=1,
         )
     )
@@ -5073,14 +5295,15 @@ def test_native_runtime_session_submits_and_polls_result(tmp_path: Path) -> None
     assert result.frame_id == 7
     assert result.body == b"result"
     assert result.metadata is not None
-    assert result.event is result.event
-    assert result.event.operation.id == 99
-    assert result.event.payload == _native_token_result_payload()
+    assert isinstance(result.event, NativeRuntimeEvent)
+    assert result.event.header.frame_id == 7
+    assert result.event.metadata.value == result.metadata
+    assert result.event.tail.body == b"result"
     assert async_result.state is NativeOperationLifecycle.COMPLETED
     assert async_result.body == b"result"
     assert [_read_buffer_view(call[0].payload) for call in library.nnrp_client_submit.calls] == [
-        native_module._canonical_token_submit_metadata(99).pack() + b"payload",
-        native_module._canonical_token_submit_metadata(99).pack() + b"payload",
+        request.metadata.pack() + request.body,
+        request.metadata.pack() + request.body,
     ]
     assert library.nnrp_client_await_events.calls[0][0].timeout_ms == 25
     assert library.nnrp_client_await_events.calls[1][0].timeout_ms == 1
@@ -5103,7 +5326,7 @@ def test_native_runtime_session_polls_result_with_batch_when_event_budget_allows
         )
     )
 
-    operation = session.submit_operation(operation_id=99, frame_id=7)
+    operation = session.submit_operation(_native_submit_request(body=b""))
     result = session.poll_result(operation, max_events=2)
     second_result = session.poll_result(operation, max_events=2)
 
@@ -5130,10 +5353,10 @@ def test_native_runtime_session_submit_result_reports_would_block_when_no_event(
     )
 
     with pytest.raises(NativeWouldBlockError):
-        session.submit_and_poll_result(operation_id=99, frame_id=7, body=b"payload", max_events=1)
+        session.submit_and_poll_result(_native_submit_request(), max_events=1)
 
     with pytest.raises(ValueError, match="max_events"):
-        session.submit_and_poll_result(operation_id=99, frame_id=7, max_events=-1)
+        session.submit_and_poll_result(_native_submit_request(body=b""), max_events=-1)
 
 
 def test_native_runtime_session_submit_result_preserves_related_diagnostic_ids(tmp_path: Path) -> None:
@@ -5168,7 +5391,7 @@ def test_native_runtime_session_submit_result_preserves_related_diagnostic_ids(t
         )
     )
 
-    result = session.submit_and_poll_result(operation_id=99, frame_id=7, body=b"payload")
+    result = session.submit_and_poll_result(_native_submit_request())
 
     assert result.diagnostic.related_connection_id == 12
     assert result.diagnostic.related_session_id == 41
@@ -5216,7 +5439,7 @@ def test_native_runtime_session_submit_and_poll_maps_non_ok_statuses(tmp_path: P
         )
 
         with pytest.raises(NativeInternalError):
-            session.submit_and_poll_result(operation_id=99, frame_id=7, body=b"payload")
+            session.submit_and_poll_result(_native_submit_request())
 
 
 def test_native_runtime_session_batch_poll_reports_would_block_when_no_result(tmp_path: Path) -> None:
@@ -5235,7 +5458,7 @@ def test_native_runtime_session_batch_poll_reports_would_block_when_no_result(tm
         )
     )
 
-    operation = session.submit_operation(operation_id=99, frame_id=7)
+    operation = session.submit_operation(_native_submit_request(body=b""))
 
     with pytest.raises(NativeWouldBlockError):
         session.poll_result(operation, max_events=2)
@@ -5258,7 +5481,7 @@ def test_native_runtime_session_batch_poll_skips_mismatched_events(tmp_path: Pat
             events[0].connection = request.scope
             events[0].session = _NnrpHandle(HANDLE_KIND_SESSION, 42, 3, 0)
             events[0].operation = _NnrpHandle(HANDLE_KIND_OPERATION, 99, 1, 0)
-            events[0].frame_id = 7
+            _write_event_header(events[0], message_type=0, frame_id=7)
             events[0].payload = _NnrpBufferView(
                 ctypes.cast(self._event_payload_owner, ctypes.c_void_p),
                 len(self._event_payload_owner.raw),
@@ -5282,7 +5505,7 @@ def test_native_runtime_session_batch_poll_skips_mismatched_events(tmp_path: Pat
         )
     )
 
-    operation = session.submit_operation(operation_id=99, frame_id=7)
+    operation = session.submit_operation(_native_submit_request(body=b""))
 
     with pytest.raises(NativeWouldBlockError):
         session.poll_result(operation, max_events=2)
@@ -5308,7 +5531,7 @@ def test_native_runtime_session_batch_poll_skips_submit_accepted_events(tmp_path
                 events[index].connection = request.scope
                 events[index].session = _NnrpHandle(HANDLE_KIND_SESSION, 41, 3, 0)
                 events[index].operation = _NnrpHandle(HANDLE_KIND_OPERATION, 99, 1, 0)
-                events[index].frame_id = 7
+                _write_event_header(events[index], message_type=0, frame_id=7)
                 events[index].payload = _NnrpBufferView(
                     ctypes.cast(self._event_payload_owner, ctypes.c_void_p),
                     len(self._event_payload_owner.raw),
@@ -5332,7 +5555,7 @@ def test_native_runtime_session_batch_poll_skips_submit_accepted_events(tmp_path
         )
     )
 
-    operation = session.submit_operation(operation_id=99, frame_id=7)
+    operation = session.submit_operation(_native_submit_request(body=b""))
     result = session.poll_result(operation, max_events=2)
 
     assert result.state is NativeOperationLifecycle.COMPLETED
@@ -5373,7 +5596,7 @@ def test_native_runtime_session_batch_poll_preserves_unmatched_owned_events(
             schema_version=6,
         )
     )
-    operation = session.submit_operation(operation_id=99, frame_id=7)
+    operation = session.submit_operation(_native_submit_request(body=b""))
 
     result = session.poll_result(operation, max_events=4)
 
@@ -5404,9 +5627,10 @@ def test_native_runtime_session_accepts_read_only_memoryview_payloads(tmp_path: 
         )
     )
 
-    session.submit_operation(operation_id=99, frame_id=7, body=memoryview(b"payload"))
+    request = _native_submit_request(body=memoryview(b"payload"))
+    session.submit_operation(request)
 
-    assert library.submitted_payloads[-1][FrameSubmitMetadata.STRUCT.size :] == b"payload"
+    assert library.submitted_payloads[-1] == request.metadata.pack() + request.body
 
 
 def test_native_runtime_session_raises_when_result_is_not_available(tmp_path: Path) -> None:
@@ -5427,15 +5651,13 @@ def test_native_runtime_session_raises_when_result_is_not_available(tmp_path: Pa
 
     with pytest.raises(NativeWouldBlockError):
         session.submit_and_poll_result(
-            operation_id=99,
-            frame_id=7,
-            body=b"payload",
+            _native_submit_request(),
             parent_operation_id=1,
             max_events=1,
         )
 
     with pytest.raises(ValueError, match="max_events"):
-        session.poll_result(session.submit_operation(operation_id=99, frame_id=7), max_events=-1)
+        session.poll_result(session.submit_operation(_native_submit_request(body=b"")), max_events=-1)
 
 
 def test_native_runtime_session_rejects_use_after_close(tmp_path: Path) -> None:
@@ -5453,12 +5675,12 @@ def test_native_runtime_session_rejects_use_after_close(tmp_path: Path) -> None:
             schema_version=6,
         )
     )
-    operation = session.submit_operation(operation_id=99, frame_id=7)
+    operation = session.submit_operation(_native_submit_request(body=b""))
 
     session.close()
 
     with pytest.raises(NativeInvalidStateError, match="closed"):
-        session.submit(operation_id=100, frame_id=8)
+        session.submit(_native_submit_request(100, 8, b""))
     with pytest.raises(NativeInvalidStateError, match="closed"):
         session.poll_result(operation, max_events=1)
     with pytest.raises(NativeInvalidStateError, match="closed"):
@@ -5504,14 +5726,16 @@ def test_native_runtime_client_raises_mapped_status_errors(tmp_path: Path) -> No
         )
 
 
-async def _collect_async_events(session: NativeRuntimeSession) -> list[NativeRuntimeEvent]:
+async def _collect_async_events(
+    session: NativeRuntimeSession,
+) -> list[NativeRuntimeEvent | NativeLifecycleEvent]:
     return [event async for event in session.iter_events(max_events=1)]
 
 
 async def _collect_async_events_by_kind(
     session: NativeRuntimeSession,
     event_kind: int,
-) -> list[NativeRuntimeEvent]:
+) -> list[NativeRuntimeEvent | NativeLifecycleEvent]:
     return [event async for event in session.iter_events(max_events=1, event_kind=event_kind)]
 
 
@@ -5544,7 +5768,7 @@ async def _cancel_async_credit_updates(session: NativeRuntimeSession) -> None:
 
 
 async def _cancel_async_submit(session: NativeRuntimeSession) -> None:
-    task = asyncio.create_task(session.async_submit_operation(operation_id=101, frame_id=9, body=b"payload"))
+    task = asyncio.create_task(session.async_submit_operation(_native_submit_request(101, 9)))
     await asyncio.sleep(0.02)
     task.cancel()
     with pytest.raises(asyncio.CancelledError):

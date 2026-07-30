@@ -14,16 +14,20 @@ from dataclasses import dataclass, field, replace
 from enum import IntFlag, StrEnum
 from functools import cmp_to_key
 from pathlib import Path
-from typing import Any, Protocol, TypeVar, runtime_checkable
+from typing import TYPE_CHECKING, Any, Protocol, TypeVar, runtime_checkable
 from urllib.parse import SplitResult, urlsplit
 
-from nnrp.core import MessageType
+if TYPE_CHECKING:
+    from nnrp.client import SubmitRequest
+
+from nnrp.core import HeaderFlags, MessageType, WireFormat
 from nnrp.core.messages import (
-    FRAME_SUBMIT_METADATA_LENGTH,
     RESULT_PUSH_METADATA_LENGTH,
     BudgetPolicy,
+    FlowUpdateMetadata,
     FrameSubmitMetadata,
     InputProfile,
+    ResultHintMetadata,
     ResultPushMetadata,
     SubmitMode,
     TileIndexMode,
@@ -35,6 +39,7 @@ from nnrp.runtime import (
     CacheReferenceMetadata,
     CapabilityMetadata,
     ControlRequestMetadata,
+    NativeRuntimeEvent,
     ObjectDeltaMetadata,
     ObjectDescriptorMetadata,
     ObjectReferenceMetadata,
@@ -46,7 +51,13 @@ from nnrp.runtime import (
     ResultDropReasonMetadata,
     RetryAfterMetadata,
     RouteHintMetadata,
+    RuntimeEventMetadata,
+    RuntimeEventMetadataKind,
+    RuntimeEventTail,
+    RuntimeEventTailKind,
+    RuntimeFrameHeader,
     SchedulingMetadata,
+    SessionCloseMetadata,
     SupersedeMetadata,
     TraceContextMetadata,
     decode_runtime_control_metadata,
@@ -63,8 +74,8 @@ _NATIVE_RUNTIME_ATEXIT_REGISTERED = False
 EXPECTED_PROTOCOL_MAJOR = 1
 EXPECTED_PROTOCOL_WIRE_FORMAT = 0
 EXPECTED_ABI_MAJOR = 4
-EXPECTED_ABI_MINOR = 1
-EXPECTED_ABI_PATCH = 1
+EXPECTED_ABI_MINOR = 3
+EXPECTED_ABI_PATCH = 0
 TRANSPORT_SLOT_QUIC = 0x00000001
 TRANSPORT_SLOT_TCP = 0x00000002
 TRANSPORT_SLOT_IPC = 0x00000004
@@ -1143,14 +1154,28 @@ class _NnrpFfiDiagnostic(ctypes.Structure):
     ]
 
 
+class _NnrpRuntimeFrameHeader(ctypes.Structure):
+    _fields_ = [
+        ("present", ctypes.c_uint8),
+        ("version_major", ctypes.c_uint8),
+        ("wire_format", ctypes.c_uint8),
+        ("message_type", ctypes.c_uint8),
+        ("flags", ctypes.c_uint32),
+        ("session_id", ctypes.c_uint32),
+        ("frame_id", ctypes.c_uint32),
+        ("view_id", ctypes.c_uint16),
+        ("route_id", ctypes.c_uint16),
+        ("trace_id", ctypes.c_uint64),
+    ]
+
+
 class _NnrpEvent(ctypes.Structure):
     _fields_ = [
         ("kind", ctypes.c_uint32),
-        ("message_type", ctypes.c_uint32),
+        ("header", _NnrpRuntimeFrameHeader),
         ("connection", _NnrpHandle),
         ("session", _NnrpHandle),
         ("operation", _NnrpHandle),
-        ("frame_id", ctypes.c_uint32),
         ("payload_owner", _NnrpHandle),
         ("payload", _NnrpBufferView),
         ("diagnostic", _NnrpFfiDiagnostic),
@@ -1209,6 +1234,10 @@ class _NnrpSubmitRequest(ctypes.Structure):
         ("session", _NnrpHandle),
         ("operation_id", ctypes.c_uint64),
         ("frame_id", ctypes.c_uint32),
+        ("header_flags", ctypes.c_uint32),
+        ("view_id", ctypes.c_uint16),
+        ("route_id", ctypes.c_uint16),
+        ("trace_id", ctypes.c_uint64),
         ("payload", _NnrpBufferView),
     ]
 
@@ -1315,7 +1344,8 @@ class _NnrpSchemaDescriptorHeader(ctypes.Structure):
 class _NnrpTypedPayloadDescriptor(ctypes.Structure):
     _fields_ = [
         ("profile_id", ctypes.c_uint16),
-        ("descriptor_flags", ctypes.c_uint16),
+        ("payload_kind", ctypes.c_uint8),
+        ("descriptor_flags", ctypes.c_uint8),
         ("schema_id", ctypes.c_uint32),
         ("schema_version", ctypes.c_uint32),
         ("stream_semantics", ctypes.c_uint16),
@@ -2883,67 +2913,22 @@ _NATIVE_STRUCTURED_DIAGNOSTIC_OK = NativeStructuredDiagnostic(status=_NATIVE_STA
 
 
 @dataclass(frozen=True, slots=True)
-class NativeRuntimeFrameEvent:
-    type: str
-    message_type: MessageType
-    metadata: Any
-    body: bytes = b""
-    diagnostic: bytes = b""
-    metadata_body: bytes = b""
-    delta: bytes = b""
+class _NativeRuntimeEventContext:
+    kind: int
     connection: NativeHandle = field(default_factory=NativeHandle.invalid)
     session: NativeHandle = field(default_factory=NativeHandle.invalid)
     operation: NativeHandle = field(default_factory=NativeHandle.invalid)
-    frame_id: int = 0
-    native_diagnostic: NativeRuntimeDiagnostic = _NATIVE_RUNTIME_DIAGNOSTIC_OK
+    diagnostic: NativeRuntimeDiagnostic = _NATIVE_RUNTIME_DIAGNOSTIC_OK
 
 
-class NativeRuntimeEvent:
-    __slots__ = (
-        "connection",
-        "diagnostic",
-        "frame_id",
-        "kind",
-        "message_type",
-        "operation",
-        "payload",
-        "session",
-    )
-
-    def __init__(
-        self,
-        kind: int,
-        connection: NativeHandle,
-        session: NativeHandle,
-        operation: NativeHandle,
-        frame_id: int,
-        payload: bytes,
-        diagnostic: NativeRuntimeDiagnostic,
-        *,
-        message_type: int = 0,
-    ) -> None:
-        self.kind = kind
-        self.message_type = message_type
-        self.connection = connection
-        self.session = session
-        self.operation = operation
-        self.frame_id = frame_id
-        self.payload = payload
-        self.diagnostic = diagnostic
-
-    @classmethod
-    def from_ffi(cls, event: _NnrpEvent, entrypoints: NativeRuntimeEntrypoints) -> NativeRuntimeEvent:
-        payload = _copy_owned_event_payload(entrypoints, event)
-        return cls(
-            kind=int(event.kind),
-            connection=_native_handle_from_trusted_ffi(event.connection),
-            session=_native_handle_from_trusted_ffi(event.session),
-            operation=_native_handle_from_trusted_ffi(event.operation),
-            frame_id=int(event.frame_id),
-            payload=payload,
-            diagnostic=NativeRuntimeDiagnostic.from_ffi(event.diagnostic),
-            message_type=int(event.message_type),
-        )
+@dataclass(frozen=True, slots=True)
+class NativeLifecycleEvent:
+    kind: int
+    connection: NativeHandle
+    session: NativeHandle
+    operation: NativeHandle
+    payload: bytes
+    diagnostic: NativeRuntimeDiagnostic
 
     @property
     def kind_name(self) -> str:
@@ -2961,94 +2946,60 @@ class NativeRuntimeEvent:
     def is_control_event(self) -> bool:
         return self.kind in {EVENT_KIND_FLOW_UPDATED, EVENT_KIND_CONTROL}
 
-    def to_credit_update(self) -> NativeCreditUpdateEvent:
-        return NativeCreditUpdateEvent.from_event(self)
 
-    def to_runtime_frame(self) -> NativeRuntimeFrameEvent | None:
-        if self.kind != EVENT_KIND_RUNTIME_FRAME:
-            return None
-        return _decode_native_runtime_frame_event(self)
+NativePolledEvent = NativeRuntimeEvent | NativeLifecycleEvent
 
 
 @dataclass(frozen=True)
 class NativeCreditUpdateEvent:
-    connection: NativeHandle
-    session: NativeHandle
-    operation: NativeHandle
-    frame_id: int
-    diagnostic: NativeStructuredDiagnostic
+    event: NativeRuntimeEvent
+    metadata: FlowUpdateMetadata
 
     @classmethod
-    def from_event(cls, event: NativeRuntimeEvent) -> NativeCreditUpdateEvent:
-        if not event.is_flow_update:
-            raise NativeHandleError(f"expected native flow update event, got {event.kind_name}")
-        return cls(
-            connection=event.connection,
-            session=event.session,
-            operation=event.operation,
-            frame_id=event.frame_id,
-            diagnostic=NativeStructuredDiagnostic.from_runtime_diagnostic(event.diagnostic),
-        )
+    def from_event(cls, event: NativePolledEvent) -> NativeCreditUpdateEvent:
+        if not isinstance(event, NativeRuntimeEvent):
+            raise NativeHandleError(f"expected FLOW_UPDATE event, got {event.kind_name}")
+        if event.metadata.kind is not RuntimeEventMetadataKind.FLOW_UPDATE:
+            raise NativeHandleError(f"expected FLOW_UPDATE event, got {event.header.message_type.name}")
+        return cls(event, event.metadata.value)
 
 
 @dataclass(frozen=True)
 class NativeResultHintEvent:
-    connection: NativeHandle
-    session: NativeHandle
-    operation: NativeHandle
-    frame_id: int
-    payload: bytes
     event: NativeRuntimeEvent
-    diagnostic: NativeStructuredDiagnostic
+    metadata: ResultHintMetadata
 
     @classmethod
-    def from_event(cls, event: NativeRuntimeEvent) -> NativeResultHintEvent:
-        if event.kind != EVENT_KIND_RESULT_HINT:
-            raise NativeHandleError(f"expected native result hint event, got {event.kind_name}")
-        return cls(
-            connection=event.connection,
-            session=event.session,
-            operation=event.operation,
-            frame_id=event.frame_id,
-            payload=event.payload,
-            event=event,
-            diagnostic=NativeStructuredDiagnostic.from_runtime_diagnostic(event.diagnostic),
-        )
-
-    @property
-    def metadata(self) -> Any:
-        from nnrp.core.messages.control import ResultHintMetadata
-
-        return ResultHintMetadata.unpack(self.payload)
+    def from_event(cls, event: NativePolledEvent) -> NativeResultHintEvent:
+        if not isinstance(event, NativeRuntimeEvent):
+            raise NativeHandleError(f"expected RESULT_HINT event, got {event.kind_name}")
+        if event.metadata.kind is not RuntimeEventMetadataKind.RESULT_HINT:
+            raise NativeHandleError(f"expected RESULT_HINT event, got {event.header.message_type.name}")
+        return cls(event, event.metadata.value)
 
 
 @dataclass(frozen=True)
 class NativePayloadFamilyEvent:
     payload_family: str
-    connection: NativeHandle
-    session: NativeHandle
-    operation: NativeHandle
-    frame_id: int
     payload: bytes
     event: NativeRuntimeEvent
-    diagnostic: NativeStructuredDiagnostic
 
     @classmethod
     def from_event(cls, event: NativeRuntimeEvent, *, payload_family: str) -> NativePayloadFamilyEvent:
         normalized_family = payload_family.strip().lower()
         if normalized_family not in _PAYLOAD_FAMILY_NAMES:
             raise NativeHandleError(f"unknown native payload family {payload_family!r}")
-        if not event.is_result_event and event.kind != EVENT_KIND_CONTROL:
-            raise NativeHandleError(f"expected native result/control event, got {event.kind_name}")
+        if event.header.message_type not in {
+            MessageType.RESULT_PUSH,
+            MessageType.RESULT_DROP,
+            MessageType.CANCEL,
+            MessageType.ABORT,
+        }:
+            raise NativeHandleError(f"expected native result/control event, got {event.header.message_type.name}")
         return cls(
             payload_family=normalized_family,
-            connection=event.connection,
-            session=event.session,
-            operation=event.operation,
-            frame_id=event.frame_id,
-            payload=event.payload,
+            payload=(event.tail.body if event.tail.kind is RuntimeEventTailKind.BODY else event.tail.diagnostic),
             event=event,
-            diagnostic=NativeStructuredDiagnostic.from_runtime_diagnostic(event.diagnostic),
         )
 
     @property
@@ -3065,6 +3016,8 @@ class NativePayloadFamilyEvent:
 
 
 NativeRuntimeEventCallback = Callable[[NativeRuntimeEvent], None]
+NativeLifecycleEventCallback = Callable[[NativeLifecycleEvent], None]
+NativePolledEventCallback = Callable[[NativePolledEvent], None]
 NativeCreditUpdateCallback = Callable[[NativeCreditUpdateEvent], None]
 NativeResultHintCallback = Callable[[NativeResultHintEvent], None]
 NativePayloadFamilyCallback = Callable[[NativePayloadFamilyEvent], None]
@@ -3073,7 +3026,7 @@ NativePayloadFamilyCallback = Callable[[NativePayloadFamilyEvent], None]
 @dataclass(frozen=True)
 class NativeRuntimePollResult:
     status: NativeStatus
-    event: NativeRuntimeEvent | None = None
+    event: NativePolledEvent | None = None
 
     @classmethod
     def from_ffi(
@@ -3082,38 +3035,98 @@ class NativeRuntimePollResult:
         entrypoints: NativeRuntimeEntrypoints,
     ) -> NativeRuntimePollResult:
         status = NativeStatus.from_ffi(result.status)
-        event = NativeRuntimeEvent.from_ffi(result.event, entrypoints) if result.has_event else None
+        event = _native_event_from_ffi(result.event, entrypoints) if result.has_event else None
         return cls(status, event)
 
 
-_RUNTIME_FRAME_TYPE_NAMES = {
-    MessageType.CANCEL: "cancel",
-    MessageType.ABORT: "abort",
-    MessageType.PRIORITY_UPDATE: "priority-update",
-    MessageType.DEADLINE: "deadline",
-    MessageType.EXPIRE_AT: "expire-at",
-    MessageType.SUPERSEDE: "supersede",
-    MessageType.BUDGET_UPDATE: "budget-update",
-    MessageType.PROGRESS: "progress",
-    MessageType.PARTIAL_RESULT: "partial-result",
-    MessageType.BACKPRESSURE: "backpressure",
-    MessageType.CREDIT_UPDATE: "credit-update",
-    MessageType.CAPABILITY_NEGOTIATION: "capability-negotiation",
-    MessageType.DEGRADE_PROFILE: "degrade-profile",
-    MessageType.ROUTE_HINT: "route-hint",
-    MessageType.EXECUTION_HINT: "execution-hint",
-    MessageType.TRACE_CONTEXT: "trace-context",
-    MessageType.RESULT_DROP_REASON: "result-drop-reason",
-    MessageType.ERROR_RECOVERABLE: "recoverable-error",
-    MessageType.RETRY_AFTER: "retry-after",
-    MessageType.OBJECT_DECLARE: "object-declare",
-    MessageType.OBJECT_REF: "object-ref",
-    MessageType.OBJECT_RELEASE: "object-release",
-    MessageType.OBJECT_PATCH: "object-patch",
-    MessageType.OBJECT_DELTA: "object-delta",
-    MessageType.CACHE_REFERENCE: "cache-reference",
-    MessageType.CACHE_MISS: "cache-miss",
-    MessageType.CACHE_INVALIDATE: "cache-invalidate",
+def _native_event_from_ffi(
+    event: _NnrpEvent,
+    entrypoints: NativeRuntimeEntrypoints,
+) -> NativePolledEvent:
+    payload = _copy_owned_event_payload(entrypoints, event)
+    context = _NativeRuntimeEventContext(
+        kind=int(event.kind),
+        connection=_native_handle_from_trusted_ffi(event.connection),
+        session=_native_handle_from_trusted_ffi(event.session),
+        operation=_native_handle_from_trusted_ffi(event.operation),
+        diagnostic=NativeRuntimeDiagnostic.from_ffi(event.diagnostic),
+    )
+    present = int(event.header.present)
+    if present == 0:
+        return NativeLifecycleEvent(
+            kind=context.kind,
+            connection=context.connection,
+            session=context.session,
+            operation=context.operation,
+            payload=payload,
+            diagnostic=context.diagnostic,
+        )
+    if present != 1:
+        raise NativeProtocolError(
+            NativeStatus(FFI_STATUS_PROTOCOL_ERROR),
+            f"invalid native runtime event header presence marker {present}",
+        )
+    try:
+        message_type = MessageType(int(event.header.message_type))
+    except ValueError as error:
+        raise NativeProtocolError(
+            NativeStatus(FFI_STATUS_PROTOCOL_ERROR),
+            f"unknown Preview4 runtime message type 0x{int(event.header.message_type):02x}",
+        ) from error
+    try:
+        wire_format = WireFormat(int(event.header.wire_format))
+    except ValueError as error:
+        raise NativeProtocolError(
+            NativeStatus(FFI_STATUS_PROTOCOL_ERROR),
+            f"unknown Preview4 runtime wire format {int(event.header.wire_format)}",
+        ) from error
+    try:
+        header = RuntimeFrameHeader(
+            message_type=message_type,
+            flags=HeaderFlags(int(event.header.flags)),
+            session_id=int(event.header.session_id),
+            frame_id=int(event.header.frame_id),
+            view_id=int(event.header.view_id),
+            route_id=int(event.header.route_id),
+            trace_id=int(event.header.trace_id),
+            version_major=int(event.header.version_major),
+            wire_format=wire_format,
+        )
+    except ValueError as error:
+        raise NativeProtocolError(
+            NativeStatus(FFI_STATUS_PROTOCOL_ERROR),
+            f"invalid Preview4 runtime frame header: {error}",
+        ) from error
+    return _decode_wire_runtime_event(header, payload, context)
+
+
+_RUNTIME_METADATA_KIND_BY_MESSAGE = {
+    MessageType.CANCEL: RuntimeEventMetadataKind.CONTROL_REQUEST,
+    MessageType.ABORT: RuntimeEventMetadataKind.CONTROL_REQUEST,
+    MessageType.PRIORITY_UPDATE: RuntimeEventMetadataKind.SCHEDULING,
+    MessageType.DEADLINE: RuntimeEventMetadataKind.SCHEDULING,
+    MessageType.EXPIRE_AT: RuntimeEventMetadataKind.SCHEDULING,
+    MessageType.SUPERSEDE: RuntimeEventMetadataKind.SUPERSEDE,
+    MessageType.BUDGET_UPDATE: RuntimeEventMetadataKind.BUDGET,
+    MessageType.PROGRESS: RuntimeEventMetadataKind.PROGRESS,
+    MessageType.PARTIAL_RESULT: RuntimeEventMetadataKind.PARTIAL_RESULT,
+    MessageType.BACKPRESSURE: RuntimeEventMetadataKind.PRESSURE,
+    MessageType.CREDIT_UPDATE: RuntimeEventMetadataKind.PRESSURE,
+    MessageType.CAPABILITY_NEGOTIATION: RuntimeEventMetadataKind.CAPABILITY,
+    MessageType.DEGRADE_PROFILE: RuntimeEventMetadataKind.CAPABILITY,
+    MessageType.ROUTE_HINT: RuntimeEventMetadataKind.ROUTE_HINT,
+    MessageType.EXECUTION_HINT: RuntimeEventMetadataKind.ROUTE_HINT,
+    MessageType.TRACE_CONTEXT: RuntimeEventMetadataKind.TRACE_CONTEXT,
+    MessageType.RESULT_DROP_REASON: RuntimeEventMetadataKind.RESULT_DROP_REASON,
+    MessageType.ERROR_RECOVERABLE: RuntimeEventMetadataKind.RECOVERABLE_ERROR,
+    MessageType.RETRY_AFTER: RuntimeEventMetadataKind.RETRY_AFTER,
+    MessageType.OBJECT_DECLARE: RuntimeEventMetadataKind.OBJECT_DESCRIPTOR,
+    MessageType.OBJECT_REF: RuntimeEventMetadataKind.OBJECT_REFERENCE,
+    MessageType.OBJECT_RELEASE: RuntimeEventMetadataKind.OBJECT_RELEASE,
+    MessageType.OBJECT_PATCH: RuntimeEventMetadataKind.OBJECT_DELTA,
+    MessageType.OBJECT_DELTA: RuntimeEventMetadataKind.OBJECT_DELTA,
+    MessageType.CACHE_REFERENCE: RuntimeEventMetadataKind.CACHE_REFERENCE,
+    MessageType.CACHE_MISS: RuntimeEventMetadataKind.CACHE_MISS,
 }
 _RUNTIME_OBJECT_MESSAGE_TYPES = {
     MessageType.OBJECT_DECLARE,
@@ -3161,55 +3174,145 @@ def _release_owned_event_payload(entrypoints: NativeRuntimeEntrypoints, event: _
         raise_for_native_status(status)
 
 
-def _decode_native_runtime_frame_event(event: NativeRuntimeEvent) -> NativeRuntimeFrameEvent:
-    try:
-        message_type = MessageType(event.message_type)
-        event_type = _RUNTIME_FRAME_TYPE_NAMES[message_type]
-    except (KeyError, ValueError) as error:
+def _decode_wire_runtime_event(
+    header: RuntimeFrameHeader,
+    payload: bytes,
+    context: _NativeRuntimeEventContext,
+) -> NativeRuntimeEvent:
+    message_type = MessageType(header.message_type)
+    if message_type in {MessageType.FRAME_CANCEL, MessageType.RESULT_DROP}:
+        if payload:
+            raise NativeProtocolError(
+                NativeStatus(FFI_STATUS_PROTOCOL_ERROR),
+                f"{message_type.name} runtime event must not carry a payload",
+            )
+        metadata = RuntimeEventMetadata(RuntimeEventMetadataKind.NONE)
+        tail = RuntimeEventTail.none()
+    elif message_type == MessageType.SESSION_CLOSE:
+        value = SessionCloseMetadata.unpack(payload)
+        metadata = RuntimeEventMetadata(RuntimeEventMetadataKind.SESSION_CLOSE, value)
+        tail = RuntimeEventTail.none()
+    elif message_type == MessageType.FRAME_SUBMIT:
+        value, body = _unpack_runtime_event_prefix(FrameSubmitMetadata, payload)
+        metadata = RuntimeEventMetadata(RuntimeEventMetadataKind.FRAME_SUBMIT, value)
+        tail = RuntimeEventTail.with_body(body)
+    elif message_type == MessageType.RESULT_PUSH:
+        value, body = _unpack_runtime_event_prefix(ResultPushMetadata, payload)
+        metadata = RuntimeEventMetadata(RuntimeEventMetadataKind.RESULT_PUSH, value)
+        tail = RuntimeEventTail.with_body(body)
+    elif message_type == MessageType.FLOW_UPDATE:
+        value = FlowUpdateMetadata.unpack(payload)
+        metadata = RuntimeEventMetadata(RuntimeEventMetadataKind.FLOW_UPDATE, value)
+        tail = RuntimeEventTail.none()
+    elif message_type == MessageType.RESULT_HINT:
+        value = ResultHintMetadata.unpack(payload)
+        metadata = RuntimeEventMetadata(RuntimeEventMetadataKind.RESULT_HINT, value)
+        tail = RuntimeEventTail.none()
+    elif message_type == MessageType.CACHE_INVALIDATE:
+        value = CacheInvalidateMetadata.unpack(payload)
+        metadata = RuntimeEventMetadata(RuntimeEventMetadataKind.CACHE_INVALIDATE, value)
+        tail = RuntimeEventTail.none()
+    elif message_type in _RUNTIME_OBJECT_MESSAGE_TYPES:
+        object_decoded = decode_runtime_object_metadata(message_type, payload)
+        kind = _RUNTIME_METADATA_KIND_BY_MESSAGE[message_type]
+        object_metadata = object_decoded.metadata
+        metadata = RuntimeEventMetadata(kind, object_metadata)
+        if message_type in {MessageType.OBJECT_PATCH, MessageType.OBJECT_DELTA}:
+            if not isinstance(object_metadata, ObjectDeltaMetadata):
+                raise NativeRuntimeError(
+                    NativeStatus(FFI_STATUS_PROTOCOL_ERROR),
+                    f"{message_type.name} requires ObjectDeltaMetadata",
+                )
+            metadata_length = int(object_metadata.metadata_bytes)
+            tail = RuntimeEventTail.with_metadata_body_and_delta(
+                object_decoded.tail[:metadata_length],
+                object_decoded.tail[metadata_length:],
+            )
+        elif message_type in _RUNTIME_BODY_MESSAGE_TYPES:
+            tail = RuntimeEventTail.with_body(object_decoded.tail)
+        else:
+            tail = RuntimeEventTail.with_diagnostic(object_decoded.tail)
+    elif message_type in _RUNTIME_METADATA_KIND_BY_MESSAGE:
+        control_decoded = decode_runtime_control_metadata(message_type, payload)
+        metadata = RuntimeEventMetadata(
+            _RUNTIME_METADATA_KIND_BY_MESSAGE[message_type],
+            control_decoded.metadata,
+        )
+        if message_type in _RUNTIME_BODY_MESSAGE_TYPES:
+            tail = RuntimeEventTail.with_body(control_decoded.tail)
+        elif message_type in _RUNTIME_DIAGNOSTIC_MESSAGE_TYPES:
+            tail = RuntimeEventTail.with_diagnostic(control_decoded.tail)
+        else:
+            tail = RuntimeEventTail.none()
+    else:
         raise NativeProtocolError(
             NativeStatus(FFI_STATUS_PROTOCOL_ERROR),
-            f"unknown Preview4 runtime message type 0x{event.message_type:02x}",
-        ) from error
+            f"message type {message_type.name} is not a frozen Preview4 runtime event",
+        )
+    return NativeRuntimeEvent(header, metadata, tail, context)
 
-    if message_type == MessageType.CACHE_INVALIDATE:
-        metadata = CacheInvalidateMetadata.unpack(event.payload)
-        tail = b""
-    elif message_type in _RUNTIME_OBJECT_MESSAGE_TYPES:
-        decoded = decode_runtime_object_metadata(message_type, event.payload)
-        metadata = decoded.metadata
-        tail = decoded.tail
-    else:
-        decoded = decode_runtime_control_metadata(message_type, event.payload)
-        metadata = decoded.metadata
-        tail = decoded.tail
 
-    body = b""
-    diagnostic = b""
-    metadata_body = b""
-    delta = b""
-    if message_type in {MessageType.OBJECT_PATCH, MessageType.OBJECT_DELTA}:
-        metadata_length = int(metadata.metadata_bytes)
-        metadata_body = tail[:metadata_length]
-        delta = tail[metadata_length:]
-    elif message_type in _RUNTIME_BODY_MESSAGE_TYPES:
-        body = tail
-    elif message_type in _RUNTIME_DIAGNOSTIC_MESSAGE_TYPES:
-        diagnostic = tail
+def _unpack_runtime_event_prefix(metadata_type: type[Any], payload: bytes) -> tuple[Any, bytes]:
+    metadata_length = metadata_type.STRUCT.size
+    if len(payload) < metadata_length:
+        raise NativeProtocolError(
+            NativeStatus(FFI_STATUS_PROTOCOL_ERROR),
+            f"{metadata_type.__name__} payload is shorter than {metadata_length} bytes",
+        )
+    return metadata_type.unpack(payload[:metadata_length]), payload[metadata_length:]
 
-    return NativeRuntimeFrameEvent(
-        type=event_type,
-        message_type=message_type,
-        metadata=metadata,
-        body=body,
-        diagnostic=diagnostic,
-        metadata_body=metadata_body,
-        delta=delta,
-        connection=event.connection,
-        session=event.session,
-        operation=event.operation,
-        frame_id=event.frame_id,
-        native_diagnostic=event.diagnostic,
-    )
+
+def _runtime_event_payload(event: NativeRuntimeEvent) -> bytes:
+    metadata_value = event.metadata.value
+    metadata_bytes = b"" if metadata_value is None else bytes(metadata_value.pack())
+    if event.tail.kind is RuntimeEventTailKind.BODY:
+        return metadata_bytes + event.tail.body
+    if event.tail.kind is RuntimeEventTailKind.DIAGNOSTIC:
+        return metadata_bytes + event.tail.diagnostic
+    if event.tail.kind is RuntimeEventTailKind.METADATA_BODY_AND_DELTA:
+        return metadata_bytes + event.tail.metadata_body + event.tail.delta
+    return metadata_bytes
+
+
+def _runtime_event_context(event: NativeRuntimeEvent) -> _NativeRuntimeEventContext:
+    context = event._native_context
+    if not isinstance(context, _NativeRuntimeEventContext):
+        return _NativeRuntimeEventContext(EVENT_KIND_RUNTIME_FRAME)
+    return context
+
+
+def _native_event_kind(event: NativePolledEvent) -> int:
+    if isinstance(event, NativeRuntimeEvent):
+        return _runtime_event_context(event).kind
+    return event.kind
+
+
+def _event_payload(event: NativePolledEvent) -> bytes:
+    if isinstance(event, NativeRuntimeEvent):
+        return _runtime_event_payload(event)
+    return event.payload
+
+
+def _event_frame_id(event: NativePolledEvent) -> int:
+    if isinstance(event, NativeRuntimeEvent):
+        return event.header.frame_id
+    return event.diagnostic.related_frame_id
+
+
+def _event_operation_id(event: NativePolledEvent) -> int:
+    if isinstance(event, NativeRuntimeEvent):
+        context = _runtime_event_context(event)
+        if context.operation.id:
+            return context.operation.id
+        value = event.metadata.value
+        return int(getattr(value, "operation_id", 0))
+    return event.operation.id
+
+
+def _event_native_diagnostic(event: NativePolledEvent) -> NativeRuntimeDiagnostic:
+    if isinstance(event, NativeRuntimeEvent):
+        return _runtime_event_context(event).diagnostic
+    return event.diagnostic
 
 
 class NativeOperationLifecycle(StrEnum):
@@ -3260,22 +3363,13 @@ class NativeOperationSchedulingHint:
 
 class NativeRuntimeResult:
     __slots__ = (
-        "_event",
-        "_event_connection",
-        "_event_diagnostic",
-        "_event_kind",
-        "_event_operation_flags",
-        "_event_operation_generation",
-        "_event_operation_id",
-        "_event_operation_kind",
-        "_event_session",
         "diagnostic",
+        "event",
         "frame_id",
         "metadata",
         "operation_id",
         "body",
         "state",
-        "_payload",
     )
 
     def __init__(
@@ -3284,26 +3378,15 @@ class NativeRuntimeResult:
         operation_id: int,
         frame_id: int,
         payload: bytes,
-        event: NativeRuntimeEvent | None,
+        event: NativePolledEvent,
         diagnostic: NativeStructuredDiagnostic,
-        *,
-        event_kind: int = EVENT_KIND_RESULT_PUSHED,
-        event_connection: NativeHandle | None = None,
-        event_session: NativeHandle | None = None,
-        event_operation_kind: int = HANDLE_KIND_OPERATION,
-        event_operation_id: int | None = None,
-        event_operation_generation: int = 0,
-        event_operation_flags: int = 0,
-        event_diagnostic: NativeRuntimeDiagnostic = _NATIVE_RUNTIME_DIAGNOSTIC_OK,
     ) -> None:
         self.state = state
         self.operation_id = operation_id
         self.frame_id = frame_id
-        self._payload = payload
         self.diagnostic = diagnostic
-        self._event = event
-        self._event_kind = event.kind if event is not None else event_kind
-        if self._event_kind == EVENT_KIND_RESULT_PUSHED:
+        self.event = event
+        if _native_event_kind(event) == EVENT_KIND_RESULT_PUSHED:
             if len(payload) < RESULT_PUSH_METADATA_LENGTH:
                 raise ValueError(
                     "native RESULT_PUSH payload is shorter than the fixed result metadata prefix: "
@@ -3314,58 +3397,26 @@ class NativeRuntimeResult:
         else:
             self.metadata = None
             self.body = payload
-        self._event_connection = event.connection if event is not None else event_connection
-        self._event_session = event.session if event is not None else event_session
-        self._event_operation_kind = event.operation.kind if event is not None else event_operation_kind
-        self._event_operation_id = (
-            event.operation.id
-            if event is not None
-            else (operation_id if event_operation_id is None else event_operation_id)
-        )
-        self._event_operation_generation = (
-            event.operation.generation if event is not None else event_operation_generation
-        )
-        self._event_operation_flags = event.operation.flags if event is not None else event_operation_flags
-        self._event_diagnostic = event.diagnostic if event is not None else event_diagnostic
-
-    @property
-    def event(self) -> NativeRuntimeEvent:
-        event = self._event
-        if event is not None:
-            return event
-        operation = object.__new__(NativeHandle)
-        object.__setattr__(operation, "kind", self._event_operation_kind)
-        object.__setattr__(operation, "id", self._event_operation_id)
-        object.__setattr__(operation, "generation", self._event_operation_generation)
-        object.__setattr__(operation, "flags", self._event_operation_flags)
-        event = NativeRuntimeEvent(
-            self._event_kind,
-            self._event_connection,
-            self._event_session,
-            operation,
-            self.frame_id,
-            self._payload,
-            self._event_diagnostic,
-        )
-        self._event = event
-        return event
 
     @classmethod
     def from_event(
         cls,
-        event: NativeRuntimeEvent,
+        event: NativePolledEvent,
         *,
         state: NativeOperationLifecycle | str | None = None,
         operation_id: int | None = None,
     ) -> NativeRuntimeResult:
         selected_state = NativeOperationLifecycle(state) if state is not None else _infer_lifecycle_from_event(event)
+        selected_operation_id = operation_id
+        if selected_operation_id is None:
+            selected_operation_id = _event_operation_id(event)
         return cls(
             state=selected_state,
-            operation_id=event.operation.id if operation_id is None else operation_id,
-            frame_id=event.frame_id,
-            payload=event.payload,
+            operation_id=selected_operation_id,
+            frame_id=_event_frame_id(event),
+            payload=_event_payload(event),
             event=event,
-            diagnostic=NativeStructuredDiagnostic.from_runtime_diagnostic(event.diagnostic),
+            diagnostic=NativeStructuredDiagnostic.from_runtime_diagnostic(_event_native_diagnostic(event)),
         )
 
 
@@ -3411,8 +3462,15 @@ def _submit_result_from_ffi_event(
     object.__setattr__(operation, "id", int(raw_operation.id))
     object.__setattr__(operation, "generation", int(raw_operation.generation))
     object.__setattr__(operation, "flags", int(raw_operation.flags))
-    frame_id = int(event.frame_id)
-    runtime_event = NativeRuntimeEvent(kind, connection, session, operation, frame_id, payload, diagnostic)
+    frame_id = int(event.header.frame_id) or diagnostic.related_frame_id
+    lifecycle_event = NativeLifecycleEvent(
+        kind,
+        connection,
+        session,
+        operation,
+        payload,
+        diagnostic,
+    )
     if state is not None:
         selected_state = NativeOperationLifecycle(state)
     elif status.status_code == FFI_STATUS_OK and kind != EVENT_KIND_ERROR:
@@ -3423,7 +3481,14 @@ def _submit_result_from_ffi_event(
         )
     else:
         selected_state = NativeOperationLifecycle.FAILED
-    return NativeRuntimeResult(selected_state, operation_id, frame_id, payload, runtime_event, structured_diagnostic)
+    return NativeRuntimeResult(
+        selected_state,
+        operation_id,
+        frame_id,
+        payload,
+        lifecycle_event,
+        structured_diagnostic,
+    )
 
 
 def _submit_result_from_ok_result_pushed_ffi_event(
@@ -3440,13 +3505,12 @@ def _submit_result_from_ok_result_pushed_ffi_event(
     object.__setattr__(operation, "id", int(raw_operation.id))
     object.__setattr__(operation, "generation", int(raw_operation.generation))
     object.__setattr__(operation, "flags", int(raw_operation.flags))
-    frame_id = int(event.frame_id)
-    runtime_event = NativeRuntimeEvent(
+    frame_id = int(event.header.frame_id)
+    lifecycle_event = NativeLifecycleEvent(
         EVENT_KIND_RESULT_PUSHED,
         connection,
         session,
         operation,
-        frame_id,
         payload,
         _NATIVE_RUNTIME_DIAGNOSTIC_OK,
     )
@@ -3455,7 +3519,7 @@ def _submit_result_from_ok_result_pushed_ffi_event(
         operation_id,
         frame_id,
         payload,
-        runtime_event,
+        lifecycle_event,
         _NATIVE_STRUCTURED_DIAGNOSTIC_OK,
     )
 
@@ -3911,7 +3975,7 @@ class NativeRuntimeSession:
     _poll_event_buffer: Any = field(default=None, init=False, repr=False, compare=False)
     _poll_event_buffer_capacity: int = field(default=0, init=False, repr=False, compare=False)
     _poll_event_count: Any = field(default=None, init=False, repr=False, compare=False)
-    _pending_events: list[NativeRuntimeEvent] = field(default_factory=list, init=False, repr=False, compare=False)
+    _pending_events: list[NativePolledEvent] = field(default_factory=list, init=False, repr=False, compare=False)
     _poll_lock: threading.Lock = field(default_factory=threading.Lock, init=False, repr=False, compare=False)
     _next_runtime_frame_id: int = field(default=1, init=False, repr=False, compare=False)
 
@@ -3926,7 +3990,7 @@ class NativeRuntimeSession:
             raise_for_native_status(result.status)
             return NativeRuntimePollResult.from_ffi(result, self.entrypoints)
 
-    def poll_event(self, *, timeout_ms: int = 0) -> NativeRuntimeEvent | None:
+    def poll_event(self, *, timeout_ms: int = 0) -> NativePolledEvent | None:
         events = self.poll_events_batch(max_events=1, timeout_ms=timeout_ms)
         return events[0] if events else None
 
@@ -3936,7 +4000,7 @@ class NativeRuntimeSession:
         max_events: int | None = None,
         event_kind: int | None = None,
         timeout_ms: int = 0,
-    ) -> tuple[NativeRuntimeEvent, ...]:
+    ) -> tuple[NativePolledEvent, ...]:
         if max_events is not None:
             return self.poll_events_batch(
                 max_events=max_events,
@@ -3946,7 +4010,7 @@ class NativeRuntimeSession:
         if event_kind is not None:
             _validate_u32("event_kind", event_kind)
 
-        events: list[NativeRuntimeEvent] = []
+        events: list[NativePolledEvent] = []
         next_timeout_ms = timeout_ms
         while True:
             polled = self.poll_events_batch(max_events=1, timeout_ms=next_timeout_ms)
@@ -3954,7 +4018,7 @@ class NativeRuntimeSession:
             if not polled:
                 break
             event = polled[0]
-            if event_kind is None or event.kind == event_kind:
+            if event_kind is None or _native_event_kind(event) == event_kind:
                 events.append(event)
         return tuple(events)
 
@@ -3964,7 +4028,7 @@ class NativeRuntimeSession:
         max_events: int,
         event_kind: int | None = None,
         timeout_ms: int = 0,
-    ) -> tuple[NativeRuntimeEvent, ...]:
+    ) -> tuple[NativePolledEvent, ...]:
         self._ensure_open()
         _require_bounded_integer("max_events", max_events, 0xFFFFFFFF)
         _require_bounded_integer("timeout_ms", timeout_ms, 0xFFFFFFFF)
@@ -3978,43 +4042,50 @@ class NativeRuntimeSession:
             remaining = max_events - len(events)
             if remaining == 0:
                 return tuple(events)
-
-            event_buffer, event_count = self._borrow_poll_event_buffer(remaining)
-            status = self.entrypoints.client_await_events(
-                _NnrpRoleEventPollRequest(
-                    self.handle.to_ffi(),
-                    remaining,
-                    _ffi_role_poll_timeout_ms(timeout_ms),
-                    0,
-                    0,
-                ),
-                event_buffer,
-                remaining,
-                ctypes.byref(event_count),
-            )
-            native_status = NativeStatus.from_ffi(status)
-            if native_status.status_code == FFI_STATUS_WOULD_BLOCK:
-                return tuple(events)
-            raise_for_native_status(native_status)
-
-            for index in range(int(event_count.value)):
-                event = NativeRuntimeEvent.from_ffi(event_buffer[index], self.entrypoints)
-                if event_kind is None or event.kind == event_kind:
+            for event in self._poll_native_events_unlocked(max_events=remaining, timeout_ms=timeout_ms):
+                if event_kind is None or _native_event_kind(event) == event_kind:
                     events.append(event)
                 else:
                     self._pending_events.append(event)
             return tuple(events)
+
+    def _poll_native_events_unlocked(
+        self,
+        *,
+        max_events: int,
+        timeout_ms: int,
+    ) -> tuple[NativePolledEvent, ...]:
+        event_buffer, event_count = self._borrow_poll_event_buffer(max_events)
+        status = self.entrypoints.client_await_events(
+            _NnrpRoleEventPollRequest(
+                self.handle.to_ffi(),
+                max_events,
+                _ffi_role_poll_timeout_ms(timeout_ms),
+                0,
+                0,
+            ),
+            event_buffer,
+            max_events,
+            ctypes.byref(event_count),
+        )
+        native_status = NativeStatus.from_ffi(status)
+        if native_status.status_code == FFI_STATUS_WOULD_BLOCK:
+            return ()
+        raise_for_native_status(native_status)
+        return tuple(
+            _native_event_from_ffi(event_buffer[index], self.entrypoints) for index in range(int(event_count.value))
+        )
 
     def _take_pending_events(
         self,
         *,
         max_events: int,
         event_kind: int | None,
-    ) -> list[NativeRuntimeEvent]:
-        selected: list[NativeRuntimeEvent] = []
-        retained: list[NativeRuntimeEvent] = []
+    ) -> list[NativePolledEvent]:
+        selected: list[NativePolledEvent] = []
+        retained: list[NativePolledEvent] = []
         for event in self._pending_events:
-            if len(selected) < max_events and (event_kind is None or event.kind == event_kind):
+            if len(selected) < max_events and (event_kind is None or _native_event_kind(event) == event_kind):
                 selected.append(event)
             else:
                 retained.append(event)
@@ -4028,12 +4099,13 @@ class NativeRuntimeSession:
         timeout_ms: int = 0,
     ) -> tuple[NativeCreditUpdateEvent, ...]:
         return tuple(
-            event.to_credit_update()
+            NativeCreditUpdateEvent.from_event(event)
             for event in self.poll_events(
                 max_events=max_events,
                 event_kind=EVENT_KIND_FLOW_UPDATED,
                 timeout_ms=timeout_ms,
             )
+            if isinstance(event, NativeRuntimeEvent)
         )
 
     def poll_result_hints(
@@ -4049,6 +4121,7 @@ class NativeRuntimeSession:
                 event_kind=EVENT_KIND_RESULT_HINT,
                 timeout_ms=timeout_ms,
             )
+            if isinstance(event, NativeRuntimeEvent)
         )
 
     def poll_payload_family_events(
@@ -4066,6 +4139,7 @@ class NativeRuntimeSession:
                 event_kind=event_kind,
                 timeout_ms=timeout_ms,
             )
+            if isinstance(event, NativeRuntimeEvent)
         )
 
     def poll_structured_events(
@@ -4101,21 +4175,43 @@ class NativeRuntimeSession:
         *,
         max_events: int | None = None,
         timeout_ms: int = 0,
-    ) -> tuple[NativeRuntimeFrameEvent, ...]:
-        frames: list[NativeRuntimeFrameEvent] = []
-        for event in self.poll_events(
-            max_events=max_events,
-            event_kind=EVENT_KIND_RUNTIME_FRAME,
-            timeout_ms=timeout_ms,
-        ):
-            frame = event.to_runtime_frame()
-            if frame is not None:
-                frames.append(frame)
-        return tuple(frames)
+    ) -> tuple[NativeRuntimeEvent, ...]:
+        if max_events is not None:
+            _require_bounded_integer("max_events", max_events, 0xFFFFFFFF)
+            if max_events == 0:
+                return ()
+        _require_bounded_integer("timeout_ms", timeout_ms, 0xFFFFFFFF)
+        with self._poll_lock:
+            frames: list[NativeRuntimeEvent] = []
+            retained: list[NativePolledEvent] = []
+            for event in self._pending_events:
+                if isinstance(event, NativeRuntimeEvent) and (max_events is None or len(frames) < max_events):
+                    frames.append(event)
+                else:
+                    retained.append(event)
+            self._pending_events[:] = retained
+            if max_events is not None and len(frames) == max_events:
+                return tuple(frames)
+
+            batch_size = 64 if max_events is None else max(64, max_events - len(frames))
+            next_timeout_ms = timeout_ms
+            while True:
+                events = self._poll_native_events_unlocked(max_events=batch_size, timeout_ms=next_timeout_ms)
+                next_timeout_ms = 0
+                if not events:
+                    break
+                for event in events:
+                    if isinstance(event, NativeRuntimeEvent) and (max_events is None or len(frames) < max_events):
+                        frames.append(event)
+                    else:
+                        self._pending_events.append(event)
+                if max_events is not None:
+                    break
+            return tuple(frames)
 
     def dispatch_events(
         self,
-        callback: NativeRuntimeEventCallback,
+        callback: NativePolledEventCallback,
         *,
         max_events: int | None = None,
         event_kind: int | None = None,
@@ -4211,7 +4307,7 @@ class NativeRuntimeSession:
             timeout_ms=timeout_ms,
         )
 
-    async def async_poll_event(self, *, timeout_ms: int = 0) -> NativeRuntimeEvent | None:
+    async def async_poll_event(self, *, timeout_ms: int = 0) -> NativePolledEvent | None:
         return await asyncio.to_thread(self.poll_event, timeout_ms=timeout_ms)
 
     async def iter_events(
@@ -4220,7 +4316,7 @@ class NativeRuntimeSession:
         max_events: int | None = None,
         event_kind: int | None = None,
         timeout_ms: int = 0,
-    ) -> AsyncIterator[NativeRuntimeEvent]:
+    ) -> AsyncIterator[NativePolledEvent]:
         events = await asyncio.to_thread(
             self.poll_events,
             max_events=max_events,
@@ -4320,7 +4416,7 @@ class NativeRuntimeSession:
         *,
         max_events: int | None = None,
         timeout_ms: int = 0,
-    ) -> AsyncIterator[NativeRuntimeFrameEvent]:
+    ) -> AsyncIterator[NativeRuntimeEvent]:
         frames = await asyncio.to_thread(
             self.poll_runtime_frames,
             max_events=max_events,
@@ -4331,27 +4427,15 @@ class NativeRuntimeSession:
 
     def submit(
         self,
-        *,
-        operation_id: int,
-        frame_id: int,
-        metadata: FrameSubmitMetadata | None = None,
-        body: bytes | bytearray | memoryview = b"",
+        request: SubmitRequest,
     ) -> NativeOperationHandle:
         self._ensure_open()
-        return self.submit_operation(
-            operation_id=operation_id,
-            frame_id=frame_id,
-            metadata=metadata,
-            body=body,
-        ).handle
+        return self.submit_operation(request).handle
 
     def submit_operation(
         self,
+        request: SubmitRequest,
         *,
-        operation_id: int,
-        frame_id: int,
-        metadata: FrameSubmitMetadata | None = None,
-        body: bytes | bytearray | memoryview = b"",
         parent_operation_id: int | None = None,
         operation_group_id: int | None = None,
         scheduling_hint: NativeOperationSchedulingHint | None = None,
@@ -4362,24 +4446,32 @@ class NativeRuntimeSession:
             parent_operation_id=parent_operation_id,
             operation_group_id=operation_group_id,
         )
-        selected_metadata = metadata or _canonical_token_submit_metadata(operation_id)
-        if selected_metadata.operation_id != operation_id:
+        if request.metadata.operation_id != request.operation_id:
             raise ValueError(
                 "metadata.operation_id must equal the submit operation_id: "
-                f"expected {operation_id}, got {selected_metadata.operation_id}"
+                f"expected {request.operation_id}, got {request.metadata.operation_id}"
             )
-        encoded_submit = selected_metadata.pack() + bytes(body)
+        encoded_submit = request.metadata.pack() + request.body
         payload_view, _payload_owner = _buffer_view_from_payload(encoded_submit)
-        request = _NnrpSubmitRequest(self.handle.to_ffi(), operation_id, frame_id, payload_view)
+        ffi_request = _NnrpSubmitRequest(
+            self.handle.to_ffi(),
+            request.operation_id,
+            request.frame_id,
+            int(request.header.flags),
+            request.header.view_id,
+            request.header.route_id,
+            request.header.trace_id,
+            payload_view,
+        )
         out_operation = _NnrpHandle()
-        status = self.entrypoints.client_submit(request, ctypes.byref(out_operation))
+        status = self.entrypoints.client_submit(ffi_request, ctypes.byref(out_operation))
         raise_for_native_status(status)
         return NativeRuntimeOperation(
             entrypoints=self.entrypoints,
             session=self.handle,
             handle=NativeOperationHandle.from_ffi(out_operation),
-            operation_id=operation_id,
-            frame_id=frame_id,
+            operation_id=request.operation_id,
+            frame_id=request.frame_id,
             scheduling_hint=selected_scheduling_hint,
             parent_operation_id=selected_scheduling_hint.parent_operation_id,
             operation_group_id=selected_scheduling_hint.operation_group_id,
@@ -4397,11 +4489,8 @@ class NativeRuntimeSession:
 
     async def async_submit_operation(
         self,
+        request: SubmitRequest,
         *,
-        operation_id: int,
-        frame_id: int,
-        metadata: FrameSubmitMetadata | None = None,
-        body: bytes | bytearray | memoryview = b"",
         parent_operation_id: int | None = None,
         operation_group_id: int | None = None,
         scheduling_hint: NativeOperationSchedulingHint | None = None,
@@ -4409,16 +4498,13 @@ class NativeRuntimeSession:
         try:
             return await asyncio.to_thread(
                 self.submit_operation,
-                operation_id=operation_id,
-                frame_id=frame_id,
-                metadata=metadata,
-                body=body,
+                request,
                 parent_operation_id=parent_operation_id,
                 operation_group_id=operation_group_id,
                 scheduling_hint=scheduling_hint,
             )
         except asyncio.CancelledError:
-            self.cancel(frame_id=frame_id)
+            self.cancel(frame_id=request.frame_id)
             raise
 
     def poll_result(
@@ -4475,7 +4561,7 @@ class NativeRuntimeSession:
             raise_for_native_status(native_status)
 
             for index in range(int(event_count.value)):
-                event = NativeRuntimeEvent.from_ffi(event_buffer[index], self.entrypoints)
+                event = _native_event_from_ffi(event_buffer[index], self.entrypoints)
                 if (
                     matched_result is None
                     and _event_is_result_event(event)
@@ -4522,11 +4608,8 @@ class NativeRuntimeSession:
 
     def submit_and_poll_result(
         self,
+        request: SubmitRequest,
         *,
-        operation_id: int,
-        frame_id: int,
-        metadata: FrameSubmitMetadata | None = None,
-        body: bytes | bytearray | memoryview = b"",
         parent_operation_id: int | None = None,
         operation_group_id: int | None = None,
         scheduling_hint: NativeOperationSchedulingHint | None = None,
@@ -4535,10 +4618,7 @@ class NativeRuntimeSession:
         timeout_ms: int = 0,
     ) -> NativeRuntimeResult:
         operation = self.submit_operation(
-            operation_id=operation_id,
-            frame_id=frame_id,
-            metadata=metadata,
-            body=body,
+            request,
             parent_operation_id=parent_operation_id,
             operation_group_id=operation_group_id,
             scheduling_hint=scheduling_hint,
@@ -4547,11 +4627,8 @@ class NativeRuntimeSession:
 
     async def async_submit_and_poll_result(
         self,
+        request: SubmitRequest,
         *,
-        operation_id: int,
-        frame_id: int,
-        metadata: FrameSubmitMetadata | None = None,
-        body: bytes | bytearray | memoryview = b"",
         parent_operation_id: int | None = None,
         operation_group_id: int | None = None,
         scheduling_hint: NativeOperationSchedulingHint | None = None,
@@ -4561,10 +4638,7 @@ class NativeRuntimeSession:
     ) -> NativeRuntimeResult:
         return await asyncio.to_thread(
             self.submit_and_poll_result,
-            operation_id=operation_id,
-            frame_id=frame_id,
-            metadata=metadata,
-            body=body,
+            request,
             parent_operation_id=parent_operation_id,
             operation_group_id=operation_group_id,
             scheduling_hint=scheduling_hint,
@@ -4758,6 +4832,8 @@ class NativeRuntimeServerSession:
     handle: NativeSessionHandle
     active_transport_name: str
     _closed: bool = field(default=False, init=False, repr=False, compare=False)
+    _pending_events: list[NativePolledEvent] = field(default_factory=list, init=False, repr=False, compare=False)
+    _poll_lock: threading.Lock = field(default_factory=threading.Lock, init=False, repr=False, compare=False)
     _next_runtime_frame_id: int = field(default=1, init=False, repr=False, compare=False)
 
     def receive_submit(
@@ -4768,18 +4844,24 @@ class NativeRuntimeServerSession:
     ) -> NativeRuntimeServerOperation:
         self._ensure_open()
         for event in self.poll_events(max_events=max_events, timeout_ms=timeout_ms):
-            if event.kind != EVENT_KIND_SUBMIT_ACCEPTED:
+            if not isinstance(event, NativeRuntimeEvent) or event.header.message_type is not MessageType.FRAME_SUBMIT:
                 continue
-            event.operation.require_kind(HANDLE_KIND_OPERATION)
-            submit_metadata = FrameSubmitMetadata.unpack(event.payload[:FRAME_SUBMIT_METADATA_LENGTH])
+            context = _runtime_event_context(event)
+            context.operation.require_kind(HANDLE_KIND_OPERATION)
+            submit_metadata = event.metadata.value
+            if not isinstance(submit_metadata, FrameSubmitMetadata):
+                raise NativeProtocolError(
+                    NativeStatus(FFI_STATUS_PROTOCOL_ERROR),
+                    "FRAME_SUBMIT event did not decode FrameSubmitMetadata",
+                )
             return NativeRuntimeServerOperation(
                 self.entrypoints,
                 self.handle,
-                NativeOperationHandle(event.operation),
+                NativeOperationHandle(context.operation),
                 submit_metadata.operation_id,
-                event.frame_id,
+                event.header.frame_id,
                 submit_metadata,
-                bytes(event.payload[FRAME_SUBMIT_METADATA_LENGTH:]),
+                event.tail.body,
             )
         raise NativeWouldBlockError(NativeStatus(FFI_STATUS_WOULD_BLOCK))
 
@@ -4788,12 +4870,26 @@ class NativeRuntimeServerSession:
         *,
         max_events: int = 1,
         timeout_ms: int = 0,
-    ) -> tuple[NativeRuntimeEvent, ...]:
+    ) -> tuple[NativePolledEvent, ...]:
         self._ensure_open()
         _require_bounded_integer("max_events", max_events, 0xFFFFFFFF)
         _require_bounded_integer("timeout_ms", timeout_ms, 0xFFFFFFFF)
         if max_events == 0:
             return ()
+        with self._poll_lock:
+            events = self._pending_events[:max_events]
+            del self._pending_events[: len(events)]
+            remaining = max_events - len(events)
+            if remaining:
+                events.extend(self._poll_native_events_unlocked(max_events=remaining, timeout_ms=timeout_ms))
+            return tuple(events)
+
+    def _poll_native_events_unlocked(
+        self,
+        *,
+        max_events: int,
+        timeout_ms: int,
+    ) -> tuple[NativePolledEvent, ...]:
         event_buffer = (_NnrpEvent * max_events)()
         event_count = ctypes.c_size_t()
         status = self.entrypoints.server_await_events(
@@ -4813,11 +4909,10 @@ class NativeRuntimeServerSession:
             return ()
         raise_for_native_status(native_status)
         return tuple(
-            NativeRuntimeEvent.from_ffi(event_buffer[index], self.entrypoints)
-            for index in range(int(event_count.value))
+            _native_event_from_ffi(event_buffer[index], self.entrypoints) for index in range(int(event_count.value))
         )
 
-    def poll_event(self, *, timeout_ms: int = 0) -> NativeRuntimeEvent | None:
+    def poll_event(self, *, timeout_ms: int = 0) -> NativePolledEvent | None:
         events = self.poll_events(max_events=1, timeout_ms=timeout_ms)
         return events[0] if events else None
 
@@ -4826,12 +4921,33 @@ class NativeRuntimeServerSession:
         *,
         max_events: int = 1,
         timeout_ms: int = 0,
-    ) -> tuple[NativeRuntimeFrameEvent, ...]:
-        return tuple(
-            frame
-            for event in self.poll_events(max_events=max_events, timeout_ms=timeout_ms)
-            if (frame := event.to_runtime_frame()) is not None
-        )
+    ) -> tuple[NativeRuntimeEvent, ...]:
+        _require_bounded_integer("max_events", max_events, 0xFFFFFFFF)
+        _require_bounded_integer("timeout_ms", timeout_ms, 0xFFFFFFFF)
+        if max_events == 0:
+            return ()
+        with self._poll_lock:
+            frames: list[NativeRuntimeEvent] = []
+            retained: list[NativePolledEvent] = []
+            for event in self._pending_events:
+                if isinstance(event, NativeRuntimeEvent) and len(frames) < max_events:
+                    frames.append(event)
+                else:
+                    retained.append(event)
+            self._pending_events[:] = retained
+            if len(frames) == max_events:
+                return tuple(frames)
+
+            events = self._poll_native_events_unlocked(
+                max_events=max(64, max_events - len(frames)),
+                timeout_ms=timeout_ms,
+            )
+            for event in events:
+                if isinstance(event, NativeRuntimeEvent) and len(frames) < max_events:
+                    frames.append(event)
+                else:
+                    self._pending_events.append(event)
+            return tuple(frames)
 
     def send_progress(
         self,
@@ -4964,18 +5080,23 @@ class NativeRuntimeServerSession:
             )
 
 
-def _event_matches_operation(event: NativeRuntimeEvent, operation: NativeRuntimeOperation) -> bool:
-    if event.session != operation.session.handle:
+def _event_matches_operation(event: NativePolledEvent, operation: NativeRuntimeOperation) -> bool:
+    context = _runtime_event_context(event) if isinstance(event, NativeRuntimeEvent) else event
+    if context.session != operation.session.handle:
         return False
     return (
-        event.operation.id == operation.handle.handle.id
-        or event.operation.id == operation.operation_id
-        or event.frame_id == operation.frame_id
+        context.operation.id == operation.handle.handle.id
+        or context.operation.id == operation.operation_id
+        or _event_frame_id(event) == operation.frame_id
     )
 
 
-def _event_is_result_event(event: NativeRuntimeEvent) -> bool:
-    return event.kind in {EVENT_KIND_RESULT_PUSHED, EVENT_KIND_RESULT_DROPPED, EVENT_KIND_ERROR}
+def _event_is_result_event(event: NativePolledEvent) -> bool:
+    return _native_event_kind(event) in {
+        EVENT_KIND_RESULT_PUSHED,
+        EVENT_KIND_RESULT_DROPPED,
+        EVENT_KIND_ERROR,
+    }
 
 
 def _dispatch_callback_batch(
@@ -6407,10 +6528,11 @@ def _schema_descriptor_to_ffi(descriptor: Any) -> _NnrpSchemaDescriptorHeader:
 
 
 def _typed_payload_descriptor_from_ffi(descriptor: _NnrpTypedPayloadDescriptor) -> Any:
-    from nnrp.schema import Preview3TypedPayloadDescriptor
+    from nnrp.schema import TypedPayloadDescriptor
 
-    return Preview3TypedPayloadDescriptor(
+    return TypedPayloadDescriptor(
         profile_id=int(descriptor.profile_id),
+        payload_kind=PayloadKind(int(descriptor.payload_kind)),
         descriptor_flags=int(descriptor.descriptor_flags),
         schema_id=int(descriptor.schema_id),
         schema_version=int(descriptor.schema_version),
@@ -6423,6 +6545,7 @@ def _typed_payload_descriptor_from_ffi(descriptor: _NnrpTypedPayloadDescriptor) 
 def _typed_payload_descriptor_to_ffi(descriptor: Any) -> _NnrpTypedPayloadDescriptor:
     return _NnrpTypedPayloadDescriptor(
         int(descriptor.profile_id),
+        int(descriptor.payload_kind),
         int(descriptor.descriptor_flags),
         int(descriptor.schema_id),
         int(descriptor.schema_version),
@@ -6554,10 +6677,10 @@ def _coerce_operation_scheduling_hint(
     return scheduling_hint
 
 
-def _infer_lifecycle_from_event(event: NativeRuntimeEvent) -> NativeOperationLifecycle:
-    if not event.diagnostic.status.succeeded or event.kind == EVENT_KIND_ERROR:
+def _infer_lifecycle_from_event(event: NativePolledEvent) -> NativeOperationLifecycle:
+    if not _event_native_diagnostic(event).status.succeeded or _native_event_kind(event) == EVENT_KIND_ERROR:
         return NativeOperationLifecycle.FAILED
-    if event.kind == EVENT_KIND_RESULT_DROPPED:
+    if _native_event_kind(event) == EVENT_KIND_RESULT_DROPPED:
         return NativeOperationLifecycle.CANCELLED
     return NativeOperationLifecycle.COMPLETED
 

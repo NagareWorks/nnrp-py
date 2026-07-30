@@ -5,8 +5,13 @@ import pytest
 
 from nnrp.adapters import create_tcp_server_configuration, serve_tcp
 from nnrp.client import (
+    SubmitIdentity,
+    SubmitPolicy,
     SubmitRequest,
+    TensorSubmitInput,
     TypedPayload,
+    TypedPayloadInputFrame,
+    TypedPayloadSubmitInput,
     build_client_hello_packet,
 )
 from nnrp.client.transport import connect_client_session
@@ -22,7 +27,10 @@ from nnrp.core import (
     TileIndexMode,
     TransportId,
     parse_server_hello_ack_transport_policy_extension,
+    unpack_body,
     unpack_control_extension_block,
+    unpack_tile_index_block,
+    unpack_typed_payload_frames,
 )
 from nnrp.runtime import (
     PartialResultMetadata,
@@ -32,6 +40,12 @@ from nnrp.runtime import (
     ResultDropReasonMetadata,
     RuntimeRole,
     decode_runtime_control_metadata,
+)
+from nnrp.schema import (
+    TOKEN_DELTA_SCHEMA_ID,
+    TOKEN_DELTA_SCHEMA_VERSION,
+    StandardProfile,
+    StreamSemantics,
 )
 from nnrp.server import (
     ServerProfile,
@@ -46,6 +60,40 @@ def _reserve_port() -> int:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
         sock.bind(("127.0.0.1", 0))
         return int(sock.getsockname()[1])
+
+
+def _received_tensor_data(submit) -> tuple[tuple[int, ...], tuple[TensorSectionData, ...]]:
+    assert submit.tensor_body is not None
+    tile_ids = unpack_tile_index_block(
+        submit.tensor_body.tile_index_block,
+        mode=submit.metadata.tile_index_mode,
+        tile_count=submit.metadata.tile_count,
+        tile_base_id=submit.metadata.tile_base_id,
+    )
+    sections = tuple(
+        TensorSectionData(
+            role_id=section.desc.role_id,
+            default_codec_id=section.desc.codec_id,
+            dtype_id=section.desc.dtype_id,
+            tile_payloads=tuple(bytes(payload) for payload in section.payload_slices()),
+            codec_ids=tuple(bytes(section.codec_table)),
+            layout_id=section.desc.layout_id,
+            scale_policy=section.desc.scale_policy,
+            payload_stride_bytes=section.desc.payload_stride_bytes,
+            element_count_per_tile=section.desc.element_count_per_tile,
+        )
+        for section in submit.tensor_body.sections
+    )
+    return tile_ids, sections
+
+
+def _received_typed_payloads(submit):
+    body = unpack_body(submit.request.body)
+    return unpack_typed_payload_frames(
+        body.typed_payload_descriptor_region,
+        body.typed_payload_frame_region,
+        payload_kind_bitmap=submit.metadata.payload_kind_bitmap,
+    )
 
 
 class FakeServerConnection:
@@ -183,14 +231,15 @@ async def test_accept_server_session_hides_packet_plumbing() -> None:
                 assert session.hello.auth_block == b"engine-sr"
                 submit = await session.receive_submit(timeout=5.0)
                 assert submit.request.frame_id == 303
-                assert submit.request.tile_ids == (5, 6)
-                assert submit.request.input_profile is InputProfile.DENSE_LUMA_FRAME
-                assert len(submit.request.sections) == 1
+                tile_ids, sections = _received_tensor_data(submit)
+                assert tile_ids == (5, 6)
+                assert submit.metadata.input_profile is InputProfile.DENSE_LUMA_FRAME
+                assert len(sections) == 1
 
                 await session.send_result(
                     frame_id=submit.request.frame_id,
-                    tile_ids=submit.request.tile_ids,
-                    sections=submit.request.sections,
+                    tile_ids=tile_ids,
+                    sections=sections,
                     inference_ms=7,
                     queue_ms=2,
                     server_total_ms=11,
@@ -208,24 +257,26 @@ async def test_accept_server_session_hides_packet_plumbing() -> None:
                 selected_transport_id=TransportId.TCP,
             ) as session:
                 await session.send_submit(
-                    SubmitRequest(
-                        frame_id=303,
-                        operation_id=303,
-                        src_width=64,
-                        src_height=64,
-                        tile_width=32,
-                        tile_height=32,
-                        tile_ids=(5, 6),
-                        sections=(
-                            TensorSectionData(
-                                role_id=1,
-                                default_codec_id=0,
-                                dtype_id=TensorDType.FP16,
-                                tile_payloads=(b"aa", b"bb"),
+                    SubmitRequest.tensor(
+                        TensorSubmitInput(
+                            identity=SubmitIdentity(operation_id=303, frame_id=303),
+                            policy=SubmitPolicy(),
+                            src_width=64,
+                            src_height=64,
+                            tile_width=32,
+                            tile_height=32,
+                            tile_ids=(5, 6),
+                            sections=(
+                                TensorSectionData(
+                                    role_id=1,
+                                    default_codec_id=0,
+                                    dtype_id=TensorDType.FP16,
+                                    tile_payloads=(b"aa", b"bb"),
+                                ),
                             ),
-                        ),
-                        input_profile=InputProfile.DENSE_LUMA_FRAME,
-                        tile_index_mode=TileIndexMode.RAW_U16,
+                            input_profile=InputProfile.DENSE_LUMA_FRAME,
+                            tile_index_mode=TileIndexMode.RAW_U16,
+                        )
                     )
                 )
                 result = await session.receive_result(timeout=5.0)
@@ -239,9 +290,10 @@ async def test_accept_server_session_hides_packet_plumbing() -> None:
                     session.control.ack_packet.body,
                     known_types={SERVER_HELLO_ACK_TRANSPORT_POLICY_EXTENSION},
                 )
-                assert parse_server_hello_ack_transport_policy_extension(
-                    ack_extensions[0]
-                ).active_transport_id is TransportId.TCP
+                assert (
+                    parse_server_hello_ack_transport_policy_extension(ack_extensions[0]).active_transport_id
+                    is TransportId.TCP
+                )
         finally:
             await server_task
             await asyncio.wait_for(server_done.wait(), timeout=5.0)
@@ -295,10 +347,18 @@ async def test_accept_server_connection_resolves_session_after_probe_or_prefetch
                 assert session.session_id == 61
                 assert session.control.ack_metadata.control_extension_bytes == len(session.control.ack_packet.body)
                 await session.send_submit(
-                    SubmitRequest(
-                        frame_id=404,
-                        operation_id=404,
-                        typed_payloads=(TypedPayload.opaque_bytes(b"input"),),
+                    SubmitRequest.typed_payload(
+                        TypedPayloadSubmitInput(
+                            identity=SubmitIdentity(operation_id=404, frame_id=404),
+                            policy=SubmitPolicy(),
+                            frames=(
+                                TypedPayloadInputFrame(
+                                    profile_id=0,
+                                    payload_kind=PayloadKind.OPAQUE_BYTES,
+                                    payload=b"input",
+                                ),
+                            ),
+                        )
                     )
                 )
                 result = await session.receive_result(timeout=5.0)
@@ -321,21 +381,19 @@ def test_build_client_hello_packet_rejects_requested_model_with_auth_block() -> 
         build_client_hello_packet(requested_model="engine-sr", auth_block=b"raw-auth")
 
 
-def test_typed_payload_rejects_descriptor_flags_on_current_wire() -> None:
-    with pytest.raises(ValueError, match="descriptor_flags must be 0"):
-        TypedPayload.token_chunk(b"hello", descriptor_flags=1)
+def test_typed_payload_accepts_known_descriptor_flags_on_current_wire() -> None:
+    payload = TypedPayload.token_chunk(b"hello", descriptor_flags=1)
+
+    assert int(payload.to_core_frame().descriptor_flags) == 1
 
 
-def test_typed_payload_to_core_frame_rejects_descriptor_flags_on_current_wire() -> None:
-    payload = TypedPayload.token_chunk(b"hello")
-    object.__setattr__(payload, "descriptor_flags", 1)
-
-    with pytest.raises(ValueError, match="descriptor_flags must be 0"):
-        payload.to_core_frame()
+def test_typed_payload_rejects_unknown_descriptor_flags_on_current_wire() -> None:
+    with pytest.raises(ValueError, match="descriptor_flags contains unknown bits"):
+        TypedPayload.token_chunk(b"hello", descriptor_flags=0x10)
 
 
 @pytest.mark.asyncio
-async def test_current_session_round_trips_typed_and_mixed_payloads_without_core_frames() -> None:
+async def test_current_session_round_trips_typed_and_tensor_payloads_without_core_frames() -> None:
     host = "127.0.0.1"
     port = _reserve_port()
     server_done = asyncio.Event()
@@ -352,11 +410,10 @@ async def test_current_session_round_trips_typed_and_mixed_payloads_without_core
             try:
                 typed_submit = await session.receive_submit(timeout=5.0)
                 assert typed_submit.request.frame_id == 304
-                assert typed_submit.request.tile_ids == ()
-                assert typed_submit.request.sections == ()
-                assert typed_submit.request.typed_payloads[0].payload_kind is PayloadKind.TOKEN_CHUNK
-                assert typed_submit.request.typed_payloads[0].payload == b"hello"
-                assert typed_submit.request.typed_payloads[1].payload_kind is PayloadKind.TOOL_DELTA
+                typed_payloads = _received_typed_payloads(typed_submit)
+                assert typed_payloads[0].payload_kind is PayloadKind.TOKEN_CHUNK
+                assert typed_payloads[0].payload == b"hello"
+                assert typed_payloads[1].payload_kind is PayloadKind.TOOL_DELTA
 
                 await session.send_result(
                     frame_id=typed_submit.request.frame_id,
@@ -367,17 +424,16 @@ async def test_current_session_round_trips_typed_and_mixed_payloads_without_core
                     inference_ms=3,
                 )
 
-                mixed_submit = await session.receive_submit(timeout=5.0)
-                assert mixed_submit.request.frame_id == 305
-                assert mixed_submit.request.tile_ids == (8,)
-                assert len(mixed_submit.request.sections) == 1
-                assert mixed_submit.request.typed_payloads[0].payload_kind is PayloadKind.TOKEN_CHUNK
-                assert mixed_submit.request.typed_payloads[0].payload == b"hint"
+                tensor_submit = await session.receive_submit(timeout=5.0)
+                assert tensor_submit.request.frame_id == 305
+                tile_ids, sections = _received_tensor_data(tensor_submit)
+                assert tile_ids == (8,)
+                assert len(sections) == 1
 
                 await session.send_result(
-                    frame_id=mixed_submit.request.frame_id,
-                    tile_ids=mixed_submit.request.tile_ids,
-                    sections=mixed_submit.request.sections,
+                    frame_id=tensor_submit.request.frame_id,
+                    tile_ids=tile_ids,
+                    sections=sections,
                     typed_payloads=(TypedPayload.opaque_bytes(b"meta"),),
                     inference_ms=5,
                     queue_ms=1,
@@ -398,14 +454,25 @@ async def test_current_session_round_trips_typed_and_mixed_payloads_without_core
                 assert session.control.ack_metadata.accepted_payload_kind_bitmap & int(PayloadKind.TOKEN_CHUNK)
 
                 await session.send_submit(
-                    SubmitRequest(
-                        frame_id=304,
-                        operation_id=304,
-                        frame_class=1,
-                        latency_budget_ms=12,
-                        typed_payloads=(
-                            TypedPayload.token_chunk(b"hello"),
-                            TypedPayload.tool_delta(b'{"tool":"resize"}'),
+                    SubmitRequest.typed_payload(
+                        TypedPayloadSubmitInput(
+                            identity=SubmitIdentity(operation_id=304, frame_id=304),
+                            policy=SubmitPolicy(frame_class=1, latency_budget_ms=12),
+                            frames=(
+                                TypedPayloadInputFrame(
+                                    profile_id=int(StandardProfile.TOKEN),
+                                    payload_kind=PayloadKind.TOKEN_CHUNK,
+                                    payload=b"hello",
+                                    schema_id=TOKEN_DELTA_SCHEMA_ID,
+                                    schema_version=TOKEN_DELTA_SCHEMA_VERSION,
+                                    stream_semantics=StreamSemantics.APPEND,
+                                ),
+                                TypedPayloadInputFrame(
+                                    profile_id=0,
+                                    payload_kind=PayloadKind.TOOL_DELTA,
+                                    payload=b'{"tool":"resize"}',
+                                ),
+                            ),
                         ),
                     )
                 )
@@ -416,25 +483,26 @@ async def test_current_session_round_trips_typed_and_mixed_payloads_without_core
                 assert typed_result.payload_frame_count == 2
 
                 await session.send_submit(
-                    SubmitRequest(
-                        frame_id=305,
-                        operation_id=305,
-                        src_width=32,
-                        src_height=32,
-                        tile_width=32,
-                        tile_height=32,
-                        tile_ids=(8,),
-                        sections=(
-                            TensorSectionData(
-                                role_id=1,
-                                default_codec_id=0,
-                                dtype_id=TensorDType.FP16,
-                                tile_payloads=(b"xy",),
+                    SubmitRequest.tensor(
+                        TensorSubmitInput(
+                            identity=SubmitIdentity(operation_id=305, frame_id=305),
+                            policy=SubmitPolicy(),
+                            src_width=32,
+                            src_height=32,
+                            tile_width=32,
+                            tile_height=32,
+                            tile_ids=(8,),
+                            sections=(
+                                TensorSectionData(
+                                    role_id=1,
+                                    default_codec_id=0,
+                                    dtype_id=TensorDType.FP16,
+                                    tile_payloads=(b"xy",),
+                                ),
                             ),
-                        ),
-                        typed_payloads=(TypedPayload.token_chunk(b"hint"),),
-                        input_profile=InputProfile.DENSE_LUMA_FRAME,
-                        tile_index_mode=TileIndexMode.RAW_U16,
+                            input_profile=InputProfile.DENSE_LUMA_FRAME,
+                            tile_index_mode=TileIndexMode.RAW_U16,
+                        )
                     )
                 )
                 mixed_result = await session.receive_result(timeout=5.0)

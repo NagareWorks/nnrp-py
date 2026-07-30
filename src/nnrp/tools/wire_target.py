@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any
 
 from nnrp.client.native import NativeClientProviderRoute, connect_native_client_connection
+from nnrp.client.transport import SubmitIdentity, SubmitPolicy, SubmitRequest, TokenChunk, TokenSubmitInput
 from nnrp.core import (
     BudgetPolicy,
     MessageType,
@@ -21,9 +22,7 @@ from nnrp.core import (
     ResultPushMetadata,
 )
 from nnrp.native import (
-    EVENT_KIND_SESSION_CLOSED,
     NativeRuntimeError,
-    NativeRuntimeFrameEvent,
     NativeRuntimeServerSession,
     NativeTransportClientSecurity,
     NativeTransportServerSecurity,
@@ -32,6 +31,8 @@ from nnrp.native import (
 from nnrp.runtime import (
     CacheMissMetadata,
     CacheMissReason,
+    CacheReferenceMetadata,
+    NativeRuntimeEvent,
     PartialResultMetadata,
     PressureMetadata,
     ProgressMetadata,
@@ -49,6 +50,16 @@ _TRACE_BODY = b"trace"
 _PROGRESS_BODY = b"stage"
 _PARTIAL_BODY = b"partial"
 _DEFAULT_TIMEOUT_SECONDS = 10.0
+
+
+def _token_submit_request(operation_id: int, frame_id: int, payload: bytes) -> SubmitRequest:
+    return SubmitRequest.token(
+        TokenSubmitInput(
+            identity=SubmitIdentity(operation_id=operation_id, frame_id=frame_id),
+            policy=SubmitPolicy(),
+            chunks=(TokenChunk(payload),),
+        )
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -151,9 +162,7 @@ def _run_server_scenario(
         transport_policy=f"force_{scenario.transport.name}",
     ) as server:
         ready_event.set()
-        session = server.accept(
-            NativeServerAcceptOptions(timeout_ms=max(1, int(timeout_seconds * 1000)))
-        )
+        session = server.accept(NativeServerAcceptOptions(timeout_ms=max(1, int(timeout_seconds * 1000))))
         if scenario.id in {
             "wire.control.cancel-abort.client",
             "wire.control.cancel-abort.ipc-client",
@@ -204,7 +213,9 @@ def _handle_cache_server(session: Any, *, timeout_seconds: float) -> None:
         [MessageType.CAPABILITY_NEGOTIATION, MessageType.ROUTE_HINT, MessageType.CACHE_REFERENCE],
         timeout_seconds=timeout_seconds,
     )
-    cache_reference = frames[-1].metadata
+    cache_reference = frames[-1].metadata.value
+    if not isinstance(cache_reference, CacheReferenceMetadata):
+        raise RuntimeError("CACHE_REFERENCE event did not contain CacheReferenceMetadata")
     session.report_cache_miss(
         CacheMissMetadata(
             cache_namespace=cache_reference.cache_namespace,
@@ -223,11 +234,7 @@ def _run_progress_client(scenario: LiveWireScenario, *, timeout_seconds: float) 
     deadline = time.monotonic() + timeout_seconds
     with _open_connection(scenario.transport, deadline=deadline) as connection:
         session = connection.open_session()
-        operation = session.submit_operation(
-            operation_id=301,
-            frame_id=1,
-            body=_REQUEST_BODY,
-        )
+        operation = session.submit_operation(_token_submit_request(301, 1, _REQUEST_BODY))
         frames = _await_runtime_frames(
             session,
             [MessageType.PROGRESS, MessageType.CREDIT_UPDATE, MessageType.PARTIAL_RESULT],
@@ -276,16 +283,16 @@ def _await_runtime_frames(
     expected_types: Sequence[MessageType],
     *,
     timeout_seconds: float,
-) -> list[NativeRuntimeFrameEvent]:
+) -> list[NativeRuntimeEvent]:
     deadline = time.monotonic() + timeout_seconds
-    observed: list[NativeRuntimeFrameEvent] = []
+    observed: list[NativeRuntimeEvent] = []
     while len(observed) < len(expected_types) and time.monotonic() < deadline:
         frames = session.poll_runtime_frames(max_events=1, timeout_ms=25)
         if not frames:
             time.sleep(0.005)
             continue
         observed.extend(frames)
-    observed_types = [frame.message_type for frame in observed]
+    observed_types = [frame.header.message_type for frame in observed]
     if observed_types != list(expected_types):
         names = ", ".join(frame.name for frame in observed_types)
         expected = ", ".join(frame.name for frame in expected_types)
@@ -308,22 +315,25 @@ def _await_peer_close(session: NativeRuntimeServerSession, *, timeout_seconds: f
     deadline = time.monotonic() + timeout_seconds
     while time.monotonic() < deadline:
         events = session.poll_events(max_events=16, timeout_ms=25)
-        if any(event.kind == EVENT_KIND_SESSION_CLOSED for event in events):
+        if any(
+            isinstance(event, NativeRuntimeEvent) and event.header.message_type is MessageType.SESSION_CLOSE
+            for event in events
+        ):
             return
     raise TimeoutError("wire target did not receive SESSION_CLOSE before the deadline")
 
 
-def _validate_progress_frames(frames: Sequence[NativeRuntimeFrameEvent]) -> None:
+def _validate_progress_frames(frames: Sequence[NativeRuntimeEvent]) -> None:
     progress, credit, partial = frames
-    if progress.metadata != ProgressMetadata(301, 1, 1, 2_500, 0, len(_PROGRESS_BODY)):
+    if progress.metadata.value != ProgressMetadata(301, 1, 1, 2_500, 0, len(_PROGRESS_BODY)):
         raise RuntimeError("wire target received non-canonical PROGRESS metadata")
-    if progress.body != _PROGRESS_BODY:
+    if progress.tail.body != _PROGRESS_BODY:
         raise RuntimeError("wire target received non-canonical PROGRESS body")
-    if credit.metadata != PressureMetadata(1, 1, 0, 0, 0, 0):
+    if credit.metadata.value != PressureMetadata(1, 1, 0, 0, 0, 0):
         raise RuntimeError("wire target received non-canonical CREDIT_UPDATE metadata")
-    if partial.metadata != PartialResultMetadata(301, 1, 0, 0, len(_PARTIAL_BODY), 0):
+    if partial.metadata.value != PartialResultMetadata(301, 1, 0, 0, len(_PARTIAL_BODY), 0):
         raise RuntimeError("wire target received non-canonical PARTIAL_RESULT metadata")
-    if partial.body != _PARTIAL_BODY:
+    if partial.tail.body != _PARTIAL_BODY:
         raise RuntimeError("wire target received non-canonical PARTIAL_RESULT body")
 
 

@@ -670,21 +670,11 @@ def compare_wire_size(
 def summarize_wire_packet(packet: NnrpPacket, *, subject: str | None = None) -> WireSummary:
     if packet.header.msg_type is MessageType.FRAME_SUBMIT:
         metadata = FrameSubmitMetadata.unpack(packet.metadata)
-        current_body = _try_unpack_body(packet.body)
-        if current_body is not None:
-            role_ids = _extract_inline_role_ids(
-                current_body,
-                section_count=metadata.section_count,
-                tile_count=metadata.tile_count,
-            )
-        else:
-            body_view = unpack_tensor_body(
-                packet.body[_align_up(metadata.camera_bytes) :],
-                tile_index_bytes=metadata.tile_index_bytes,
-                section_count=metadata.section_count,
-                tile_count=metadata.tile_count,
-            )
-            role_ids = tuple(section.desc.role_id for section in body_view.sections)
+        role_ids = _extract_inline_role_ids(
+            unpack_body(packet.body),
+            section_count=metadata.section_count,
+            tile_count=metadata.tile_count,
+        )
         return WireSummary(
             subject=subject or "frame_submit",
             message_type=packet.header.msg_type,
@@ -701,21 +691,11 @@ def summarize_wire_packet(packet: NnrpPacket, *, subject: str | None = None) -> 
 
     if packet.header.msg_type is MessageType.RESULT_PUSH:
         metadata = ResultPushMetadata.unpack(packet.metadata)
-        current_body = _try_unpack_body(packet.body)
-        if current_body is not None:
-            role_ids = _extract_inline_role_ids(
-                current_body,
-                section_count=metadata.section_count,
-                tile_count=metadata.tile_count,
-            )
-        else:
-            body_view = unpack_tensor_body(
-                packet.body,
-                tile_index_bytes=metadata.tile_index_bytes,
-                section_count=metadata.section_count,
-                tile_count=metadata.tile_count,
-            )
-            role_ids = tuple(section.desc.role_id for section in body_view.sections)
+        role_ids = _extract_inline_role_ids(
+            unpack_body(packet.body),
+            section_count=metadata.section_count,
+            tile_count=metadata.tile_count,
+        )
         return WireSummary(
             subject=subject or "result_push",
             message_type=packet.header.msg_type,
@@ -1120,13 +1100,6 @@ def _object_reference_sort_key(
         block.cache_key_hi,
         block.cache_key_lo,
     )
-
-
-def _try_unpack_body(body: bytes | memoryview):
-    try:
-        return unpack_body(body)
-    except ValueError:
-        return None
 
 
 def _extract_inline_role_ids(

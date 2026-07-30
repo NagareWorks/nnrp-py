@@ -54,6 +54,7 @@ def test_adapter_conformance_manifest_claims_preview4_runtime_capabilities() -> 
         "object.cost",
         "object.ownership",
         "cache.reference",
+        "payload.typed",
     ):
         assert f'"{capability}"' in manifest
 
@@ -62,7 +63,7 @@ def test_ci_runs_independent_process_wire_conformance() -> None:
     workflow = _read_ci_workflow()
 
     assert "wire-conformance:" in workflow
-    assert "NNRP_RS_SOURCE_COMMIT: e37779dd5c389c3d1d26dff18f2bdb483c837c46" in workflow
+    assert "NNRP_RS_SOURCE_COMMIT: 9a6ac67081aa490ec48e272b706fcdd6d168ff8c" in workflow
     assert "Checkout pinned nnrp-rs source" in workflow
     assert "ref: ${{ env.NNRP_RS_SOURCE_COMMIT }}" in workflow
     for transport in ("tcp", "quic", "ipc", "websocket"):

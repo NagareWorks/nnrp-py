@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import struct
 from dataclasses import dataclass
-from enum import IntEnum
-from typing import ClassVar, TypeVar
+from enum import IntEnum, StrEnum
+from typing import Any, ClassVar, TypeVar
 
 from nnrp.core import HeaderFlags, MessageType, WireFormat
 
@@ -101,6 +101,127 @@ class CacheMissReason(IntEnum):
     PERMISSION_DENIED = 7
 
 
+class SessionCloseReason(IntEnum):
+    NORMAL = 0
+    CLIENT_SHUTDOWN = 1
+    SERVER_SHUTDOWN = 2
+    IDLE_TIMEOUT = 3
+    PROTOCOL_ERROR = 4
+    AUTH_REVOKED = 5
+
+
+class InFlightPolicy(IntEnum):
+    DRAIN = 0
+    ABORT = 1
+
+
+class RuntimeEventMetadataKind(StrEnum):
+    NONE = "none"
+    FRAME_SUBMIT = "frame_submit"
+    RESULT_PUSH = "result_push"
+    RESULT_HINT = "result_hint"
+    CONTROL_REQUEST = "control_request"
+    SCHEDULING = "scheduling"
+    SUPERSEDE = "supersede"
+    BUDGET = "budget"
+    PROGRESS = "progress"
+    PARTIAL_RESULT = "partial_result"
+    PRESSURE = "pressure"
+    CAPABILITY = "capability"
+    ROUTE_HINT = "route_hint"
+    TRACE_CONTEXT = "trace_context"
+    RESULT_DROP_REASON = "result_drop_reason"
+    RECOVERABLE_ERROR = "recoverable_error"
+    RETRY_AFTER = "retry_after"
+    FLOW_UPDATE = "flow_update"
+    OBJECT_DESCRIPTOR = "object_descriptor"
+    OBJECT_REFERENCE = "object_reference"
+    OBJECT_RELEASE = "object_release"
+    OBJECT_DELTA = "object_delta"
+    CACHE_REFERENCE = "cache_reference"
+    CACHE_MISS = "cache_miss"
+    CACHE_INVALIDATE = "cache_invalidate"
+    SESSION_CLOSE = "session_close"
+
+
+class RuntimeEventTailKind(StrEnum):
+    NONE = "none"
+    BODY = "body"
+    DIAGNOSTIC = "diagnostic"
+    METADATA_BODY_AND_DELTA = "metadata_body_and_delta"
+
+
+@dataclass(frozen=True, slots=True)
+class RuntimeEventMetadata:
+    kind: RuntimeEventMetadataKind
+    value: Any = None
+
+    def __post_init__(self) -> None:
+        normalized = RuntimeEventMetadataKind(self.kind)
+        object.__setattr__(self, "kind", normalized)
+        if normalized is RuntimeEventMetadataKind.NONE and self.value is not None:
+            raise ValueError("none runtime event metadata cannot carry a value")
+        if normalized is not RuntimeEventMetadataKind.NONE and self.value is None:
+            raise ValueError(f"{normalized.value} runtime event metadata requires a value")
+
+
+@dataclass(frozen=True, slots=True)
+class RuntimeEventTail:
+    kind: RuntimeEventTailKind
+    body: bytes = b""
+    diagnostic: bytes = b""
+    metadata_body: bytes = b""
+    delta: bytes = b""
+
+    def __post_init__(self) -> None:
+        normalized = RuntimeEventTailKind(self.kind)
+        object.__setattr__(self, "kind", normalized)
+        for name in ("body", "diagnostic", "metadata_body", "delta"):
+            value = getattr(self, name)
+            if not isinstance(value, bytes):
+                raise TypeError(f"runtime event tail {name} must be owned bytes")
+        populated = {
+            RuntimeEventTailKind.NONE: not any((self.body, self.diagnostic, self.metadata_body, self.delta)),
+            RuntimeEventTailKind.BODY: not any((self.diagnostic, self.metadata_body, self.delta)),
+            RuntimeEventTailKind.DIAGNOSTIC: not any((self.body, self.metadata_body, self.delta)),
+            RuntimeEventTailKind.METADATA_BODY_AND_DELTA: not any((self.body, self.diagnostic)),
+        }
+        if not populated[normalized]:
+            raise ValueError(f"runtime event tail fields do not match {normalized.value}")
+
+    @classmethod
+    def none(cls) -> RuntimeEventTail:
+        return cls(RuntimeEventTailKind.NONE)
+
+    @classmethod
+    def with_body(cls, body: bytes) -> RuntimeEventTail:
+        return cls(RuntimeEventTailKind.BODY, body=bytes(body))
+
+    @classmethod
+    def with_diagnostic(cls, diagnostic: bytes) -> RuntimeEventTail:
+        return cls(RuntimeEventTailKind.DIAGNOSTIC, diagnostic=bytes(diagnostic))
+
+    @classmethod
+    def with_metadata_body_and_delta(
+        cls,
+        metadata_body: bytes,
+        delta: bytes,
+    ) -> RuntimeEventTail:
+        return cls(
+            RuntimeEventTailKind.METADATA_BODY_AND_DELTA,
+            metadata_body=bytes(metadata_body),
+            delta=bytes(delta),
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class NativeRuntimeEvent:
+    header: RuntimeFrameHeader
+    metadata: RuntimeEventMetadata
+    tail: RuntimeEventTail
+    _native_context: object | None = None
+
+
 RuntimeMetadataT = TypeVar("RuntimeMetadataT", bound="_FixedRuntimeMetadata")
 
 
@@ -122,6 +243,41 @@ class _FixedRuntimeMetadata:
 
 
 @dataclass(frozen=True, slots=True)
+class SessionCloseMetadata(_FixedRuntimeMetadata):
+    STRUCT: ClassVar[struct.Struct] = struct.Struct("<HBBIQII")
+
+    close_reason: SessionCloseReason
+    in_flight_policy: InFlightPolicy
+    drain_timeout_ms: int
+    last_operation_id: int
+    session_error_code: int
+    session_close_tag: int
+
+    def pack(self) -> bytes:
+        return self.STRUCT.pack(
+            int(self.close_reason),
+            int(self.in_flight_policy),
+            0,
+            self.drain_timeout_ms,
+            self.last_operation_id,
+            self.session_error_code,
+            self.session_close_tag,
+        )
+
+    @classmethod
+    def _from_tuple(cls, values: tuple[int, ...]) -> SessionCloseMetadata:
+        _require_zero(values[2], "session_close.reserved0")
+        return cls(
+            SessionCloseReason(values[0]),
+            InFlightPolicy(values[1]),
+            values[3],
+            values[4],
+            values[5],
+            values[6],
+        )
+
+
+@dataclass(frozen=True, slots=True)
 class DecodedRuntimeControlMetadata:
     metadata: _FixedRuntimeMetadata
     tail: bytes = b""
@@ -138,7 +294,6 @@ class RuntimeFrameHeader:
     message_type: MessageType
     flags: HeaderFlags = HeaderFlags.NONE
     session_id: int = 0
-    generation: int = 0
     frame_id: int = 0
     view_id: int = 0
     route_id: int = 0

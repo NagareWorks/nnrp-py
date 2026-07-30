@@ -10,8 +10,8 @@ BENCHMARK_THRESHOLDS = (
 def test_native_artifact_benchmark_doc_tracks_preview4_contract() -> None:
     document = BENCHMARK_DOC.read_text(encoding="utf-8")
 
-    assert "The current Python package consumes `nnrp-rs` native artifact version `1.0.0-preview.4.19`." in document
-    assert "ABI version `4.1.1`" in document
+    assert "The current Python package consumes `nnrp-rs` native artifact version `1.0.0-preview.4.20`." in document
+    assert "ABI version `4.3.0`" in document
     assert "Transport-scoped native artifacts for TCP, QUIC, IPC, and WebSocket." in document
     assert "ABI 4 Release Validation" in document
 

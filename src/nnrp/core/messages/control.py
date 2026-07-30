@@ -8,6 +8,8 @@ from dataclasses import dataclass
 from enum import IntEnum, IntFlag
 from typing import ClassVar, TypeVar
 
+from nnrp.core.enums import PayloadKind
+
 
 class ErrorScope(IntEnum):
     CONNECTION = 0
@@ -468,17 +470,6 @@ class LossTolerance(IntEnum):
     BEST_EFFORT = 1
     LOW_LATENCY = 2
     FIRE_AND_FORGET = 3
-
-
-class PayloadKind(IntFlag):
-    NONE = 0
-    TENSOR = 0x00000001
-    TOKEN_CHUNK = 0x00000002
-    AUDIO_CHUNK = 0x00000004
-    VIDEO_CHUNK = 0x00000008
-    STRUCTURED_EVENT = 0x00000010
-    TOOL_DELTA = 0x00000020
-    OPAQUE_BYTES = 0x00000040
 
 
 CLIENT_HELLO_TRANSPORT_POLICY_EXTENSION = 0x0101

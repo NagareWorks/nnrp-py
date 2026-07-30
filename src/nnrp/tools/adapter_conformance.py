@@ -10,7 +10,17 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from nnrp.core import FrameSubmitMetadata, MessageType
+from nnrp.client.transport import SubmitIdentity, SubmitPolicy, SubmitRequest, TokenChunk, TokenSubmitInput
+from nnrp.core import (
+    FrameSubmitMetadata,
+    HeaderFlags,
+    MessageType,
+    NnrpHeader,
+    PayloadKind,
+    WireFormat,
+    unpack_body,
+    unpack_typed_payload_frames,
+)
 from nnrp.native import (
     NativeRuntimeBackend,
     NativeRuntimeError,
@@ -39,20 +49,32 @@ from nnrp.runtime import (
     ResultDropReasonCode,
     ResultDropReasonMetadata,
     RouteHintMetadata,
+    RuntimeFrameHeader,
     RuntimeObjectKind,
     RuntimeRole,
     SchedulingMetadata,
     SupersedeMetadata,
     TraceContextMetadata,
     decode_runtime_control_metadata,
+    decode_websocket_binary_frame,
     encode_runtime_control_metadata,
     encode_runtime_object_metadata,
+    encode_websocket_binary_frame,
 )
-from nnrp.schema import TOKEN_DELTA_SCHEMA_ID, TOKEN_DELTA_SCHEMA_VERSION, StandardProfile
+from nnrp.schema import (
+    TOKEN_DELTA_SCHEMA_ID,
+    TOKEN_DELTA_SCHEMA_VERSION,
+    StandardProfile,
+    StreamSemantics,
+    TypedPayloadDescriptor,
+    TypedPayloadDescriptorFlags,
+)
 
 _RESULTS_SCHEMA_URL = "https://raw.githubusercontent.com/NagareWorks/nnrp-conformance/main/schemas/adapter-case-results.schema.json"
 _DEFAULT_IMPLEMENTATION_NAME = "nnrp-py"
 _CASE_DISPATCH = {
+    "l0.header.fixed_shape.golden": "_execute_common_header_roundtrip",
+    "l0.typed_payload.descriptor.current.golden": "_execute_typed_payload_descriptor_golden",
     "l1.handshake.basic": "_execute_handshake_basic",
     "l1.session.open_close": "_execute_session_open_close",
     "l1.frame_submit.tensor.inline": "_execute_inline_tensor_submit",
@@ -70,6 +92,39 @@ _CASE_DISPATCH = {
     "l1.control.supersede": "_execute_runtime_supersede",
     "l1.control.recoverable-error": "_execute_runtime_recoverable_error",
 }
+
+
+def _token_submit_request(operation_id: int, frame_id: int, payload: bytes) -> SubmitRequest:
+    return SubmitRequest.token(
+        TokenSubmitInput(
+            identity=SubmitIdentity(operation_id=operation_id, frame_id=frame_id),
+            policy=SubmitPolicy(),
+            chunks=(TokenChunk(payload),),
+        )
+    )
+
+
+def _typed_payload_bytes(metadata: FrameSubmitMetadata | Any, body: bytes) -> tuple[bytes, ...]:
+    unpacked = unpack_body(body)
+    return tuple(
+        frame.payload
+        for frame in unpack_typed_payload_frames(
+            unpacked.typed_payload_descriptor_region,
+            unpacked.typed_payload_frame_region,
+            payload_kind_bitmap=metadata.payload_kind_bitmap,
+        )
+    )
+
+
+def _result_payload_size(result: Any) -> int:
+    body = bytes(getattr(result, "body", b""))
+    metadata = getattr(result, "metadata", None)
+    if metadata is None:
+        return len(body)
+    payload_kind_bitmap = PayloadKind(metadata.payload_kind_bitmap)
+    if payload_kind_bitmap & ~PayloadKind.TENSOR:
+        return sum(len(payload) for payload in _typed_payload_bytes(metadata, body))
+    return len(body)
 
 
 def build_adapter_case_results_report(
@@ -244,9 +299,76 @@ class _AdapterCaseExecution:
 
     def _submit_operation(self, session):
         return session.submit_operation(
-            operation_id=self._int_parameter("operation_id", 1),
-            frame_id=self._int_parameter("frame_id", 1),
-            body=self._payload_parameter("payload", b"tensor"),
+            _token_submit_request(
+                self._int_parameter("operation_id", 1),
+                self._int_parameter("frame_id", 1),
+                self._payload_parameter("payload", b"tensor"),
+            )
+        )
+
+    def _execute_common_header_roundtrip(self) -> dict[str, Any]:
+        golden = bytes.fromhex(
+            "4e4e5250010010282100000003020100060504004433221188776655aa99ccbb0807060504030201"
+        )
+        wire_header = NnrpHeader.unpack(golden)
+        if wire_header.pack() != golden:
+            raise ValueError("preview4 common header did not preserve the canonical wire bytes")
+
+        runtime_header = RuntimeFrameHeader(
+            message_type=MessageType.FRAME_SUBMIT,
+            flags=HeaderFlags.ACK_REQUIRED | HeaderFlags.KEYFRAME,
+            session_id=0x11223344,
+            frame_id=0x55667788,
+            view_id=0x99AA,
+            route_id=0xBBCC,
+            trace_id=0x0102030405060708,
+            version_major=1,
+            wire_format=WireFormat.CURRENT,
+        )
+        runtime_frame = encode_websocket_binary_frame(runtime_header, metadata=b"meta", body=b"body")
+        if decode_websocket_binary_frame(runtime_frame).header != runtime_header:
+            raise ValueError("public runtime frame header did not preserve all caller-controlled wire fields")
+
+        return self._evidence(
+            "common-header-roundtrip",
+            header_hex=golden.hex(),
+            message_type=int(wire_header.msg_type),
+            flags=int(wire_header.flags),
+            session_id=wire_header.session_id,
+            frame_id=wire_header.frame_id,
+            view_id=wire_header.view_id,
+            route_id=wire_header.route_id,
+            trace_id=wire_header.trace_id,
+        )
+
+    def _execute_typed_payload_descriptor_golden(self) -> dict[str, Any]:
+        golden = bytes.fromhex("020002020110000003000000020000000800000018000000")
+        descriptor = TypedPayloadDescriptor(
+            profile_id=StandardProfile.TOKEN,
+            payload_kind=PayloadKind.TOKEN_CHUNK,
+            descriptor_flags=TypedPayloadDescriptorFlags.PARTIAL,
+            schema_id=TOKEN_DELTA_SCHEMA_ID,
+            schema_version=TOKEN_DELTA_SCHEMA_VERSION,
+            stream_semantics=StreamSemantics.APPEND,
+            offset=8,
+            length=24,
+        )
+        if descriptor.pack() != golden:
+            raise ValueError("current typed payload descriptor did not emit the canonical wire bytes")
+        if TypedPayloadDescriptor.unpack(golden) != descriptor:
+            raise ValueError("current typed payload descriptor did not preserve every canonical field")
+
+        return self._evidence(
+            "typed-payload-descriptor-golden",
+            descriptor_hex=golden.hex(),
+            profile_id=int(descriptor.profile_id),
+            payload_kind=int(descriptor.payload_kind),
+            descriptor_flags=int(descriptor.descriptor_flags),
+            schema_id=descriptor.schema_id,
+            schema_version=descriptor.schema_version,
+            stream_semantics=int(descriptor.stream_semantics),
+            offset=descriptor.offset,
+            length=descriptor.length,
         )
 
     def _execute_handshake_basic(self) -> dict[str, Any]:
@@ -297,11 +419,7 @@ class _AdapterCaseExecution:
         operation_id = self._int_parameter("operation_id", 99)
         frame_id = self._int_parameter("frame_id", 7)
         payload = self._payload_parameter("payload", b"adapter-payload")
-        operation = session.submit_operation(
-            operation_id=operation_id,
-            frame_id=frame_id,
-            body=payload,
-        )
+        operation = session.submit_operation(_token_submit_request(operation_id, frame_id, payload))
         result = session.poll_result(
             operation,
             max_events=self._int_parameter("max_events", 2),
@@ -315,7 +433,7 @@ class _AdapterCaseExecution:
             session_id=_runtime_id(session),
             operation_id=_runtime_id(operation),
             frame_id=operation.frame_id,
-            result_payload_bytes=len(getattr(result, "body", b"")),
+            result_payload_bytes=_result_payload_size(result),
         )
 
     def _execute_runtime_cancel_abort(self) -> dict[str, Any]:
@@ -641,17 +759,15 @@ class _AdapterSmokeSession:
 
     def submit_operation(
         self,
+        request: SubmitRequest,
         *,
-        operation_id: int,
-        frame_id: int,
-        metadata: FrameSubmitMetadata | None = None,
-        body: bytes | bytearray | memoryview = b"",
         parent_operation_id: int | None = None,
         operation_group_id: int | None = None,
     ) -> _AdapterSmokeOperation:
-        del metadata, parent_operation_id, operation_group_id
+        del parent_operation_id, operation_group_id
         self._ensure_open()
-        operation = _AdapterSmokeOperation(operation_id, frame_id, bytes(body))
+        payloads = _typed_payload_bytes(request.metadata, request.body)
+        operation = _AdapterSmokeOperation(request.operation_id, request.frame_id, b"".join(payloads))
         self.operations.append(operation)
         return operation
 

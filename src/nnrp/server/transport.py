@@ -12,11 +12,10 @@ from nnrp.adapters import (
     NnrpTcpConnection,
     NnrpTcpListener,
 )
-from nnrp.client.transport import SubmitRequest, TypedPayload
+from nnrp.client.transport import SubmitHeaderContext, SubmitRequest, TypedPayload
 from nnrp.core import (
     CLIENT_HELLO_TRANSPORT_POLICY_EXTENSION,
     BudgetPolicy,
-    CacheObjectKind,
     ClientHelloMetadata,
     ControlExtensionEntry,
     FlowUpdateMetadata,
@@ -24,13 +23,11 @@ from nnrp.core import (
     HeaderFlags,
     MessageType,
     NnrpPacket,
-    ObjectReferenceBlock,
     PayloadKind,
     ResultClass,
     ResultFlags,
     ServerHelloAckMetadata,
     ServerHelloAckTransportPolicyExtension,
-    SubmitMode,
     TensorBodyView,
     TensorSectionData,
     TileIndexMode,
@@ -46,11 +43,7 @@ from nnrp.core import (
     pack_control_extension_block,
     parse_client_hello_transport_policy_extension,
     unpack_control_extension_block,
-    unpack_inline_object_blocks,
-    unpack_object_reference_blocks,
-    unpack_tensor_body,
-    unpack_tile_index_block,
-    unpack_typed_payload_frames,
+    unpack_current_tensor_body,
     validate_frame_submit_body,
 )
 from nnrp.runtime import (
@@ -682,129 +675,25 @@ def _decode_submit_request(
     packet: NnrpPacket,
     metadata: FrameSubmitMetadata,
 ) -> tuple[SubmitRequest, TensorBodyView | None]:
-    tensor_enabled = bool(metadata.payload_kind_bitmap & PayloadKind.TENSOR)
-    uses_composed_body = (
-        metadata.payload_frame_count > 0
-        or metadata.object_ref_mask != 0
-        or metadata.submit_mode is not SubmitMode.INLINE
-        or metadata.payload_kind_bitmap != PayloadKind.TENSOR
-    )
-    camera_block = b""
-    tile_ids: tuple[int, ...] = ()
-    sections: tuple[TensorSectionData, ...] = ()
-    typed_payloads: tuple[TypedPayload, ...] = ()
-    camera_reference: ObjectReferenceBlock | None = None
-    tile_index_reference: ObjectReferenceBlock | None = None
-    tensor_section_table_reference: ObjectReferenceBlock | None = None
+    body_view = validate_frame_submit_body(metadata, packet.body)
     tensor_body: TensorBodyView | None = None
-
-    if tensor_enabled and metadata.submit_mode is SubmitMode.INLINE and not uses_composed_body:
-        camera_block = bytes(packet.body[: metadata.camera_bytes])
-        tensor_body = unpack_tensor_body(
-            packet.body[_align_up(metadata.camera_bytes) :],
-            tile_index_bytes=metadata.tile_index_bytes,
+    if metadata.payload_kind_bitmap & PayloadKind.TENSOR:
+        tensor_body = unpack_current_tensor_body(
+            body_view,
             section_count=metadata.section_count,
             tile_count=metadata.tile_count,
         )
-        tile_ids = unpack_tile_index_block(
-            tensor_body.tile_index_block,
-            mode=metadata.tile_index_mode,
-            tile_count=metadata.tile_count,
-            tile_base_id=metadata.tile_base_id,
-        )
-        sections = tuple(_tensor_section_view_to_data(section) for section in tensor_body.sections)
-    else:
-        body_view = validate_frame_submit_body(metadata, packet.body)
-        inline_blocks = {
-            int(block.header.object_kind): block
-            for block in unpack_inline_object_blocks(body_view.inline_object_region)
-        }
-        reference_blocks = {
-            int(block.object_kind): block for block in unpack_object_reference_blocks(body_view.object_reference_region)
-        }
-        typed_payloads = tuple(
-            TypedPayload.from_core_frame(frame)
-            for frame in unpack_typed_payload_frames(
-                body_view.typed_payload_descriptor_region,
-                body_view.typed_payload_frame_region,
-            )
-        )
-        camera_inline = inline_blocks.get(int(CacheObjectKind.CAMERA_BLOCK))
-        if camera_inline is not None:
-            camera_block = bytes(camera_inline.payload)
-        camera_reference = reference_blocks.get(int(CacheObjectKind.CAMERA_BLOCK))
-
-        tile_index_inline = inline_blocks.get(int(CacheObjectKind.TILE_INDEX_BLOCK))
-        if tile_index_inline is not None:
-            tile_ids = unpack_tile_index_block(
-                tile_index_inline.payload,
-                mode=metadata.tile_index_mode,
-                tile_count=metadata.tile_count,
-                tile_base_id=metadata.tile_base_id,
-            )
-        tile_index_reference = reference_blocks.get(int(CacheObjectKind.TILE_INDEX_BLOCK))
-
-        section_inline = inline_blocks.get(int(CacheObjectKind.TENSOR_SECTION_TABLE))
-        if section_inline is not None:
-            tensor_body = unpack_tensor_body(
-                section_inline.payload,
-                tile_index_bytes=0,
-                section_count=metadata.section_count,
-                tile_count=metadata.tile_count,
-            )
-            sections = tuple(_tensor_section_view_to_data(section) for section in tensor_body.sections)
-        tensor_section_table_reference = reference_blocks.get(int(CacheObjectKind.TENSOR_SECTION_TABLE))
 
     request = SubmitRequest(
-        frame_id=int(packet.header.frame_id),
         operation_id=metadata.operation_id,
-        src_width=metadata.src_width,
-        src_height=metadata.src_height,
-        tile_width=metadata.tile_width,
-        tile_height=metadata.tile_height,
-        tile_ids=tile_ids,
-        sections=sections,
-        camera_block=camera_block,
-        frame_class=metadata.frame_class,
-        input_profile=metadata.input_profile,
-        tile_index_mode=metadata.tile_index_mode,
-        latency_budget_ms=metadata.latency_budget_ms,
-        target_fps_x100=metadata.target_fps_x100,
-        retry_of_frame=metadata.retry_of_frame,
-        tile_base_id=metadata.tile_base_id,
-        submit_mode=metadata.submit_mode,
-        object_ref_mask=metadata.object_ref_mask,
-        camera_reference=camera_reference,
-        tile_index_reference=tile_index_reference,
-        tensor_section_table_reference=tensor_section_table_reference,
-        budget_policy=metadata.budget_policy,
-        dependency_frame_id=metadata.dependency_frame_id,
-        loss_tolerance_policy=metadata.loss_tolerance_policy,
-        payload_kind_bitmap=metadata.payload_kind_bitmap,
-        payload_frame_count=metadata.payload_frame_count,
-        typed_payloads=typed_payloads,
-        view_id=int(packet.header.view_id),
-        route_id=int(packet.header.route_id),
-        trace_id=int(packet.header.trace_id),
-        flags=packet.header.flags,
+        frame_id=int(packet.header.frame_id),
+        header=SubmitHeaderContext(
+            flags=packet.header.flags,
+            view_id=int(packet.header.view_id),
+            route_id=int(packet.header.route_id),
+            trace_id=int(packet.header.trace_id),
+        ),
+        metadata=metadata,
+        body=bytes(packet.body),
     )
     return request, tensor_body
-
-
-def _tensor_section_view_to_data(section) -> TensorSectionData:
-    codec_ids = bytes(section.codec_table) if section.codec_table else b""
-    return TensorSectionData(
-        role_id=section.desc.role_id,
-        default_codec_id=section.desc.codec_id,
-        dtype_id=section.desc.dtype_id,
-        tile_payloads=tuple(bytes(payload) for payload in section.payload_slices()),
-        codec_ids=tuple(codec_ids) if codec_ids else (),
-        layout_id=section.desc.layout_id,
-        scale_policy=section.desc.scale_policy,
-        payload_stride_bytes=section.desc.payload_stride_bytes,
-        element_count_per_tile=section.desc.element_count_per_tile,
-    )
-
-
-def _align_up(value: int, alignment: int = 8) -> int:
-    return ((value + alignment - 1) // alignment) * alignment

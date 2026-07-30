@@ -21,6 +21,10 @@ class Preview4ControlCapability(StrEnum):
     RECOVERABLE_ERROR = "control.recoverable_error"
 
 
+class Preview4PayloadCapability(StrEnum):
+    TYPED = "payload.typed"
+
+
 class Preview4ObjectCapability(StrEnum):
     OBJECT_LIFECYCLE = "object.lifecycle"
     OBJECT_DELTA = "object.delta"
@@ -37,17 +41,24 @@ class Preview4TransportName(StrEnum):
 
 
 PREVIEW4_CONTROL_CAPABILITY_TOKENS = tuple(capability.value for capability in Preview4ControlCapability)
+PREVIEW4_PAYLOAD_CAPABILITY_TOKENS = tuple(capability.value for capability in Preview4PayloadCapability)
 PREVIEW4_OBJECT_CAPABILITY_TOKENS = tuple(capability.value for capability in Preview4ObjectCapability)
 PREVIEW4_TRANSPORT_NAMES = tuple(transport.value for transport in Preview4TransportName)
-PREVIEW4_CAPABILITY_TOKENS = PREVIEW4_CONTROL_CAPABILITY_TOKENS + PREVIEW4_OBJECT_CAPABILITY_TOKENS
+PREVIEW4_CAPABILITY_TOKENS = (
+    PREVIEW4_PAYLOAD_CAPABILITY_TOKENS
+    + PREVIEW4_CONTROL_CAPABILITY_TOKENS
+    + PREVIEW4_OBJECT_CAPABILITY_TOKENS
+)
 
 
 __all__ = [
     "PREVIEW4_CAPABILITY_TOKENS",
     "PREVIEW4_CONTROL_CAPABILITY_TOKENS",
     "PREVIEW4_OBJECT_CAPABILITY_TOKENS",
+    "PREVIEW4_PAYLOAD_CAPABILITY_TOKENS",
     "PREVIEW4_TRANSPORT_NAMES",
     "Preview4ControlCapability",
     "Preview4ObjectCapability",
+    "Preview4PayloadCapability",
     "Preview4TransportName",
 ]

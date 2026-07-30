@@ -3302,11 +3302,11 @@ def _event_frame_id(event: NativePolledEvent) -> int:
 def _event_operation_id(event: NativePolledEvent) -> int:
     if isinstance(event, NativeRuntimeEvent):
         context = _runtime_event_context(event)
-        if context.operation.id:
-            return context.operation.id
+        if context.diagnostic.related_operation_id:
+            return context.diagnostic.related_operation_id
         value = event.metadata.value
         return int(getattr(value, "operation_id", 0))
-    return event.operation.id
+    return event.diagnostic.related_operation_id
 
 
 def _event_native_diagnostic(event: NativePolledEvent) -> NativeRuntimeDiagnostic:
@@ -5084,11 +5084,7 @@ def _event_matches_operation(event: NativePolledEvent, operation: NativeRuntimeO
     context = _runtime_event_context(event) if isinstance(event, NativeRuntimeEvent) else event
     if context.session != operation.session.handle:
         return False
-    return (
-        context.operation.id == operation.handle.handle.id
-        or context.operation.id == operation.operation_id
-        or _event_frame_id(event) == operation.frame_id
-    )
+    return _event_operation_id(event) == operation.operation_id
 
 
 def _event_is_result_event(event: NativePolledEvent) -> bool:

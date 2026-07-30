@@ -859,6 +859,8 @@ class FakeRuntimeLibrary(FakeEntrypointLibrary):
                 len(self._event_payload_owner.raw),
             )
             target.event.diagnostic.status = NativeStatus.ok().to_ffi()
+            target.event.diagnostic.related_operation_id = 99
+            target.event.diagnostic.related_frame_id = 7
         return self.status
 
     def _await_events(
@@ -892,6 +894,8 @@ class FakeRuntimeLibrary(FakeEntrypointLibrary):
                 len(self._event_payload_owner.raw),
             )
             events[index].diagnostic.status = NativeStatus.ok().to_ffi()
+            events[index].diagnostic.related_operation_id = 99 + index
+            events[index].diagnostic.related_frame_id = 7 + index
         count_target.value = event_capacity
         return self.status
 
@@ -932,6 +936,8 @@ class BatchControlRuntimeLibrary(FakeRuntimeLibrary):
             events[index].payload_owner = _NnrpHandle()
             events[index].payload = _NnrpBufferView(ctypes.cast(owner, ctypes.c_void_p), len(payload))
             events[index].diagnostic.status = NativeStatus.ok().to_ffi()
+            events[index].diagnostic.related_operation_id = 99 + index
+            events[index].diagnostic.related_frame_id = 7 + index
         count_target.value = emitted
         return self.status
 
@@ -972,6 +978,8 @@ class OwnedBatchRuntimeLibrary(FakeRuntimeLibrary):
             events[index].payload_owner = _NnrpHandle(HANDLE_KIND_BUFFER, owner_id, 1, 0)
             events[index].payload = _NnrpBufferView(ctypes.cast(owner, ctypes.c_void_p), len(owner.raw))
             events[index].diagnostic.status = NativeStatus.ok().to_ffi()
+            events[index].diagnostic.related_operation_id = operation_id
+            events[index].diagnostic.related_frame_id = frame_id
         del self._owned_batch_events[:emitted]
         count_target.value = emitted
         return self.status
@@ -4572,6 +4580,8 @@ def test_native_result_keeps_wire_operation_identity_separate_from_handle_identi
                 len(self._event_payload_owner.raw),
             )
             events[0].diagnostic.status = NativeStatus.ok().to_ffi()
+            events[0].diagnostic.related_operation_id = 99
+            events[0].diagnostic.related_frame_id = 7
             count_target.value = 1
             return self.status
 
@@ -4614,7 +4624,7 @@ def test_native_runtime_result_preserves_lifecycle_surface(tmp_path: Path) -> No
 
     assert result.state is NativeOperationLifecycle.COMPLETED
     assert result.operation_id == 99
-    assert result.frame_id == 0
+    assert result.frame_id == 7
     assert result.body == b"result"
     assert result.metadata is not None
     assert result.metadata.payload_kind_bitmap == PayloadKind.TOKEN_CHUNK
@@ -5537,6 +5547,8 @@ def test_native_runtime_session_batch_poll_skips_submit_accepted_events(tmp_path
                     len(self._event_payload_owner.raw),
                 )
                 events[index].diagnostic.status = NativeStatus.ok().to_ffi()
+                events[index].diagnostic.related_operation_id = 99
+                events[index].diagnostic.related_frame_id = 7
             count_target.value = 2
             return self.status
 

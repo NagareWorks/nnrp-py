@@ -62,7 +62,9 @@ from nnrp.core import (
     build_transport_probe_ack_packet,
     build_transport_probe_packet,
     pack_control_extension_block,
-    unpack_tensor_body,
+    unpack_current_tensor_body,
+    validate_frame_submit_body,
+    validate_result_push_body,
 )
 
 
@@ -416,11 +418,8 @@ def _unpack_inline_submit_tensor_body(
     metadata: FrameSubmitMetadata,
     body: bytes,
 ):
-    if metadata.camera_bytes > len(body):
-        raise ValueError("FRAME_SUBMIT body shorter than camera_bytes metadata")
-    return unpack_tensor_body(
-        body[metadata.camera_bytes :],
-        tile_index_bytes=metadata.tile_index_bytes,
+    return unpack_current_tensor_body(
+        validate_frame_submit_body(metadata, body),
         section_count=metadata.section_count,
         tile_count=metadata.tile_count,
     )
@@ -430,9 +429,8 @@ def _unpack_inline_result_tensor_body(
     metadata: ResultPushMetadata,
     body: bytes,
 ):
-    return unpack_tensor_body(
-        body,
-        tile_index_bytes=metadata.tile_index_bytes,
+    return unpack_current_tensor_body(
+        validate_result_push_body(metadata, body),
         section_count=metadata.section_count,
         tile_count=metadata.tile_count,
     )

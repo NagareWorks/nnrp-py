@@ -10,12 +10,17 @@ from nnrp import (
     CacheLeaseDescriptor,
     CacheLeaseOwnerScope,
     CacheObjectIdentity,
+    NativeLifecycleEvent,
+    NativeLifecycleEventCallback,
+    NativePolledEvent,
+    NativePolledEventCallback,
     NativeRuntimeClient,
+    NativeRuntimeEvent,
+    NativeRuntimeEventCallback,
     NativeRuntimeFeatureFlag,
     NativeRuntimeServer,
     NativeRuntimeServerOperation,
     NativeRuntimeServerSession,
-    Preview3TypedPayloadDescriptor,
     SchemaDescriptorHeader,
     SchemaRegistryCatalog,
     SessionRecoveryReport,
@@ -49,11 +54,20 @@ from nnrp.client import (
     PathHealthSample,
     Result,
     ResultRouter,
+    SubmitHeaderContext,
+    SubmitIdentity,
+    SubmitObjectReferences,
+    SubmitPolicy,
     SubmitRequest,
+    TensorSubmitInput,
+    TokenChunk,
+    TokenSubmitInput,
     TransportProbeResult,
     TransportProbeSelection,
     TransportProbeSummary,
     TypedPayload,
+    TypedPayloadInputFrame,
+    TypedPayloadSubmitInput,
     bootstrap_client_transport,
     build_client_hello_packet,
     connect_client_control,
@@ -139,6 +153,8 @@ from nnrp.core import (
     build_session_migrate_ack_packet,
     build_session_migrate_packet,
     build_stale_reuse_result_push_packet,
+    build_structured_event_frame,
+    build_tool_delta_frame,
     build_transport_probe_ack_packet,
     build_transport_probe_packet,
     pack_control_extension_block,
@@ -375,6 +391,12 @@ def test_preview4_host_runtime_api_keeps_request_options_off_packet_helpers() ->
     assert callable(NativeRuntimeServer.accept_session)
     assert callable(NativeRuntimeServerSession.receive_submit)
     assert callable(NativeRuntimeServerOperation.send_result)
+    assert NativeRuntimeEvent is not None
+    assert NativeLifecycleEvent is not None
+    assert NativePolledEvent is not None
+    assert NativeRuntimeEventCallback is not None
+    assert NativeLifecycleEventCallback is not None
+    assert NativePolledEventCallback is not None
 
     assert set(NativeClientConnectionOptions.__annotations__) == {
         "connection_id",
@@ -408,6 +430,62 @@ def test_preview4_host_runtime_api_keeps_request_options_off_packet_helpers() ->
     assert "expire_at_unix_ms" in expire_signature.parameters
 
 
+def test_preview4_submit_api_matches_frozen_builder_contract() -> None:
+    assert tuple(SubmitHeaderContext.__dataclass_fields__) == ("flags", "view_id", "route_id", "trace_id")
+    assert tuple(SubmitIdentity.__dataclass_fields__) == ("operation_id", "frame_id", "header")
+    assert tuple(SubmitPolicy.__dataclass_fields__) == (
+        "frame_class",
+        "latency_budget_ms",
+        "target_fps_x100",
+        "retry_of_frame",
+        "budget_policy",
+        "loss_tolerance_policy",
+        "dependency_frame_id",
+    )
+    assert tuple(SubmitObjectReferences.__dataclass_fields__) == (
+        "camera",
+        "tile_index",
+        "tensor_section_table",
+    )
+    assert tuple(TensorSubmitInput.__dataclass_fields__) == (
+        "identity",
+        "policy",
+        "src_width",
+        "src_height",
+        "tile_width",
+        "tile_height",
+        "tile_ids",
+        "sections",
+        "camera_block",
+        "input_profile",
+        "tile_index_mode",
+        "tile_base_id",
+        "references",
+    )
+    assert tuple(TokenChunk.__dataclass_fields__) == ("payload", "descriptor_flags")
+    assert tuple(TokenSubmitInput.__dataclass_fields__) == ("identity", "policy", "chunks")
+    assert tuple(TypedPayloadInputFrame.__dataclass_fields__) == (
+        "profile_id",
+        "payload_kind",
+        "payload",
+        "descriptor_flags",
+        "schema_id",
+        "schema_version",
+        "stream_semantics",
+    )
+    assert tuple(TypedPayloadSubmitInput.__dataclass_fields__) == ("identity", "policy", "frames")
+    assert tuple(SubmitRequest.__dataclass_fields__) == (
+        "operation_id",
+        "frame_id",
+        "header",
+        "metadata",
+        "body",
+    )
+    assert tuple(inspect.signature(SubmitRequest.tensor).parameters) == ("value",)
+    assert tuple(inspect.signature(SubmitRequest.token).parameters) == ("value",)
+    assert tuple(inspect.signature(SubmitRequest.typed_payload).parameters) == ("value",)
+
+
 def test_legacy_packet_session_helpers_warn_as_tooling_only() -> None:
     async def enter_legacy_session() -> None:
         async with connect_client_session("127.0.0.1"):
@@ -433,7 +511,7 @@ def test_current_typed_models_are_exported() -> None:
     assert CacheLeaseOwnerScope.SESSION == 1
     assert SchemaDescriptorHeader.__name__ == "SchemaDescriptorHeader"
     assert SchemaRegistryCatalog.__name__ == "SchemaRegistryCatalog"
-    assert Preview3TypedPayloadDescriptor.__name__ == "Preview3TypedPayloadDescriptor"
+    assert TypedPayloadDescriptor.__name__ == "TypedPayloadDescriptor"
     assert StandardProfile.TOKEN == 2
     assert StreamSemantics.APPEND == 2
     assert token_delta_schema_descriptor().profile_id is StandardProfile.TOKEN
@@ -451,21 +529,21 @@ def test_preview4_native_feature_flag_helpers_are_exported() -> None:
 
 
 def test_current_result_helpers_expose_payload_kinds_without_tensor_coverage() -> None:
-    packet = build_result_push_packet(
+    packet = build_result_push_typed_payload_packet(
         session_id=7,
         frame_id=88,
-        tile_ids=(),
-        sections=(),
+        frames=(
+            build_structured_event_frame(b'{"event":"ready"}'),
+            build_tool_delta_frame(b'{"tool":"render"}'),
+        ),
         result_class=ResultClass.COMPLETE,
-        payload_kind_bitmap=PayloadKind.STRUCTURED_EVENT | PayloadKind.TOOL_DELTA,
-        payload_frame_count=0,
     )
     result = Result(packet=packet, metadata=ResultPushMetadata.unpack(packet.metadata))
 
     assert result.payload_kinds == (PayloadKind.STRUCTURED_EVENT, PayloadKind.TOOL_DELTA)
     assert result.has_payload_kind(PayloadKind.STRUCTURED_EVENT) is True
     assert result.has_payload_kind(PayloadKind.TENSOR) is False
-    assert result.payload_frame_count == 0
+    assert result.payload_frame_count == 2
     assert result.has_tensor_coverage is False
     assert result.tensor_covered_tile_count is None
     assert result.tensor_dropped_tile_count is None
@@ -538,7 +616,7 @@ def test_server_profile_defaults_and_overrides() -> None:
     assert custom_profile.max_body_bytes == 4096
 
 
-def test_compatibility_exports_expose_core_symbols() -> None:
+def test_public_exports_expose_core_symbols() -> None:
     header = NnrpHeader(
         version_major=1,
         wire_format=WireFormat.CURRENT,
@@ -566,7 +644,7 @@ def test_compatibility_exports_expose_core_symbols() -> None:
     assert BODY_REGION_PRELUDE_LENGTH == 32
     assert INLINE_OBJECT_BLOCK_HEADER_LENGTH == 16
     assert OBJECT_REFERENCE_BLOCK_LENGTH == 24
-    assert TYPED_PAYLOAD_DESCRIPTOR_LENGTH == 16
+    assert TYPED_PAYLOAD_DESCRIPTOR_LENGTH == 24
     assert EXTENSION_FRAME_DESCRIPTOR_LENGTH == 16
     assert FrameSubmitMetadata.__name__ == "FrameSubmitMetadata"
     assert ResultPushMetadata.__name__ == "ResultPushMetadata"

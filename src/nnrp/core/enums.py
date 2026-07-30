@@ -3,6 +3,17 @@
 from enum import IntEnum, IntFlag
 
 
+class PayloadKind(IntFlag):
+    NONE = 0
+    TENSOR = 0x00000001
+    TOKEN_CHUNK = 0x00000002
+    AUDIO_CHUNK = 0x00000004
+    VIDEO_CHUNK = 0x00000008
+    STRUCTURED_EVENT = 0x00000010
+    TOOL_DELTA = 0x00000020
+    OPAQUE_BYTES = 0x00000040
+
+
 class WireFormat(IntEnum):
     CURRENT = 0
 
@@ -14,6 +25,10 @@ class MessageType(IntEnum):
     SESSION_PATCH_ACK = 0x04
     CLOSE = 0x05
     ERROR = 0x06
+    SESSION_OPEN = 0x07
+    SESSION_OPEN_ACK = 0x08
+    SESSION_CLOSE = 0x09
+    SESSION_CLOSE_ACK = 0x0A
     FLOW_UPDATE = 0x17
     RESULT_HINT = 0x18
     TRANSPORT_PROBE = 0x19

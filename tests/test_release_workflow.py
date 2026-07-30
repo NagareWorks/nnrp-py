@@ -14,8 +14,8 @@ def test_release_workflow_manual_ref_defaults_to_main() -> None:
 def test_release_workflow_pins_preview4_rust_native_artifacts() -> None:
     workflow = RELEASE_WORKFLOW.read_text(encoding="utf-8")
 
-    assert "default: 1.0.0-preview.4.19" in workflow
-    assert "vars.NNRP_RS_NATIVE_VERSION || '1.0.0-preview.4.19'" in workflow
+    assert "default: 1.0.0-preview.4.20" in workflow
+    assert "vars.NNRP_RS_NATIVE_VERSION || '1.0.0-preview.4.20'" in workflow
     assert "1.0.0-preview.3.8" not in workflow
 
 
@@ -30,7 +30,7 @@ def test_release_workflow_rejects_non_preview4_native_artifact_shape() -> None:
     workflow = RELEASE_WORKFLOW.read_text(encoding="utf-8")
 
     assert "--require-preview4-native-artifacts" in workflow
-    assert "--require-abi-version 4.1.1" in workflow
+    assert "--require-abi-version 4.3.0" in workflow
     assert "Run installed wheel native role E2E" in workflow
     assert '"$candidate_wheel"' in workflow
     assert "pytest-asyncio" in workflow

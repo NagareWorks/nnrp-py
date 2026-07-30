@@ -19,7 +19,8 @@ from nnrp._native_routes import (
     selection_error,
     unavailable_candidate,
 )
-from nnrp.core import FrameSubmitMetadata, MessageType, TransportPolicy
+from nnrp.client.transport import SubmitRequest
+from nnrp.core import MessageType, TransportPolicy
 from nnrp.native import (
     FFI_STATUS_WOULD_BLOCK,
     NATIVE_TRANSPORT_ID_BY_NAME,
@@ -178,11 +179,8 @@ class NativeClientConnection:
     def submit_and_poll_result(
         self,
         session: NativeRuntimeSession,
+        request: SubmitRequest,
         *,
-        operation_id: int,
-        frame_id: int,
-        metadata: FrameSubmitMetadata | None = None,
-        body: bytes | bytearray | memoryview = b"",
         parent_operation_id: int | None = None,
         operation_group_id: int | None = None,
         max_events: int | None = None,
@@ -190,10 +188,7 @@ class NativeClientConnection:
     ) -> NativeRuntimeResult:
         self._ensure_open()
         operation = session.submit_operation(
-            operation_id=operation_id,
-            frame_id=frame_id,
-            metadata=metadata,
-            body=body,
+            request,
             parent_operation_id=parent_operation_id,
             operation_group_id=operation_group_id,
         )

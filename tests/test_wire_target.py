@@ -3,21 +3,49 @@ from __future__ import annotations
 import json
 import threading
 from contextlib import contextmanager
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
 import nnrp.tools.wire_target as wire_target
+from nnrp.client import SubmitRequest
 from nnrp.core import MessageType
 from nnrp.native import (
-    EVENT_KIND_SESSION_CLOSED,
     FFI_STATUS_WOULD_BLOCK,
     NativeRuntimeError,
     NativeStatus,
     NativeWouldBlockError,
 )
-from nnrp.runtime import PartialResultMetadata, PressureMetadata, ProgressMetadata
+from nnrp.runtime import (
+    CacheReferenceMetadata,
+    InFlightPolicy,
+    NativeRuntimeEvent,
+    PartialResultMetadata,
+    PressureMetadata,
+    ProgressMetadata,
+    RuntimeEventMetadata,
+    RuntimeEventMetadataKind,
+    RuntimeEventTail,
+    RuntimeFrameHeader,
+    SessionCloseMetadata,
+    SessionCloseReason,
+)
+
+
+def _runtime_event(
+    message_type: MessageType,
+    metadata_kind: RuntimeEventMetadataKind,
+    metadata: object,
+    *,
+    body: bytes = b"",
+) -> NativeRuntimeEvent:
+    return NativeRuntimeEvent(
+        RuntimeFrameHeader(message_type),
+        RuntimeEventMetadata(metadata_kind, metadata),
+        RuntimeEventTail.with_body(body) if body else RuntimeEventTail.none(),
+    )
 
 
 class _FakeSession:
@@ -40,9 +68,9 @@ class _FakeSession:
     def report_cache_miss(self, metadata) -> None:
         self.calls.append(("cache_miss", metadata))
 
-    def submit_operation(self, **kwargs):
-        self.calls.append(("submit", kwargs))
-        return SimpleNamespace(operation_id=kwargs["operation_id"])
+    def submit_operation(self, request: SubmitRequest):
+        self.calls.append(("submit", request))
+        return SimpleNamespace(operation_id=request.operation_id)
 
     def poll_runtime_frames(self, *, max_events: int, timeout_ms: int):
         self.calls.append(("poll_frames", (max_events, timeout_ms)))
@@ -79,9 +107,7 @@ def test_run_live_wire_target_dispatches_all_modes(tmp_path: Path, monkeypatch: 
     monkeypatch.setattr(
         wire_target,
         "_run_server_scenarios",
-        lambda selected, *, ready_path, timeout_seconds: server_calls.append(
-            (selected, ready_path, timeout_seconds)
-        ),
+        lambda selected, *, ready_path, timeout_seconds: server_calls.append((selected, ready_path, timeout_seconds)),
     )
 
     ready_path = tmp_path / "ready"
@@ -172,7 +198,18 @@ def test_server_handlers_exchange_typed_control_frames(monkeypatch: pytest.Monke
     session = _FakeSession()
     awaited: list[list[MessageType]] = []
     closed: list[object] = []
-    cache_reference = SimpleNamespace(cache_namespace=1, cache_key_hi=2, cache_key_lo=3, profile_id=4)
+    cache_reference = CacheReferenceMetadata(
+        cache_namespace=1,
+        cache_key_hi=2,
+        cache_key_lo=3,
+        profile_id=4,
+        reuse_scope=0,
+        lease_id=5,
+        producer_trace_id=6,
+        expiration_hint_ms=7,
+        metadata_bytes=0,
+        flags=0,
+    )
 
     def await_frames(_session, expected_types, **_kwargs):
         awaited.append(list(expected_types))
@@ -180,7 +217,11 @@ def test_server_handlers_exchange_typed_control_frames(monkeypatch: pytest.Monke
             return [
                 SimpleNamespace(metadata=None),
                 SimpleNamespace(metadata=None),
-                SimpleNamespace(metadata=cache_reference),
+                _runtime_event(
+                    MessageType.CACHE_REFERENCE,
+                    RuntimeEventMetadataKind.CACHE_REFERENCE,
+                    cache_reference,
+                ),
             ]
         return []
 
@@ -212,19 +253,21 @@ def test_progress_client_validates_frames_and_terminal_result(monkeypatch: pytes
         yield connection
 
     frames = [
-        SimpleNamespace(
-            message_type=MessageType.PROGRESS,
-            metadata=ProgressMetadata(301, 1, 1, 2_500, 0, len(wire_target._PROGRESS_BODY)),
+        _runtime_event(
+            MessageType.PROGRESS,
+            RuntimeEventMetadataKind.PROGRESS,
+            ProgressMetadata(301, 1, 1, 2_500, 0, len(wire_target._PROGRESS_BODY)),
             body=wire_target._PROGRESS_BODY,
         ),
-        SimpleNamespace(
-            message_type=MessageType.CREDIT_UPDATE,
-            metadata=PressureMetadata(1, 1, 0, 0, 0, 0),
-            body=b"",
+        _runtime_event(
+            MessageType.CREDIT_UPDATE,
+            RuntimeEventMetadataKind.PRESSURE,
+            PressureMetadata(1, 1, 0, 0, 0, 0),
         ),
-        SimpleNamespace(
-            message_type=MessageType.PARTIAL_RESULT,
-            metadata=PartialResultMetadata(301, 1, 0, 0, len(wire_target._PARTIAL_BODY), 0),
+        _runtime_event(
+            MessageType.PARTIAL_RESULT,
+            RuntimeEventMetadataKind.PARTIAL_RESULT,
+            PartialResultMetadata(301, 1, 0, 0, len(wire_target._PARTIAL_BODY), 0),
             body=wire_target._PARTIAL_BODY,
         ),
     ]
@@ -276,7 +319,12 @@ def test_open_connection_retries_and_closes_context(monkeypatch: pytest.MonkeyPa
 def test_poll_helpers_handle_empty_batches_mismatch_and_timeout(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(wire_target.time, "sleep", lambda _seconds: None)
     session = _FakeSession()
-    expected = SimpleNamespace(message_type=MessageType.PROGRESS)
+    expected = _runtime_event(
+        MessageType.PROGRESS,
+        RuntimeEventMetadataKind.PROGRESS,
+        ProgressMetadata(301, 1, 1, 2_500, 0, len(wire_target._PROGRESS_BODY)),
+        body=wire_target._PROGRESS_BODY,
+    )
     session.poll_frames_batches = [[], [expected]]
     assert wire_target._await_runtime_frames(
         session,
@@ -284,7 +332,7 @@ def test_poll_helpers_handle_empty_batches_mismatch_and_timeout(monkeypatch: pyt
         timeout_seconds=1.0,
     ) == [expected]
 
-    session.poll_frames_batches = [[SimpleNamespace(message_type=MessageType.CANCEL)]]
+    session.poll_frames_batches = [[replace(expected, header=RuntimeFrameHeader(MessageType.CANCEL))]]
     with pytest.raises(RuntimeError, match="expected runtime frames"):
         wire_target._await_runtime_frames(session, [MessageType.PROGRESS], timeout_seconds=1.0)
 
@@ -293,30 +341,50 @@ def test_poll_helpers_handle_empty_batches_mismatch_and_timeout(monkeypatch: pyt
         NativeWouldBlockError(NativeStatus(FFI_STATUS_WOULD_BLOCK)),
         SimpleNamespace(body=b"done"),
     ]
-    assert wire_target._poll_result(
-        session,
-        operation,
-        deadline=wire_target.time.monotonic() + 1.0,
-    ).body == b"done"
+    assert (
+        wire_target._poll_result(
+            session,
+            operation,
+            deadline=wire_target.time.monotonic() + 1.0,
+        ).body
+        == b"done"
+    )
 
-    session.poll_events_batches = [[], [SimpleNamespace(kind=EVENT_KIND_SESSION_CLOSED)]]
+    session.poll_events_batches = [
+        [],
+        [
+            _runtime_event(
+                MessageType.SESSION_CLOSE,
+                RuntimeEventMetadataKind.SESSION_CLOSE,
+                SessionCloseMetadata(SessionCloseReason.NORMAL, InFlightPolicy.DRAIN, 0, 0, 0, 0),
+            )
+        ],
+    ]
     wire_target._await_peer_close(session, timeout_seconds=1.0)
 
 
 def test_validate_progress_frames_rejects_noncanonical_payload() -> None:
     valid = [
-        SimpleNamespace(
-            metadata=ProgressMetadata(301, 1, 1, 2_500, 0, len(wire_target._PROGRESS_BODY)),
+        _runtime_event(
+            MessageType.PROGRESS,
+            RuntimeEventMetadataKind.PROGRESS,
+            ProgressMetadata(301, 1, 1, 2_500, 0, len(wire_target._PROGRESS_BODY)),
             body=wire_target._PROGRESS_BODY,
         ),
-        SimpleNamespace(metadata=PressureMetadata(1, 1, 0, 0, 0, 0), body=b""),
-        SimpleNamespace(
-            metadata=PartialResultMetadata(301, 1, 0, 0, len(wire_target._PARTIAL_BODY), 0),
+        _runtime_event(
+            MessageType.CREDIT_UPDATE,
+            RuntimeEventMetadataKind.PRESSURE,
+            PressureMetadata(1, 1, 0, 0, 0, 0),
+        ),
+        _runtime_event(
+            MessageType.PARTIAL_RESULT,
+            RuntimeEventMetadataKind.PARTIAL_RESULT,
+            PartialResultMetadata(301, 1, 0, 0, len(wire_target._PARTIAL_BODY), 0),
             body=wire_target._PARTIAL_BODY,
         ),
     ]
     wire_target._validate_progress_frames(valid)
-    valid[0] = SimpleNamespace(metadata=valid[0].metadata, body=b"wrong")
+    valid[0] = replace(valid[0], tail=RuntimeEventTail.with_body(b"wrong"))
     with pytest.raises(RuntimeError, match="PROGRESS body"):
         wire_target._validate_progress_frames(valid)
 

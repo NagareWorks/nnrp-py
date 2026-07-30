@@ -31,6 +31,7 @@ from nnrp.adapters.quic import (
 )
 from nnrp.core import (
     TENSOR_PROFILE_CACHE_OBJECT_BITMAP,
+    CacheObjectKind,
     ClientHelloMetadata,
     FrameSubmitMetadata,
     HeaderFlags,
@@ -54,7 +55,10 @@ from nnrp.core import (
     build_result_push_packet,
     build_transport_probe_ack_packet,
     build_transport_probe_packet,
-    unpack_tensor_body,
+    unpack_current_tensor_body,
+    unpack_inline_object_blocks,
+    validate_frame_submit_body,
+    validate_result_push_body,
 )
 from nnrp.runtime import (
     ObjectReferenceMetadata,
@@ -225,10 +229,14 @@ async def _run_quic_data_loopback() -> None:
 
                 assert submit_stream_id & 0x02
                 assert received_submit.header.msg_type is MessageType.FRAME_SUBMIT
-                assert received_submit.body[: submit_metadata.camera_bytes] == b"camera!!"
-                submit_tensor_body = unpack_tensor_body(
-                    received_submit.body[submit_metadata.camera_bytes :],
-                    tile_index_bytes=submit_metadata.tile_index_bytes,
+                submit_body = validate_frame_submit_body(submit_metadata, received_submit.body)
+                submit_blocks = {
+                    block.header.object_kind: block
+                    for block in unpack_inline_object_blocks(submit_body.inline_object_region)
+                }
+                assert bytes(submit_blocks[CacheObjectKind.CAMERA_BLOCK].payload) == b"camera!!"
+                submit_tensor_body = unpack_current_tensor_body(
+                    submit_body,
                     section_count=submit_metadata.section_count,
                     tile_count=submit_metadata.tile_count,
                 )
@@ -246,9 +254,8 @@ async def _run_quic_data_loopback() -> None:
 
                 assert result_stream_id & 0x02
                 assert received_result.header.msg_type is MessageType.RESULT_PUSH
-                result_tensor_body = unpack_tensor_body(
-                    received_result.body,
-                    tile_index_bytes=result_metadata.tile_index_bytes,
+                result_tensor_body = unpack_current_tensor_body(
+                    validate_result_push_body(result_metadata, received_result.body),
                     section_count=result_metadata.section_count,
                     tile_count=result_metadata.tile_count,
                 )

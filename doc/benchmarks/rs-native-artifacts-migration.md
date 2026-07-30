@@ -19,11 +19,11 @@ The production path does not ship the retired compact-result ABI or a compiled C
 
 ## Pinned Native Contract
 
-The current Python package consumes `nnrp-rs` native artifact version `1.0.0-preview.4.19`.
+The current Python package consumes `nnrp-rs` native artifact version `1.0.0-preview.4.20`.
 
 This artifact contract includes:
 
-1. `nnrp_runtime_capabilities` and ABI version `4.1.1`.
+1. `nnrp_runtime_capabilities` and ABI version `4.3.0`.
 2. Protocol version `1/0`.
 3. Carrier open/listen/accept and client/server role-adoption entrypoints.
 4. Client submit/cancel/poll and server receive/result entrypoints.

@@ -59,8 +59,8 @@ def test_tensor_section_desc_roundtrip() -> None:
 def test_body_region_prelude_roundtrip() -> None:
     prelude = BodyRegionPrelude(
         inline_object_bytes=48,
-        object_reference_bytes=16,
-        typed_payload_descriptor_bytes=32,
+        object_reference_bytes=24,
+        typed_payload_descriptor_bytes=48,
         typed_payload_frame_bytes=96,
         extension_descriptor_bytes=16,
         extension_payload_bytes=24,
@@ -120,28 +120,35 @@ def test_object_reference_block_roundtrip() -> None:
 
 def test_typed_payload_descriptor_roundtrip() -> None:
     descriptor = TypedPayloadDescriptor(
-        payload_kind=PayloadKind.STRUCTURED_EVENT,
-        descriptor_flags=0,
-        profile_id=0,
-        payload_offset=64,
-        payload_length=24,
+        profile_id=2,
+        payload_kind=PayloadKind.TOKEN_CHUNK,
+        descriptor_flags=2,
+        schema_id=0x1001,
+        schema_version=3,
+        stream_semantics=2,
+        offset=8,
+        length=24,
     )
 
     payload = descriptor.pack()
 
     assert len(payload) == TYPED_PAYLOAD_DESCRIPTOR_LENGTH
-    assert TYPED_PAYLOAD_DESCRIPTOR_LENGTH == 16
+    assert TYPED_PAYLOAD_DESCRIPTOR_LENGTH == 24
+    assert payload == bytes.fromhex("020002020110000003000000020000000800000018000000")
     assert TypedPayloadDescriptor.unpack(payload) == descriptor
 
 
-def test_typed_payload_descriptor_rejects_multi_bit_payload_kind() -> None:
-    with pytest.raises(ValueError, match="payload_kind must contain exactly one"):
+def test_typed_payload_descriptor_rejects_unknown_flags() -> None:
+    with pytest.raises(ValueError, match="descriptor_flags"):
         TypedPayloadDescriptor(
-            payload_kind=PayloadKind.TENSOR | PayloadKind.TOKEN_CHUNK,
-            descriptor_flags=0,
-            profile_id=0,
-            payload_offset=0,
-            payload_length=8,
+            profile_id=2,
+            payload_kind=PayloadKind.TOKEN_CHUNK,
+            descriptor_flags=0x10,
+            schema_id=0x1001,
+            schema_version=3,
+            stream_semantics=2,
+            offset=0,
+            length=8,
         )
 
 

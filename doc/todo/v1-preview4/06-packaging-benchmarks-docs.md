@@ -3,7 +3,7 @@
 ## Coordinated Route-Contract Release Gate
 
 - [x] Do not publish another Python Preview4 package until route-set client/server behavior and host-level conformance pass.
-- [x] Pin reviewed Rust artifact `1.0.0-preview.4.19`, containing the complete route/security and shutdown ABI.
+- [x] Pin reviewed Rust artifact `1.0.0-preview.4.20`, containing the complete route/security, shutdown, submit, and runtime-event ABI.
 - [x] Inspect every wheel and verify transport-scoped artifacts remain correctly owned.
 - [x] Compare Python public signatures with the frozen `nnrp-doc` route types before release.
 - [x] Record the completed cross-SDK audit and conformance evidence in the release notes.
@@ -20,7 +20,7 @@
 - [x] Keep client/server hot paths coarse at submit, event-batch, result, and runtime-frame boundaries.
 - [x] Reject universal wheels for native preview4 releases.
 - [x] Verify wheel contents per platform.
-- [x] Require Rust ABI `4.1.1` in the release workflow.
+- [x] Require Rust ABI `4.3.0` in the release workflow.
 
 ## Benchmarks
 

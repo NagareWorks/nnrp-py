@@ -11,6 +11,7 @@ from nnrp.core import (
     ResultPushMetadata,
     SubmitMode,
     unpack_body,
+    unpack_current_tensor_body,
     unpack_inline_object_blocks,
     unpack_object_reference_blocks,
     unpack_tensor_body,
@@ -28,10 +29,6 @@ from nnrp.tools import (
     render_wire_summary,
     unpack_replay_camera_block,
 )
-
-
-def _align_up(value: int, alignment: int = 8) -> int:
-    return ((value + alignment - 1) // alignment) * alignment
 
 
 @dataclass(slots=True)
@@ -171,13 +168,16 @@ def test_frame_features_export_to_current_packet() -> None:
     assert metadata.tile_count == 2
     assert metadata.section_count == 2
     assert metadata.camera_bytes > 0
-    camera = unpack_replay_camera_block(packet.body[: metadata.camera_bytes])
+    current_body = unpack_body(packet.body)
+    inline_blocks = {
+        block.header.object_kind: block for block in unpack_inline_object_blocks(current_body.inline_object_region)
+    }
+    camera = unpack_replay_camera_block(bytes(inline_blocks[CacheObjectKind.CAMERA_BLOCK].payload))
     assert camera.jitter_x == frame.camera.jitter_x
     assert len(camera.view) == 16
 
-    body_view = unpack_tensor_body(
-        packet.body[_align_up(metadata.camera_bytes) :],
-        tile_index_bytes=metadata.tile_index_bytes,
+    body_view = unpack_current_tensor_body(
+        current_body,
         section_count=metadata.section_count,
         tile_count=metadata.tile_count,
     )
@@ -286,9 +286,8 @@ def test_enhance_result_export_to_current_packet() -> None:
     assert metadata.covered_tile_count == 2
     assert metadata.dropped_tile_count == 0
 
-    body_view = unpack_tensor_body(
-        packet.body,
-        tile_index_bytes=metadata.tile_index_bytes,
+    body_view = unpack_current_tensor_body(
+        unpack_body(packet.body),
         section_count=metadata.section_count,
         tile_count=metadata.tile_count,
     )
@@ -365,9 +364,8 @@ def test_enhance_result_export_marks_partial_from_counts() -> None:
 
     packet = enhance_result_to_packet(result, session_id=16, view_id=5, trace_id=44)
     metadata = ResultPushMetadata.unpack(packet.metadata)
-    body_view = unpack_tensor_body(
-        packet.body,
-        tile_index_bytes=metadata.tile_index_bytes,
+    body_view = unpack_current_tensor_body(
+        unpack_body(packet.body),
         section_count=metadata.section_count,
         tile_count=metadata.tile_count,
     )
@@ -421,9 +419,8 @@ def test_enhance_result_export_prefers_explicit_result_grid_context() -> None:
 
     packet = enhance_result_to_packet(result)
     metadata = ResultPushMetadata.unpack(packet.metadata)
-    body_view = unpack_tensor_body(
-        packet.body,
-        tile_index_bytes=metadata.tile_index_bytes,
+    body_view = unpack_current_tensor_body(
+        unpack_body(packet.body),
         section_count=metadata.section_count,
         tile_count=metadata.tile_count,
     )
@@ -470,12 +467,12 @@ def test_frame_features_wire_summary_and_comparison_are_stable() -> None:
     )
 
     assert render_wire_summary(summary) == (
-        "subject=frame_submit msg=FRAME_SUBMIT wire=433 meta=72 body=321 tiles=2 sections=2 "
+        "subject=frame_submit msg=FRAME_SUBMIT wire=520 meta=72 body=408 tiles=2 sections=2 "
         "tile_index=4 camera=214 roles=1,5"
     )
     assert render_wire_size_comparison(comparison) == (
-        "reference_label=protobuf reference=512 current=433 delta=-79 current_ratio=84.57% "
-        "subject=frame_submit msg=FRAME_SUBMIT wire=433 meta=72 body=321 tiles=2 sections=2 "
+        "reference_label=protobuf reference=512 current=520 delta=8 current_ratio=101.56% "
+        "subject=frame_submit msg=FRAME_SUBMIT wire=520 meta=72 body=408 tiles=2 sections=2 "
         "tile_index=4 camera=214 roles=1,5"
     )
 
@@ -512,11 +509,11 @@ def test_enhance_result_wire_summary_and_comparison_are_stable() -> None:
     )
 
     assert render_wire_summary(summary) == (
-        "subject=result_push msg=RESULT_PUSH wire=202 meta=64 body=98 tiles=2 sections=2 "
+        "subject=result_push msg=RESULT_PUSH wire=272 meta=64 body=168 tiles=2 sections=2 "
         "tile_index=4 camera=0 roles=100,101 result_flags=STALE"
     )
     assert render_wire_size_comparison(comparison) == (
-        "reference_label=protobuf reference=256 current=202 delta=-54 current_ratio=78.90% "
-        "subject=result_push msg=RESULT_PUSH wire=202 meta=64 body=98 tiles=2 sections=2 "
+        "reference_label=protobuf reference=256 current=272 delta=16 current_ratio=106.25% "
+        "subject=result_push msg=RESULT_PUSH wire=272 meta=64 body=168 tiles=2 sections=2 "
         "tile_index=4 camera=0 roles=100,101 result_flags=STALE"
     )

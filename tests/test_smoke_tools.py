@@ -24,7 +24,13 @@ from nnrp.adapters import (
     serve_tcp,
 )
 from nnrp.client import (
+    SubmitIdentity,
+    SubmitObjectReferences,
+    SubmitPolicy,
     SubmitRequest,
+    TensorSubmitInput,
+    TypedPayloadInputFrame,
+    TypedPayloadSubmitInput,
     connect_client_control,
     connect_client_control_with_probe,
     probe_client_transport,
@@ -69,14 +75,18 @@ from nnrp.core import (
     build_client_hello_loss_tolerance_extension,
     build_flow_update_packet,
     build_result_push_packet,
+    build_result_push_typed_payload_packet,
     build_session_migrate_ack_packet,
+    build_structured_event_frame,
     build_tile_index_reference_block,
+    build_tool_delta_frame,
     build_transport_probe_ack_packet,
     pack_control_extension_block,
     parse_client_hello_transport_policy_extension,
     parse_server_hello_ack_transport_policy_extension,
     unpack_control_extension_block,
-    unpack_tensor_body,
+    unpack_current_tensor_body,
+    validate_frame_submit_body,
 )
 from nnrp.tools import (
     TransportProbeResult,
@@ -1022,9 +1032,8 @@ async def _run_connect_client_session_quic() -> None:
             )
 
             submit_metadata = FrameSubmitMetadata.unpack(submit_packet.metadata)
-            submit_body = unpack_tensor_body(
-                submit_packet.body[submit_metadata.camera_bytes :],
-                tile_index_bytes=submit_metadata.tile_index_bytes,
+            submit_body = unpack_current_tensor_body(
+                validate_frame_submit_body(submit_metadata, submit_packet.body),
                 section_count=submit_metadata.section_count,
                 tile_count=submit_metadata.tile_count,
             )
@@ -1301,43 +1310,44 @@ async def _run_connect_client_session_typed_current_tcp() -> None:
         timeout=5.0,
     ) as session:
         submit_stream_id = await session.send_submit(
-            SubmitRequest(
-                frame_id=814,
-                operation_id=814,
-                src_width=640,
-                src_height=360,
-                tile_width=32,
-                tile_height=32,
-                tile_ids=(2, 4, 6),
-                sections=(
-                    TensorSectionData(
-                        role_id=9,
-                        default_codec_id=0,
-                        dtype_id=TensorDType.UINT8,
-                        tile_payloads=(b"abc", b"de", b"f"),
+            SubmitRequest.tensor(
+                TensorSubmitInput(
+                    identity=SubmitIdentity(operation_id=814, frame_id=814),
+                    policy=SubmitPolicy(
+                        latency_budget_ms=40,
+                        target_fps_x100=6000,
+                        budget_policy=BudgetPolicy.ALLOW_PARTIAL,
+                        dependency_frame_id=812,
                     ),
-                ),
-                camera_block=b"cam-current",
-                input_profile=InputProfile.DENSE_LUMA_FRAME,
-                tile_index_mode=TileIndexMode.RAW_U16,
-                latency_budget_ms=40,
-                target_fps_x100=6000,
-                submit_mode=SubmitMode.MIXED,
-                object_ref_mask=0x00000003,
-                camera_reference=build_camera_reference_block(
-                    cache_namespace=1,
-                    cache_key_hi=2,
-                    cache_key_lo=3,
-                ),
-                tile_index_reference=build_tile_index_reference_block(
-                    cache_namespace=4,
-                    cache_key_hi=5,
-                    cache_key_lo=6,
-                ),
-                budget_policy=BudgetPolicy.ALLOW_PARTIAL,
-                dependency_frame_id=812,
-                payload_kind_bitmap=PayloadKind.TENSOR,
-                payload_frame_count=0,
+                    src_width=640,
+                    src_height=360,
+                    tile_width=32,
+                    tile_height=32,
+                    tile_ids=(2, 4, 6),
+                    sections=(
+                        TensorSectionData(
+                            role_id=9,
+                            default_codec_id=0,
+                            dtype_id=TensorDType.UINT8,
+                            tile_payloads=(b"abc", b"de", b"f"),
+                        ),
+                    ),
+                    camera_block=b"cam-current",
+                    input_profile=InputProfile.DENSE_LUMA_FRAME,
+                    tile_index_mode=TileIndexMode.RAW_U16,
+                    references=SubmitObjectReferences(
+                        camera=build_camera_reference_block(
+                            cache_namespace=1,
+                            cache_key_hi=2,
+                            cache_key_lo=3,
+                        ),
+                        tile_index=build_tile_index_reference_block(
+                            cache_namespace=4,
+                            cache_key_hi=5,
+                            cache_key_lo=6,
+                        ),
+                    ),
+                )
             )
         )
         result = await session.receive_result(timeout=5.0)
@@ -1386,11 +1396,23 @@ async def _run_connect_client_session_non_tensor_current_tcp() -> None:
         timeout=5.0,
     ) as session:
         submit_stream_id = await session.send_submit(
-            SubmitRequest(
-                frame_id=815,
-                operation_id=815,
-                payload_kind_bitmap=(PayloadKind.STRUCTURED_EVENT | PayloadKind.TOOL_DELTA),
-                payload_frame_count=0,
+            SubmitRequest.typed_payload(
+                TypedPayloadSubmitInput(
+                    identity=SubmitIdentity(operation_id=815, frame_id=815),
+                    policy=SubmitPolicy(),
+                    frames=(
+                        TypedPayloadInputFrame(
+                            profile_id=0,
+                            payload_kind=PayloadKind.STRUCTURED_EVENT,
+                            payload=b'{"event":"ready"}',
+                        ),
+                        TypedPayloadInputFrame(
+                            profile_id=0,
+                            payload_kind=PayloadKind.TOOL_DELTA,
+                            payload=b'{"tool":"render"}',
+                        ),
+                    ),
+                )
             )
         )
         result = await session.receive_result(timeout=5.0)
@@ -1406,7 +1428,7 @@ async def _run_connect_client_session_non_tensor_current_tcp() -> None:
         )
         assert result.has_payload_kind(PayloadKind.STRUCTURED_EVENT) is True
         assert result.has_payload_kind(PayloadKind.TENSOR) is False
-        assert result.payload_frame_count == 0
+        assert result.payload_frame_count == 2
         assert result.has_tensor_coverage is False
         assert result.tensor_covered_tile_count is None
         assert result.tensor_dropped_tile_count is None
@@ -1416,7 +1438,7 @@ async def _run_connect_client_session_non_tensor_current_tcp() -> None:
     requested_session_id, submit_metadata = await server_task
     assert requested_session_id == 68
     assert submit_metadata.payload_kind_bitmap == (PayloadKind.STRUCTURED_EVENT | PayloadKind.TOOL_DELTA)
-    assert submit_metadata.payload_frame_count == 0
+    assert submit_metadata.payload_frame_count == 2
 
 
 async def _run_tcp_current_tensor_server_once(
@@ -1502,19 +1524,19 @@ async def _run_tcp_current_non_tensor_server_once(
 
         submit_packet = await connection.receive_submit_packet(timeout=5.0)
         submit_metadata = FrameSubmitMetadata.unpack(submit_packet.metadata)
-        result_packet = build_result_push_packet(
+        result_packet = build_result_push_typed_payload_packet(
             session_id=session_id,
             frame_id=submit_packet.header.frame_id,
-            tile_ids=(),
-            sections=(),
+            frames=(
+                build_structured_event_frame(b'{"event":"accepted"}'),
+                build_tool_delta_frame(b'{"tool":"rendered"}'),
+            ),
             result_flags=ResultFlags.NONE,
             active_profile_id=0,
             inference_ms=1,
             queue_ms=0,
             server_total_ms=1,
             result_class=ResultClass.COMPLETE,
-            payload_kind_bitmap=PayloadKind.STRUCTURED_EVENT | PayloadKind.TOOL_DELTA,
-            payload_frame_count=0,
         )
         await connection.send_result_packet(result_packet)
         return hello_metadata.requested_session_id, submit_metadata
@@ -1956,30 +1978,31 @@ async def _run_tcp_current_invalid_coverage_server_once(
 
 
 def _build_submit_request(frame_id: int) -> SubmitRequest:
-    return SubmitRequest(
-        frame_id=frame_id,
-        operation_id=frame_id,
-        src_width=640,
-        src_height=360,
-        tile_width=32,
-        tile_height=32,
-        tile_ids=(2, 4, 6),
-        sections=(
-            TensorSectionData(
-                role_id=9,
-                default_codec_id=0,
-                dtype_id=TensorDType.UINT8,
-                tile_payloads=(b"abc", b"de", b"f"),
+    return SubmitRequest.tensor(
+        TensorSubmitInput(
+            identity=SubmitIdentity(operation_id=frame_id, frame_id=frame_id),
+            policy=SubmitPolicy(
+                latency_budget_ms=40,
+                target_fps_x100=6000,
+                budget_policy=BudgetPolicy.ALLOW_PARTIAL,
             ),
-        ),
-        camera_block=b"cam-current",
-        input_profile=InputProfile.DENSE_LUMA_FRAME,
-        tile_index_mode=TileIndexMode.RAW_U16,
-        latency_budget_ms=40,
-        target_fps_x100=6000,
-        submit_mode=SubmitMode.INLINE,
-        budget_policy=BudgetPolicy.ALLOW_PARTIAL,
-        payload_kind_bitmap=PayloadKind.TENSOR,
+            src_width=640,
+            src_height=360,
+            tile_width=32,
+            tile_height=32,
+            tile_ids=(2, 4, 6),
+            sections=(
+                TensorSectionData(
+                    role_id=9,
+                    default_codec_id=0,
+                    dtype_id=TensorDType.UINT8,
+                    tile_payloads=(b"abc", b"de", b"f"),
+                ),
+            ),
+            camera_block=b"cam-current",
+            input_profile=InputProfile.DENSE_LUMA_FRAME,
+            tile_index_mode=TileIndexMode.RAW_U16,
+        )
     )
 
 

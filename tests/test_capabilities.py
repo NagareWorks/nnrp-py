@@ -2,9 +2,11 @@ from nnrp import (
     PREVIEW4_CAPABILITY_TOKENS,
     PREVIEW4_CONTROL_CAPABILITY_TOKENS,
     PREVIEW4_OBJECT_CAPABILITY_TOKENS,
+    PREVIEW4_PAYLOAD_CAPABILITY_TOKENS,
     PREVIEW4_TRANSPORT_NAMES,
     Preview4ControlCapability,
     Preview4ObjectCapability,
+    Preview4PayloadCapability,
     Preview4TransportName,
 )
 from nnrp.tools.wire_conformance import build_wire_target_manifest, parse_wire_target_transport
@@ -31,6 +33,7 @@ def test_preview4_control_capability_tokens_match_frozen_catalog() -> None:
 
 
 def test_preview4_object_capability_and_transport_tokens_match_frozen_catalog() -> None:
+    assert PREVIEW4_PAYLOAD_CAPABILITY_TOKENS == ("payload.typed",)
     assert PREVIEW4_OBJECT_CAPABILITY_TOKENS == (
         "object.lifecycle",
         "object.delta",
@@ -39,7 +42,12 @@ def test_preview4_object_capability_and_transport_tokens_match_frozen_catalog() 
         "cache.reference",
     )
     assert PREVIEW4_TRANSPORT_NAMES == ("tcp", "quic", "ipc", "websocket")
-    assert PREVIEW4_CAPABILITY_TOKENS == PREVIEW4_CONTROL_CAPABILITY_TOKENS + PREVIEW4_OBJECT_CAPABILITY_TOKENS
+    assert PREVIEW4_CAPABILITY_TOKENS == (
+        PREVIEW4_PAYLOAD_CAPABILITY_TOKENS
+        + PREVIEW4_CONTROL_CAPABILITY_TOKENS
+        + PREVIEW4_OBJECT_CAPABILITY_TOKENS
+    )
+    assert Preview4PayloadCapability.TYPED == "payload.typed"
     assert Preview4ObjectCapability.CACHE_REFERENCE == "cache.reference"
     assert Preview4TransportName.WEBSOCKET == "websocket"
 

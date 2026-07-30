@@ -16,6 +16,11 @@ from nnrp.client import (
     NativeClientProviderRoute,
     NativeClientSessionOpenOptions,
     NativeClientSessionOptions,
+    SubmitIdentity,
+    SubmitPolicy,
+    SubmitRequest,
+    TokenChunk,
+    TokenSubmitInput,
     select_client_native_backend,
 )
 from nnrp.client import (
@@ -251,20 +256,17 @@ class FakeSession:
 
     def submit_operation(
         self,
+        request: SubmitRequest,
         *,
-        operation_id: int,
-        frame_id: int,
-        metadata=None,
-        body: bytes = b"",
         parent_operation_id: int | None = None,
         operation_group_id: int | None = None,
     ) -> FakeOperation:
         self.submit_operation_calls += 1
         operation = FakeOperation(
             session_id=self.requested_session_id,
-            operation_id=operation_id,
-            frame_id=frame_id,
-            body=body,
+            operation_id=request.operation_id,
+            frame_id=request.frame_id,
+            body=request.body,
         )
         operation.parent_operation_id = parent_operation_id
         operation.operation_group_id = operation_group_id
@@ -431,6 +433,20 @@ class FakeAnonymousSession:
         )
 
 
+def _submit_request(
+    operation_id: int,
+    frame_id: int,
+    body: bytes = b"payload",
+) -> SubmitRequest:
+    return SubmitRequest.token(
+        TokenSubmitInput(
+            identity=SubmitIdentity(operation_id=operation_id, frame_id=frame_id),
+            policy=SubmitPolicy(),
+            chunks=(TokenChunk(body),),
+        )
+    )
+
+
 def test_connect_native_client_session_opens_and_closes_host_session() -> None:
     backend = FakeBackend()
     options = NativeClientSessionOptions(
@@ -476,17 +492,19 @@ def test_connect_native_client_connection_routes_results_for_multiple_sessions()
     ) as connection:
         first = connection.open_session(NativeClientSessionOpenOptions(requested_session_id=10))
         second = connection.open_session(NativeClientSessionOpenOptions(requested_session_id=11))
-        first_operation = first.submit_operation(operation_id=100, frame_id=1, body=b"first")
-        second_operation = second.submit_operation(operation_id=101, frame_id=2, body=b"second")
+        first_request = _submit_request(100, 1, b"first")
+        second_request = _submit_request(101, 2, b"second")
+        first_operation = first.submit_operation(first_request)
+        second_operation = second.submit_operation(second_request)
 
         first_result = connection.poll_result(first, first_operation, max_events=4)
         second_result = connection.poll_result(second, second_operation, max_events=4)
 
         assert first_result.session_id == 10
-        assert first_result.body == b"first"
+        assert first_result.body == first_request.body
         assert first_result.max_events == 4
         assert second_result.session_id == 11
-        assert second_result.body == b"second"
+        assert second_result.body == second_request.body
 
     assert backend.connections[0].connection_id == 7
     assert backend.connections[0].closed is True
@@ -562,7 +580,7 @@ def test_native_client_connection_supports_operation_cancellation() -> None:
     backend = FakeBackend()
     with connect_native_client_connection(backend=backend) as connection:
         session = connection.open_session()
-        operation = session.submit_operation(operation_id=100, frame_id=7, body=b"payload")
+        operation = session.submit_operation(_submit_request(100, 7))
 
         connection.cancel_operation(operation)
         connection.cancel_frame(session, frame_id=7)
@@ -575,7 +593,7 @@ def test_native_client_connection_suppresses_cancelled_operation_results() -> No
     backend = FakeBackend()
     with connect_native_client_connection(backend=backend) as connection:
         session = connection.open_session()
-        operation = session.submit_operation(operation_id=100, frame_id=7, body=b"payload")
+        operation = session.submit_operation(_submit_request(100, 7))
 
         connection.cancel_operation(operation)
 
@@ -590,7 +608,7 @@ def test_native_client_connection_suppresses_runtime_cancelled_operation_results
     backend = FakeBackend()
     with connect_native_client_connection(backend=backend) as connection:
         session = connection.open_session()
-        operation = session.submit_operation(operation_id=201, frame_id=9, body=b"payload")
+        operation = session.submit_operation(_submit_request(201, 9))
 
         connection.cancel_runtime_operation(session, operation_id=201, control_sequence=1)
 
@@ -605,7 +623,7 @@ def test_native_client_connection_suppresses_cancelled_frame_results() -> None:
     backend = FakeBackend()
     with connect_native_client_connection(backend=backend) as connection:
         session = connection.open_session()
-        operation = session.submit_operation(operation_id=100, frame_id=7, body=b"payload")
+        operation = session.submit_operation(_submit_request(100, 7))
 
         connection.cancel_frame(session, frame_id=7)
 
@@ -665,7 +683,7 @@ def test_native_client_connection_suppresses_late_result_after_poll() -> None:
     backend = FakeBackend()
     with connect_native_client_connection(backend=backend) as connection:
         session = connection.open_session()
-        operation = session.submit_operation(operation_id=100, frame_id=7, body=b"payload")
+        operation = session.submit_operation(_submit_request(100, 7))
 
         def poll_late_result(
             _operation: FakeOperation,
@@ -731,7 +749,7 @@ def test_native_client_connection_operation_scope_cancels_on_error() -> None:
     backend = FakeBackend()
     with connect_native_client_connection(backend=backend) as connection:
         session = connection.open_session()
-        operation = session.submit_operation(operation_id=100, frame_id=7, body=b"payload")
+        operation = session.submit_operation(_submit_request(100, 7))
         scope = connection.operation_scope(operation)
 
         assert isinstance(scope, NativeClientOperationScope)
@@ -749,11 +767,10 @@ def test_native_client_connection_submits_and_polls_result() -> None:
     with connect_native_client_connection(backend=backend) as connection:
         session = connection.open_session()
 
+        request = _submit_request(100, 7)
         result = connection.submit_and_poll_result(
             session,
-            operation_id=100,
-            frame_id=7,
-            body=b"payload",
+            request,
             parent_operation_id=99,
             operation_group_id=1234,
             max_events=4,
@@ -762,7 +779,7 @@ def test_native_client_connection_submits_and_polls_result() -> None:
         assert result.session_id == 1
         assert result.operation_id == 100
         assert result.frame_id == 7
-        assert result.body == b"payload"
+        assert result.body == request.body
         assert result.max_events == 4
         assert session.operations[0].parent_operation_id == 99
         assert session.operations[0].operation_group_id == 1234
@@ -967,12 +984,10 @@ def test_native_client_connection_keeps_hot_paths_on_coarse_runtime_calls() -> N
 
         client_connection.submit_and_poll_result(
             session,
-            operation_id=200,
-            frame_id=1,
-            body=b"submit",
+            _submit_request(200, 1, b"submit"),
             timeout_ms=25,
         )
-        operation = session.submit_operation(operation_id=201, frame_id=2, body=b"submit")
+        operation = session.submit_operation(_submit_request(201, 2, b"submit"))
         client_connection.poll_result(session, operation)
         client_connection.cancel_runtime_operation(session, operation_id=201, control_sequence=1)
 

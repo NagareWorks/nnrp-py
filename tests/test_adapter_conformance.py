@@ -3,6 +3,7 @@ from pathlib import Path
 
 import pytest
 
+from nnrp.client import SubmitIdentity, SubmitPolicy, SubmitRequest, TokenChunk, TokenSubmitInput
 from nnrp.native import FFI_STATUS_INVALID_ARGUMENT, NativeInvalidArgumentError, NativeStatus
 from nnrp.tools import adapter_conformance
 from nnrp.tools.adapter_conformance import build_adapter_case_results_report, main, write_adapter_case_results
@@ -44,6 +45,16 @@ def _write_plan(tmp_path: Path) -> Path:
         encoding="utf-8",
     )
     return plan_path
+
+
+def _submit_request(operation_id: int, frame_id: int, body: bytes) -> SubmitRequest:
+    return SubmitRequest.token(
+        TokenSubmitInput(
+            identity=SubmitIdentity(operation_id=operation_id, frame_id=frame_id),
+            policy=SubmitPolicy(),
+            chunks=(TokenChunk(body),),
+        )
+    )
 
 
 def test_build_adapter_case_results_report_executes_supported_cases() -> None:
@@ -88,6 +99,35 @@ def test_build_adapter_case_results_report_executes_preview4_common_header_golde
     assert evidence["view_id"] == 0x99AA
     assert evidence["route_id"] == 0xBBCC
     assert evidence["trace_id"] == 0x0102030405060708
+
+
+def test_build_adapter_case_results_report_executes_current_typed_payload_golden(tmp_path: Path) -> None:
+    evidence_dir = tmp_path / "evidence"
+    report = build_adapter_case_results_report(
+        {
+            "protocol_version": "nnrp-1-preview4",
+            "artifacts": {"evidence_dir": str(evidence_dir)},
+            "cases": [{"id": "l0.typed_payload.descriptor.current.golden"}],
+        }
+    )
+
+    assert report["results"][0]["outcome"] == "pass"
+    evidence = json.loads(
+        (evidence_dir / "l0-typed_payload-descriptor-current-golden.json").read_text(encoding="utf-8")
+    )
+    assert evidence == {
+        "action": "typed-payload-descriptor-golden",
+        "case_id": "l0.typed_payload.descriptor.current.golden",
+        "descriptor_flags": 2,
+        "descriptor_hex": "020002020110000003000000020000000800000018000000",
+        "length": 24,
+        "offset": 8,
+        "payload_kind": 2,
+        "profile_id": 2,
+        "schema_id": 0x1001,
+        "schema_version": 3,
+        "stream_semantics": 2,
+    }
 
 
 def test_preview4_common_header_case_rejects_wire_reencoding_drift(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -344,15 +384,15 @@ def test_adapter_result_terminal_uses_submit_then_role_event_poll() -> None:
 
         def submit_operation(
             self,
-            *,
-            operation_id: int,
-            frame_id: int,
-            metadata=None,
-            body: bytes,
+            request: SubmitRequest,
         ) -> adapter_conformance._AdapterSmokeOperation:
-            del metadata
-            self.submitted.append((operation_id, frame_id, bytes(body)))
-            return adapter_conformance._AdapterSmokeOperation(operation_id, frame_id, bytes(body))
+            body = b"".join(adapter_conformance._typed_payload_bytes(request.metadata, request.body))
+            self.submitted.append((request.operation_id, request.frame_id, body))
+            return adapter_conformance._AdapterSmokeOperation(
+                request.operation_id,
+                request.frame_id,
+                body,
+            )
 
         def poll_result(
             self,
@@ -489,10 +529,9 @@ def test_adapter_smoke_backend_bootstrap_and_closed_session_guards() -> None:
         schema_id=5,
         schema_version=6,
     )
+    request = _submit_request(9, 10, b"payload")
     operation = session.submit_operation(
-        operation_id=9,
-        frame_id=10,
-        body=memoryview(b"payload"),
+        request,
         parent_operation_id=1,
         operation_group_id=2,
     )

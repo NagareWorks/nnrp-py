@@ -13,6 +13,7 @@ from uuid import uuid4
 
 import pytest
 
+from nnrp.client import SubmitIdentity, SubmitPolicy, SubmitRequest, TokenChunk, TokenSubmitInput
 from nnrp.client.native import (
     NativeClientProviderRoute,
     NativeClientSessionOpenOptions,
@@ -29,7 +30,6 @@ from nnrp.core import (
     build_pong_packet,
 )
 from nnrp.native import (
-    EVENT_KIND_SESSION_CLOSED,
     NativeArtifactError,
     NativeInvalidHandleError,
     NativeTransportClientSecurity,
@@ -38,7 +38,7 @@ from nnrp.native import (
     _shutdown_registered_native_runtimes,
     load_native_transport_binding,
 )
-from nnrp.runtime import PartialResultMetadata, ProgressMetadata
+from nnrp.runtime import NativeRuntimeEvent, PartialResultMetadata, ProgressMetadata
 from nnrp.schema import StandardProfile
 from nnrp.server import (
     NativeServerAcceptOptions,
@@ -154,7 +154,11 @@ def _open_native_role_loopback() -> Any:
                         client_close = executor.submit(client_session.close)
                         try:
                             close_events = server_session.poll_events(max_events=8, timeout_ms=5_000)
-                            assert any(event.kind == EVENT_KIND_SESSION_CLOSED for event in close_events)
+                            assert any(
+                                isinstance(event, NativeRuntimeEvent)
+                                and event.header.message_type is MessageType.SESSION_CLOSE
+                                for event in close_events
+                            )
                         finally:
                             server_session.close()
                             client_close.result(timeout=10)
@@ -237,7 +241,15 @@ async def test_foreign_artifact_cannot_take_carrier_or_listener_ownership() -> N
 def test_packaged_native_role_batch_decodes_multiple_events_with_ffi_stride() -> None:
     with _open_native_role_loopback() as (_client, client_session, server_session):
         _drain_native_setup_events(client_session)
-        submitted = client_session.submit_operation(operation_id=101, frame_id=201, body=b"request")
+        submitted = client_session.submit_operation(
+            SubmitRequest.token(
+                TokenSubmitInput(
+                    identity=SubmitIdentity(operation_id=101, frame_id=201),
+                    policy=SubmitPolicy(),
+                    chunks=(TokenChunk(b"request"),),
+                )
+            )
+        )
         received = server_session.receive_submit(timeout_ms=5_000)
 
         server_session.send_progress(
@@ -251,13 +263,13 @@ def test_packaged_native_role_batch_decodes_multiple_events_with_ffi_stride() ->
         received.send_result(_native_token_result_metadata(), b"result")
 
         events = client_session.poll_events_batch(max_events=2, timeout_ms=5_000)
-        assert [event.message_type for event in events] == [
-            int(MessageType.PROGRESS),
-            int(MessageType.PARTIAL_RESULT),
+        assert all(isinstance(event, NativeRuntimeEvent) for event in events)
+        frames = [event for event in events if isinstance(event, NativeRuntimeEvent)]
+        assert [event.header.message_type for event in frames] == [
+            MessageType.PROGRESS,
+            MessageType.PARTIAL_RESULT,
         ]
-        frames = [event.to_runtime_frame() for event in events]
-        assert all(frame is not None for frame in frames)
-        assert [frame.body for frame in frames if frame is not None] == [b"progress", b"partial"]
+        assert [event.tail.body for event in frames] == [b"progress", b"partial"]
 
         result = client_session.poll_result(submitted, max_events=2, timeout_ms=5_000)
         assert result.body == b"result"

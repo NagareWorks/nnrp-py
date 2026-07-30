@@ -24,6 +24,8 @@
 - [x] Expose one wire-ordered application event at a time through `NativeRuntimeServerSession.poll_event()`.
   - [x] Keep `poll_events()` as the coarse bounded native batch surface.
   - [x] Return `None` when the bounded wait completes without an event.
+  - [x] Return wire events as one `NativeRuntimeEvent` envelope with `header`, typed `metadata`, and typed `tail`.
+  - [x] Return local runtime lifecycle notifications as `NativeLifecycleEvent`, never as incomplete wire events.
 - [x] Add server API for progress events.
   - [x] Progress stage.
   - [x] Optional percent.
@@ -54,7 +56,8 @@
 
 - [x] Bind preview4 control-frame native calls.
   - [x] Send each named control through one `nnrp_runtime_frame_send` ABI call.
-  - [x] Decode `message_type` and native-owned payloads into named Python events.
+  - [x] Decode the complete native wire header, typed metadata union, and typed tail union into `NativeRuntimeEvent`.
+  - [x] Use `header.present` to separate wire events from `NativeLifecycleEvent`; do not duplicate wire identity fields outside the header.
   - [x] Release native payload owners after copying event bytes.
 - [x] Bind batch event polling for progress, partial result, and drop reason events.
 - [x] Keep submit/control/result loops on coarse native calls.

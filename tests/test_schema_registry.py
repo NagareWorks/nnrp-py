@@ -6,12 +6,12 @@ from nnrp import (
     TOKEN_DELTA_SCHEMA_HASH,
     TOKEN_DELTA_SCHEMA_ID,
     TOKEN_DELTA_SCHEMA_VERSION,
-    TYPED_PAYLOAD_DESCRIPTOR_V3_LENGTH,
+    TYPED_PAYLOAD_DESCRIPTOR_LENGTH,
     PayloadKind,
-    Preview3TypedPayloadDescriptor,
     SchemaDescriptorHeader,
     StandardProfile,
     StreamSemantics,
+    TypedPayloadDescriptor,
     TypedPayloadDescriptorFlags,
     pack_schema_descriptor,
     pack_typed_payload_descriptor,
@@ -65,9 +65,10 @@ def test_schema_descriptor_header_rejects_unknown_flags_and_reserved_bytes() -> 
         SchemaDescriptorHeader.unpack(encoded)
 
 
-def test_typed_payload_descriptor_round_trips_frozen_preview3_layout() -> None:
-    descriptor = Preview3TypedPayloadDescriptor(
+def test_typed_payload_descriptor_round_trips_current_layout() -> None:
+    descriptor = TypedPayloadDescriptor(
         profile_id=StandardProfile.TOKEN,
+        payload_kind=PayloadKind.TOKEN_CHUNK,
         descriptor_flags=TypedPayloadDescriptorFlags.PARTIAL,
         schema_id=TOKEN_DELTA_SCHEMA_ID,
         schema_version=TOKEN_DELTA_SCHEMA_VERSION,
@@ -77,9 +78,9 @@ def test_typed_payload_descriptor_round_trips_frozen_preview3_layout() -> None:
     )
 
     encoded = descriptor.pack()
-    decoded = Preview3TypedPayloadDescriptor.unpack(encoded)
+    decoded = TypedPayloadDescriptor.unpack(encoded)
 
-    assert len(encoded) == TYPED_PAYLOAD_DESCRIPTOR_V3_LENGTH
+    assert len(encoded) == TYPED_PAYLOAD_DESCRIPTOR_LENGTH
     assert decoded == descriptor
     assert decoded.is_partial is True
     assert decoded.is_terminal is False
@@ -89,8 +90,9 @@ def test_typed_payload_descriptor_round_trips_frozen_preview3_layout() -> None:
 
 def test_typed_payload_descriptor_rejects_unknown_flags_reserved_bytes_and_short_buffers() -> None:
     with pytest.raises(ValueError, match="descriptor_flags contains unknown bits"):
-        Preview3TypedPayloadDescriptor(
+        TypedPayloadDescriptor(
             profile_id=StandardProfile.TOKEN,
+            payload_kind=PayloadKind.TOKEN_CHUNK,
             descriptor_flags=DESCRIPTOR_FLAGS_KNOWN_MASK + 1,
             schema_id=TOKEN_DELTA_SCHEMA_ID,
             schema_version=TOKEN_DELTA_SCHEMA_VERSION,
@@ -103,10 +105,10 @@ def test_typed_payload_descriptor_rejects_unknown_flags_reserved_bytes_and_short
     encoded[14:16] = b"\x01\x00"
 
     with pytest.raises(ValueError, match="reserved0"):
-        Preview3TypedPayloadDescriptor.unpack(encoded)
+        TypedPayloadDescriptor.unpack(encoded)
 
     with pytest.raises(ValueError, match="expected 24 bytes"):
-        Preview3TypedPayloadDescriptor.unpack(encoded[:-1])
+        TypedPayloadDescriptor.unpack(encoded[:-1])
 
 
 def test_schema_codec_helpers_delegate_to_selected_native_codec() -> None:
@@ -198,7 +200,7 @@ def test_structured_event_and_tool_delta_remain_payload_families_not_standard_pr
 
 
 class FakeSchemaCodec:
-    def __init__(self, *, schema: SchemaDescriptorHeader, descriptor: Preview3TypedPayloadDescriptor) -> None:
+    def __init__(self, *, schema: SchemaDescriptorHeader, descriptor: TypedPayloadDescriptor) -> None:
         self.schema = schema
         self.descriptor = descriptor
         self.calls: list[tuple[str, object]] = []
@@ -214,18 +216,18 @@ class FakeSchemaCodec:
     def parse_typed_payload_descriptor(
         self,
         payload: bytes | bytearray | memoryview,
-    ) -> Preview3TypedPayloadDescriptor:
+    ) -> TypedPayloadDescriptor:
         self.calls.append(("parse_typed", bytes(payload)))
         return self.descriptor
 
-    def write_typed_payload_descriptor(self, descriptor: Preview3TypedPayloadDescriptor) -> bytes:
+    def write_typed_payload_descriptor(self, descriptor: TypedPayloadDescriptor) -> bytes:
         self.calls.append(("write_typed", descriptor))
         return b"native-typed"
 
     def validate_typed_payload_binding(
         self,
         schemas: tuple[SchemaDescriptorHeader, ...],
-        descriptor: Preview3TypedPayloadDescriptor,
+        descriptor: TypedPayloadDescriptor,
     ) -> None:
         self.calls.append(("validate_binding", (schemas, descriptor)))
 
@@ -234,7 +236,7 @@ class NativeMismatchSchemaCodec(FakeSchemaCodec):
     def validate_typed_payload_binding(
         self,
         schemas: tuple[SchemaDescriptorHeader, ...],
-        descriptor: Preview3TypedPayloadDescriptor,
+        descriptor: TypedPayloadDescriptor,
     ) -> None:
         self.calls.append(("validate_binding", (schemas, descriptor)))
         raise NativeProtocolError(NativeStatus(FFI_STATUS_PROTOCOL_ERROR, ERROR_FAMILY_SCHEMA, 0x3001, 0x41))

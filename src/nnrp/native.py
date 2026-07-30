@@ -3067,8 +3067,22 @@ def _native_event_from_ffi(
             f"invalid native runtime event header presence marker {present}",
         )
     try:
+        message_type = MessageType(int(event.header.message_type))
+    except ValueError as error:
+        raise NativeProtocolError(
+            NativeStatus(FFI_STATUS_PROTOCOL_ERROR),
+            f"unknown Preview4 runtime message type 0x{int(event.header.message_type):02x}",
+        ) from error
+    try:
+        wire_format = WireFormat(int(event.header.wire_format))
+    except ValueError as error:
+        raise NativeProtocolError(
+            NativeStatus(FFI_STATUS_PROTOCOL_ERROR),
+            f"unknown Preview4 runtime wire format {int(event.header.wire_format)}",
+        ) from error
+    try:
         header = RuntimeFrameHeader(
-            message_type=MessageType(int(event.header.message_type)),
+            message_type=message_type,
             flags=HeaderFlags(int(event.header.flags)),
             session_id=int(event.header.session_id),
             frame_id=int(event.header.frame_id),
@@ -3076,12 +3090,12 @@ def _native_event_from_ffi(
             route_id=int(event.header.route_id),
             trace_id=int(event.header.trace_id),
             version_major=int(event.header.version_major),
-            wire_format=WireFormat(int(event.header.wire_format)),
+            wire_format=wire_format,
         )
     except ValueError as error:
         raise NativeProtocolError(
             NativeStatus(FFI_STATUS_PROTOCOL_ERROR),
-            f"unknown Preview4 runtime message type 0x{int(event.header.message_type):02x}",
+            f"invalid Preview4 runtime frame header: {error}",
         ) from error
     return _decode_wire_runtime_event(header, payload, context)
 
@@ -4028,32 +4042,39 @@ class NativeRuntimeSession:
             remaining = max_events - len(events)
             if remaining == 0:
                 return tuple(events)
-
-            event_buffer, event_count = self._borrow_poll_event_buffer(remaining)
-            status = self.entrypoints.client_await_events(
-                _NnrpRoleEventPollRequest(
-                    self.handle.to_ffi(),
-                    remaining,
-                    _ffi_role_poll_timeout_ms(timeout_ms),
-                    0,
-                    0,
-                ),
-                event_buffer,
-                remaining,
-                ctypes.byref(event_count),
-            )
-            native_status = NativeStatus.from_ffi(status)
-            if native_status.status_code == FFI_STATUS_WOULD_BLOCK:
-                return tuple(events)
-            raise_for_native_status(native_status)
-
-            for index in range(int(event_count.value)):
-                event = _native_event_from_ffi(event_buffer[index], self.entrypoints)
+            for event in self._poll_native_events_unlocked(max_events=remaining, timeout_ms=timeout_ms):
                 if event_kind is None or _native_event_kind(event) == event_kind:
                     events.append(event)
                 else:
                     self._pending_events.append(event)
             return tuple(events)
+
+    def _poll_native_events_unlocked(
+        self,
+        *,
+        max_events: int,
+        timeout_ms: int,
+    ) -> tuple[NativePolledEvent, ...]:
+        event_buffer, event_count = self._borrow_poll_event_buffer(max_events)
+        status = self.entrypoints.client_await_events(
+            _NnrpRoleEventPollRequest(
+                self.handle.to_ffi(),
+                max_events,
+                _ffi_role_poll_timeout_ms(timeout_ms),
+                0,
+                0,
+            ),
+            event_buffer,
+            max_events,
+            ctypes.byref(event_count),
+        )
+        native_status = NativeStatus.from_ffi(status)
+        if native_status.status_code == FFI_STATUS_WOULD_BLOCK:
+            return ()
+        raise_for_native_status(native_status)
+        return tuple(
+            _native_event_from_ffi(event_buffer[index], self.entrypoints) for index in range(int(event_count.value))
+        )
 
     def _take_pending_events(
         self,
@@ -4155,14 +4176,38 @@ class NativeRuntimeSession:
         max_events: int | None = None,
         timeout_ms: int = 0,
     ) -> tuple[NativeRuntimeEvent, ...]:
-        frames: list[NativeRuntimeEvent] = []
-        for event in self.poll_events(
-            max_events=max_events,
-            timeout_ms=timeout_ms,
-        ):
-            if isinstance(event, NativeRuntimeEvent):
-                frames.append(event)
-        return tuple(frames)
+        if max_events is not None:
+            _require_bounded_integer("max_events", max_events, 0xFFFFFFFF)
+            if max_events == 0:
+                return ()
+        _require_bounded_integer("timeout_ms", timeout_ms, 0xFFFFFFFF)
+        with self._poll_lock:
+            frames: list[NativeRuntimeEvent] = []
+            retained: list[NativePolledEvent] = []
+            for event in self._pending_events:
+                if isinstance(event, NativeRuntimeEvent) and (max_events is None or len(frames) < max_events):
+                    frames.append(event)
+                else:
+                    retained.append(event)
+            self._pending_events[:] = retained
+            if max_events is not None and len(frames) == max_events:
+                return tuple(frames)
+
+            batch_size = 64 if max_events is None else max(64, max_events - len(frames))
+            next_timeout_ms = timeout_ms
+            while True:
+                events = self._poll_native_events_unlocked(max_events=batch_size, timeout_ms=next_timeout_ms)
+                next_timeout_ms = 0
+                if not events:
+                    break
+                for event in events:
+                    if isinstance(event, NativeRuntimeEvent) and (max_events is None or len(frames) < max_events):
+                        frames.append(event)
+                    else:
+                        self._pending_events.append(event)
+                if max_events is not None:
+                    break
+            return tuple(frames)
 
     def dispatch_events(
         self,
@@ -4787,6 +4832,8 @@ class NativeRuntimeServerSession:
     handle: NativeSessionHandle
     active_transport_name: str
     _closed: bool = field(default=False, init=False, repr=False, compare=False)
+    _pending_events: list[NativePolledEvent] = field(default_factory=list, init=False, repr=False, compare=False)
+    _poll_lock: threading.Lock = field(default_factory=threading.Lock, init=False, repr=False, compare=False)
     _next_runtime_frame_id: int = field(default=1, init=False, repr=False, compare=False)
 
     def receive_submit(
@@ -4829,6 +4876,20 @@ class NativeRuntimeServerSession:
         _require_bounded_integer("timeout_ms", timeout_ms, 0xFFFFFFFF)
         if max_events == 0:
             return ()
+        with self._poll_lock:
+            events = self._pending_events[:max_events]
+            del self._pending_events[: len(events)]
+            remaining = max_events - len(events)
+            if remaining:
+                events.extend(self._poll_native_events_unlocked(max_events=remaining, timeout_ms=timeout_ms))
+            return tuple(events)
+
+    def _poll_native_events_unlocked(
+        self,
+        *,
+        max_events: int,
+        timeout_ms: int,
+    ) -> tuple[NativePolledEvent, ...]:
         event_buffer = (_NnrpEvent * max_events)()
         event_count = ctypes.c_size_t()
         status = self.entrypoints.server_await_events(
@@ -4861,11 +4922,32 @@ class NativeRuntimeServerSession:
         max_events: int = 1,
         timeout_ms: int = 0,
     ) -> tuple[NativeRuntimeEvent, ...]:
-        return tuple(
-            event
-            for event in self.poll_events(max_events=max_events, timeout_ms=timeout_ms)
-            if isinstance(event, NativeRuntimeEvent)
-        )
+        _require_bounded_integer("max_events", max_events, 0xFFFFFFFF)
+        _require_bounded_integer("timeout_ms", timeout_ms, 0xFFFFFFFF)
+        if max_events == 0:
+            return ()
+        with self._poll_lock:
+            frames: list[NativeRuntimeEvent] = []
+            retained: list[NativePolledEvent] = []
+            for event in self._pending_events:
+                if isinstance(event, NativeRuntimeEvent) and len(frames) < max_events:
+                    frames.append(event)
+                else:
+                    retained.append(event)
+            self._pending_events[:] = retained
+            if len(frames) == max_events:
+                return tuple(frames)
+
+            events = self._poll_native_events_unlocked(
+                max_events=max(64, max_events - len(frames)),
+                timeout_ms=timeout_ms,
+            )
+            for event in events:
+                if isinstance(event, NativeRuntimeEvent) and len(frames) < max_events:
+                    frames.append(event)
+                else:
+                    self._pending_events.append(event)
+            return tuple(frames)
 
     def send_progress(
         self,

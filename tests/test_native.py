@@ -21,7 +21,7 @@ from nnrp.client import (
     TokenChunk,
     TokenSubmitInput,
 )
-from nnrp.core import HeaderFlags, MessageType
+from nnrp.core import HeaderFlags, MessageType, WireFormat
 from nnrp.core.messages.control import (
     CacheInvalidateMetadata,
     CacheInvalidateScope,
@@ -1186,6 +1186,7 @@ def _decode_test_wire_event(
     *,
     kind: int = EVENT_KIND_RUNTIME_FRAME,
     frame_id: int = 9,
+    wire_format: int = int(WireFormat.CURRENT),
 ) -> NativeRuntimeEvent:
     library = FakeRuntimeLibrary()
     entrypoints = NativeRuntimeEntrypoints(library)
@@ -1193,6 +1194,7 @@ def _decode_test_wire_event(
     event = _NnrpEvent()
     event.kind = kind
     _write_event_header(event, message_type=int(message_type), frame_id=frame_id)
+    event.header.wire_format = wire_format
     event.connection = _NnrpHandle(HANDLE_KIND_CONNECTION, 12, 2, 0)
     event.session = _NnrpHandle(HANDLE_KIND_SESSION, 41, 3, 0)
     event.operation = _NnrpHandle(HANDLE_KIND_OPERATION, 42, 1, 0)
@@ -4101,6 +4103,11 @@ def test_native_runtime_event_rejects_unknown_runtime_message_type() -> None:
         _decode_test_wire_event(0xFFFF, b"")
 
 
+def test_native_runtime_event_reports_unknown_wire_format_separately() -> None:
+    with pytest.raises(NativeProtocolError, match="unknown Preview4 runtime wire format 255"):
+        _decode_test_wire_event(MessageType.PROGRESS, b"", wire_format=255)
+
+
 def test_native_runtime_session_polls_and_iterates_named_runtime_frames(tmp_path: Path) -> None:
     artifact = tmp_path / "nnrp_ffi.dll"
     artifact.write_bytes(b"fake")
@@ -4129,6 +4136,120 @@ def test_native_runtime_session_polls_and_iterates_named_runtime_frames(tmp_path
 
     assert [(frame.header.message_type, frame.tail.body) for frame in frames] == [(MessageType.PROGRESS, b"step")]
     assert [(frame.header.message_type, frame.tail.body) for frame in async_frames] == [(MessageType.PROGRESS, b"step")]
+
+
+def test_native_runtime_session_frame_poll_preserves_lifecycle_events(tmp_path: Path) -> None:
+    artifact = tmp_path / "nnrp_ffi.dll"
+    artifact.write_bytes(b"fake")
+    session = _open_event_session(
+        load_native_client(artifact, library=FakeRuntimeLibrary()).connect(
+            connection_id=12,
+            generation=2,
+            transport_id=TRANSPORT_SLOT_TCP,
+        )
+    )
+    lifecycle = NativeLifecycleEvent(
+        EVENT_KIND_CONTROL,
+        NativeHandle.invalid(),
+        NativeHandle.invalid(),
+        NativeHandle.invalid(),
+        b"lifecycle",
+        _NATIVE_RUNTIME_DIAGNOSTIC_OK,
+    )
+    runtime = _decode_test_wire_event(
+        MessageType.PROGRESS,
+        encode_runtime_control_metadata(
+            MessageType.PROGRESS,
+            ProgressMetadata(42, 7, 3, 2500, 11, 0),
+        ),
+    )
+    session._pending_events.extend((lifecycle, runtime))
+
+    assert session.poll_runtime_frames(max_events=1) == (runtime,)
+    assert session.poll_event() is lifecycle
+
+
+def test_native_runtime_session_frame_poll_handles_zero_limit_and_would_block(tmp_path: Path) -> None:
+    artifact = tmp_path / "nnrp_ffi.dll"
+    artifact.write_bytes(b"fake")
+    library = FakeRuntimeLibrary()
+    session = _open_event_session(
+        load_native_client(artifact, library=library).connect(
+            connection_id=12,
+            generation=2,
+            transport_id=TRANSPORT_SLOT_TCP,
+        )
+    )
+
+    assert session.poll_runtime_frames(max_events=0) == ()
+    library.status = NativeStatus(FFI_STATUS_WOULD_BLOCK).to_ffi()
+    assert session.poll_runtime_frames(max_events=1) == ()
+
+
+def test_native_runtime_server_frame_poll_preserves_lifecycle_events() -> None:
+    library = FakeRuntimeLibrary()
+    server = NativeRuntimeServer(
+        NativeRuntimeEntrypoints(library),
+        NativeConnectionHandle.from_ffi(_NnrpHandle(HANDLE_KIND_CONNECTION, 21, 1, 0)),
+        "tcp",
+    )
+    session = server.accept_session(session_handle_id=41, generation=3)
+    lifecycle = NativeLifecycleEvent(
+        EVENT_KIND_CONTROL,
+        NativeHandle.invalid(),
+        NativeHandle.invalid(),
+        NativeHandle.invalid(),
+        b"lifecycle",
+        _NATIVE_RUNTIME_DIAGNOSTIC_OK,
+    )
+    runtime = _decode_test_wire_event(
+        MessageType.PROGRESS,
+        encode_runtime_control_metadata(
+            MessageType.PROGRESS,
+            ProgressMetadata(42, 7, 3, 2500, 11, 0),
+        ),
+    )
+    session._pending_events.extend((lifecycle, runtime))
+
+    assert session.poll_runtime_frames(max_events=1) == (runtime,)
+    assert session.poll_event() is lifecycle
+
+
+def test_native_runtime_server_frame_poll_preserves_native_lifecycle_event() -> None:
+    library = FakeRuntimeLibrary(event_payload=b"lifecycle", event_kind=EVENT_KIND_CONTROL)
+    server = NativeRuntimeServer(
+        NativeRuntimeEntrypoints(library),
+        NativeConnectionHandle.from_ffi(_NnrpHandle(HANDLE_KIND_CONNECTION, 21, 1, 0)),
+        "tcp",
+    )
+    session = server.accept_session(session_handle_id=41, generation=3)
+
+    assert session.poll_runtime_frames(max_events=0) == ()
+    assert session.poll_runtime_frames(max_events=1) == ()
+    lifecycle = session.poll_event()
+    assert isinstance(lifecycle, NativeLifecycleEvent)
+    assert lifecycle.payload == b"lifecycle"
+
+
+def test_native_runtime_server_frame_poll_reads_native_runtime_event() -> None:
+    metadata = ProgressMetadata(42, 7, 3, 2500, 11, 0)
+    library = FakeRuntimeLibrary(
+        event_payload=encode_runtime_control_metadata(MessageType.PROGRESS, metadata),
+        event_kind=EVENT_KIND_RUNTIME_FRAME,
+        event_message_type=int(MessageType.PROGRESS),
+    )
+    server = NativeRuntimeServer(
+        NativeRuntimeEntrypoints(library),
+        NativeConnectionHandle.from_ffi(_NnrpHandle(HANDLE_KIND_CONNECTION, 21, 1, 0)),
+        "tcp",
+    )
+    session = server.accept_session(session_handle_id=41, generation=3)
+
+    frames = session.poll_runtime_frames(max_events=1)
+
+    assert len(frames) == 1
+    assert frames[0].header.message_type is MessageType.PROGRESS
+    assert frames[0].metadata.value == metadata
 
 
 def test_local_lifecycle_event_has_no_fabricated_runtime_header() -> None:

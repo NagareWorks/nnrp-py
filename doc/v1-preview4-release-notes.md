@@ -8,7 +8,9 @@ benchmark documents and are not used as preview4 release criteria.
 
 ## 1.0.0rc4.post12
 
-- Pins Rust `1.0.0-preview.4.20` at commit `d55c972` and requires the exact FFI ABI `4.3.0`.
+- Pins Rust `1.0.0-preview.4.21` at commit `bcebd1b` and requires the exact FFI ABI `4.3.0`.
+- Matches terminal results by the protocol `operation_id` carried in the native diagnostic rather than substituting
+  an opaque operation-handle id or frame id.
 - Replaces role-specific public event unions with the frozen role-neutral runtime-event envelope while preserving the
   complete common header, closed typed metadata, and owned body, diagnostic, and delta tails.
 - Requires typed submit requests at the public native boundary and keeps local lifecycle notifications separate from
@@ -68,7 +70,7 @@ benchmark documents and are not used as preview4 release criteria.
 ## Transport Providers
 
 - Rust preview4 artifacts are transport scoped and expose TCP, QUIC, IPC, and WebSocket capability slots.
-- Python `1.0.0rc4.post12` consumes Rust `1.0.0-preview.4.20` and exposes the frozen provider cost, preference,
+- Python `1.0.0rc4.post12` consumes Rust `1.0.0-preview.4.21` and exposes the frozen provider cost, preference,
   frame-limit, limitation, probe-metrics, and ordered candidate models without a Python-specific weighted score.
 - Multi-provider selection follows the cross-SDK deterministic comparator and reports every eligible or rejected
   candidate; probe samples bind to the stable provider id carried by the owning artifact.
@@ -91,7 +93,7 @@ benchmark documents and are not used as preview4 release criteria.
 
 ## Release Gates
 
-- Python `1.0.0rc4.post12` pins Rust `1.0.0-preview.4.20` and requires the exact ABI `4.3.0`.
+- Python `1.0.0rc4.post12` pins Rust `1.0.0-preview.4.21` and requires the exact ABI `4.3.0`.
 - The release candidate must pass the complete Python suite with at least 90% total and incremental line coverage, all
   selected adapter-conformance cases, all independent-process frame scenarios, and all native host-route scenarios
   without skips or synthesized success paths.

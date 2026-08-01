@@ -571,7 +571,12 @@ def _run_native_role_submit_result_loop(scenario_id: str, workload: dict[str, An
                     raise RuntimeError("native role loopback received the wrong frame")
                 received.send_result(_native_token_result_metadata(), payload)
                 result = session.poll_result(submitted, max_events=4, timeout_ms=5_000)
-                if result.frame_id != counter or result.body != payload:
+                runtime_event = result.event.as_runtime()
+                if (
+                    runtime_event is None
+                    or runtime_event.header.frame_id != counter
+                    or runtime_event.tail.body != payload
+                ):
                     raise RuntimeError("native role loopback returned the wrong result")
 
             try:
@@ -665,7 +670,8 @@ def _run_native_progress_partial_polling_loop(scenario_id: str, workload: dict[s
                     raise RuntimeError("native role loopback did not deliver progress and partial-result events")
                 received.send_result(_native_token_result_metadata(), payload)
                 result = session.poll_result(submitted, max_events=max_events, timeout_ms=5_000)
-                if result.body != payload:
+                runtime_event = result.event.as_runtime()
+                if runtime_event is None or runtime_event.tail.body != payload:
                     raise RuntimeError("native role loopback returned the wrong terminal result")
 
             try:
@@ -1022,7 +1028,12 @@ def _run_transport_loopback(scenario_id: str, workload: dict[str, Any]) -> dict[
                     raise RuntimeError("native transport loopback received the wrong frame")
                 received.send_result(_native_token_result_metadata(), payload)
                 result = session.poll_result(submitted, max_events=4, timeout_ms=5_000)
-                if result.frame_id != counter or result.body != payload:
+                runtime_event = result.event.as_runtime()
+                if (
+                    runtime_event is None
+                    or runtime_event.header.frame_id != counter
+                    or runtime_event.tail.body != payload
+                ):
                     raise RuntimeError("native transport loopback returned the wrong result")
 
             try:

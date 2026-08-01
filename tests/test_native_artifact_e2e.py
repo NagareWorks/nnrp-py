@@ -272,7 +272,9 @@ def test_packaged_native_role_batch_decodes_multiple_events_with_ffi_stride() ->
         assert [event.tail.body for event in frames] == [b"progress", b"partial"]
 
         result = client_session.poll_result(submitted, max_events=2, timeout_ms=5_000)
-        assert result.body == b"result"
+        runtime_event = result.event.as_runtime()
+        assert runtime_event is not None
+        assert runtime_event.tail.body == b"result"
 
 
 @pytest.mark.asyncio

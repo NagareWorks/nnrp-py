@@ -242,8 +242,11 @@ def _run_progress_client(scenario: LiveWireScenario, *, timeout_seconds: float) 
         )
         _validate_progress_frames(frames)
         result = _poll_result(session, operation, deadline=deadline)
-        if result.body != _RESPONSE_BODY:
-            raise RuntimeError(f"wire target expected canonical result body, got {result.body!r}")
+        runtime_event = result.event.as_runtime()
+        if runtime_event is None:
+            raise RuntimeError("wire target expected a wire RESULT_PUSH terminal event")
+        if runtime_event.tail.body != _RESPONSE_BODY:
+            raise RuntimeError(f"wire target expected canonical result body, got {runtime_event.tail.body!r}")
         connection.close()
 
 

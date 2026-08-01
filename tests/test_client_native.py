@@ -370,8 +370,8 @@ class FakeResult:
     ) -> None:
         self.session_id = session_id
         self.operation_id = operation_id
-        self.frame_id = frame_id
-        self.body = body
+        runtime_event = SimpleNamespace(header=SimpleNamespace(frame_id=frame_id), tail=SimpleNamespace(body=body))
+        self.event = SimpleNamespace(as_runtime=lambda: runtime_event)
         self.max_events = max_events
         self.timeout_ms = timeout_ms
 
@@ -501,10 +501,10 @@ def test_connect_native_client_connection_routes_results_for_multiple_sessions()
         second_result = connection.poll_result(second, second_operation, max_events=4)
 
         assert first_result.session_id == 10
-        assert first_result.body == first_request.body
+        assert first_result.event.as_runtime().tail.body == first_request.body
         assert first_result.max_events == 4
         assert second_result.session_id == 11
-        assert second_result.body == second_request.body
+        assert second_result.event.as_runtime().tail.body == second_request.body
 
     assert backend.connections[0].connection_id == 7
     assert backend.connections[0].closed is True
@@ -741,7 +741,7 @@ def test_native_client_connection_allows_unknown_session_identity_results() -> N
 
         result = connection.poll_result(session, operation)
 
-        assert result.body == b"payload"
+        assert result.event.as_runtime().tail.body == b"payload"
         assert session.poll_result_calls == 1
 
 
@@ -778,8 +778,8 @@ def test_native_client_connection_submits_and_polls_result() -> None:
 
         assert result.session_id == 1
         assert result.operation_id == 100
-        assert result.frame_id == 7
-        assert result.body == request.body
+        assert result.event.as_runtime().header.frame_id == 7
+        assert result.event.as_runtime().tail.body == request.body
         assert result.max_events == 4
         assert session.operations[0].parent_operation_id == 99
         assert session.operations[0].operation_group_id == 1234

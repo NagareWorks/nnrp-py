@@ -10,6 +10,24 @@ from typing import Any, ClassVar, TypeVar
 from nnrp.core import HeaderFlags, MessageType, WireFormat
 
 
+class OperationState(IntEnum):
+    ACCEPTED = 0
+    RUNNING = 1
+    PARTIAL = 2
+    WAITING_TOOL = 3
+    SUPERSEDED = 4
+    CANCELLED = 5
+    FAILED = 6
+    COMPLETED = 7
+
+
+class ResultTerminalState(IntEnum):
+    SUCCESS = 0
+    CANCELLED = 1
+    DROPPED = 2
+    ERROR = 3
+
+
 class RuntimeObjectKind(IntEnum):
     UNSPECIFIED = 0
     TENSOR = 1
@@ -220,6 +238,48 @@ class NativeRuntimeEvent:
     metadata: RuntimeEventMetadata
     tail: RuntimeEventTail
     _native_context: object | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class OperationLifecycleEvent:
+    operation_id: int
+    state: OperationState
+
+    def __post_init__(self) -> None:
+        if type(self.operation_id) is not int or not 1 <= self.operation_id <= 0xFFFFFFFFFFFFFFFF:
+            raise ValueError("operation_id must be a non-zero unsigned 64-bit integer")
+        object.__setattr__(self, "state", OperationState(self.state))
+
+
+class NativeTerminalEventKind(StrEnum):
+    RUNTIME = "runtime"
+    LIFECYCLE = "lifecycle"
+
+
+@dataclass(frozen=True, slots=True)
+class NativeTerminalEvent:
+    kind: NativeTerminalEventKind
+    value: NativeRuntimeEvent | OperationLifecycleEvent
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "kind", NativeTerminalEventKind(self.kind))
+        expected_type = NativeRuntimeEvent if self.kind is NativeTerminalEventKind.RUNTIME else OperationLifecycleEvent
+        if not isinstance(self.value, expected_type):
+            raise TypeError(f"{self.kind.value} terminal event requires {expected_type.__name__}")
+
+    @classmethod
+    def runtime(cls, event: NativeRuntimeEvent) -> NativeTerminalEvent:
+        return cls(NativeTerminalEventKind.RUNTIME, event)
+
+    @classmethod
+    def lifecycle(cls, event: OperationLifecycleEvent) -> NativeTerminalEvent:
+        return cls(NativeTerminalEventKind.LIFECYCLE, event)
+
+    def as_runtime(self) -> NativeRuntimeEvent | None:
+        return self.value if isinstance(self.value, NativeRuntimeEvent) else None
+
+    def as_lifecycle(self) -> OperationLifecycleEvent | None:
+        return self.value if isinstance(self.value, OperationLifecycleEvent) else None
 
 
 RuntimeMetadataT = TypeVar("RuntimeMetadataT", bound="_FixedRuntimeMetadata")

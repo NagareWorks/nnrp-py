@@ -84,7 +84,12 @@ with connect_native_client_connection(
 		body=b"tensor-or-typed-payload-bytes",
 		max_events=8,
 	)
-	print(result.state, result.body)
+	print(result.terminal_state)
+	runtime_event = result.event.as_runtime()
+	if runtime_event is not None:
+		print(runtime_event.tail.body)
+	else:
+		print(result.event.as_lifecycle().state)
 ```
 
 The native helpers provide:
@@ -249,7 +254,7 @@ with connect_native_client_connection(
 
 `profile_id = 0` means unspecified. It must not be treated as an implicit tensor profile. Tensor and token payloads are peer standard profiles, while structured-event, tool-delta, and workflow-state remain payload families routed through schema/profile bindings before any profile-private body decoding happens.
 
-`NativeRuntimeResult.state` reports the host-visible operation lifecycle as `completed`, `partial`, `degraded`, `stale_reuse`, `cancelled`, or `failed`. `NativeRuntimeResult.diagnostic` preserves native status, error family, protocol detail, and related connection/session/operation/frame ids; use `NativeStructuredDiagnostic.to_report()` when emitting adapter or CI diagnostics instead of flattening native failures into strings.
+`NativeRuntimeResult` has exactly three fields: `operation_id`, `terminal_state`, and `event`. `terminal_state` is one of `success`, `cancelled`, `dropped`, or `error`. The closed `event` union contains either the complete wire `NativeRuntimeEvent` or an `OperationLifecycleEvent`; inspect it with `as_runtime()` or `as_lifecycle()` instead of relying on flattened payload, frame, metadata, or diagnostic fields.
 
 ### Runtime Object And Cache Metadata
 
@@ -438,7 +443,7 @@ with connect_native_client_connection(
 
 	interactive_result = connection.poll_result(interactive, interactive_op, max_events=16)
 	batch_result = connection.poll_result(batch, batch_op, max_events=16)
-	print(interactive_result.state, batch_result.state)
+	print(interactive_result.terminal_state, batch_result.terminal_state)
 ```
 
 Hosts should keep submission and result consumption decoupled so multiple operations can remain in flight while result, cancellation, control, and diagnostic events continue to arrive on the same connection. The connection context closes owned sessions on exit.

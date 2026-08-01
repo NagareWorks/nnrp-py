@@ -110,7 +110,6 @@ from nnrp.native import (
     NativeObjectDescriptorHandle,
     NativeObjectMetadataBuffer,
     NativeOperationHandle,
-    NativeOperationLifecycle,
     NativeOperationSchedulingHint,
     NativePayloadFamilyEvent,
     NativePlatform,
@@ -217,11 +216,15 @@ from nnrp.runtime import (
     ControlRequestMetadata,
     MemoryLocationHint,
     NativeRuntimeEvent,
+    NativeTerminalEvent,
+    NativeTerminalEventKind,
     ObjectDeltaMetadata,
     ObjectDescriptorMetadata,
     ObjectReferenceMetadata,
     ObjectReleaseMetadata,
     ObjectReleaseReason,
+    OperationLifecycleEvent,
+    OperationState,
     OwnershipHint,
     PartialResultMetadata,
     PressureMetadata,
@@ -229,8 +232,11 @@ from nnrp.runtime import (
     RecoverableErrorMetadata,
     ResultDropReasonCode,
     ResultDropReasonMetadata,
+    ResultTerminalState,
     RetryAfterMetadata,
     RouteHintMetadata,
+    RuntimeEventMetadata,
+    RuntimeEventMetadataKind,
     RuntimeObjectKind,
     RuntimeRole,
     SchedulingMetadata,
@@ -4601,8 +4607,8 @@ def test_native_result_keeps_wire_operation_identity_separate_from_handle_identi
 
     assert operation.handle.handle.id == 500
     assert result.operation_id == 99
-    assert result.event.operation.id == 500
-    assert result.body == b"result"
+    lifecycle = result.event.as_lifecycle()
+    assert lifecycle == OperationLifecycleEvent(99, OperationState.COMPLETED)
 
 
 def test_native_runtime_result_preserves_lifecycle_surface(tmp_path: Path) -> None:
@@ -4617,23 +4623,100 @@ def test_native_runtime_result_preserves_lifecycle_surface(tmp_path: Path) -> No
     event = _open_event_session(connection).poll_event()
 
     assert event is not None
-    result = NativeRuntimeResult.from_event(event)
-    partial = NativeRuntimeResult.from_event(event, state=NativeOperationLifecycle.PARTIAL)
-    degraded = NativeRuntimeResult.from_event(event, state=NativeOperationLifecycle.DEGRADED)
-    stale = NativeRuntimeResult.from_event(event, state=NativeOperationLifecycle.STALE_REUSE)
+    result = NativeRuntimeResult._from_polled_event(event)
 
-    assert result.state is NativeOperationLifecycle.COMPLETED
+    assert result.terminal_state is ResultTerminalState.SUCCESS
     assert result.operation_id == 99
-    assert result.frame_id == 7
-    assert result.body == b"result"
-    assert result.metadata is not None
-    assert result.metadata.payload_kind_bitmap == PayloadKind.TOKEN_CHUNK
-    assert not hasattr(result, "payload")
-    assert result.diagnostic.status.succeeded is True
-    assert result.diagnostic.related_connection_id == 0
-    assert partial.state is NativeOperationLifecycle.PARTIAL
-    assert degraded.state is NativeOperationLifecycle.DEGRADED
-    assert stale.state is NativeOperationLifecycle.STALE_REUSE
+    assert result.event.kind is NativeTerminalEventKind.LIFECYCLE
+    assert result.event.as_lifecycle() == OperationLifecycleEvent(99, OperationState.COMPLETED)
+    assert not any(hasattr(result, name) for name in ("payload", "frame_id", "body", "metadata", "diagnostic", "state"))
+
+
+@pytest.mark.parametrize(
+    ("operation_state", "terminal_state"),
+    [
+        (OperationState.COMPLETED, ResultTerminalState.SUCCESS),
+        (OperationState.CANCELLED, ResultTerminalState.CANCELLED),
+        (OperationState.SUPERSEDED, ResultTerminalState.DROPPED),
+        (OperationState.FAILED, ResultTerminalState.ERROR),
+    ],
+)
+def test_native_runtime_result_preserves_exact_local_terminal_state(
+    operation_state: OperationState,
+    terminal_state: ResultTerminalState,
+) -> None:
+    lifecycle = OperationLifecycleEvent(99, operation_state)
+    result = NativeRuntimeResult(99, terminal_state, NativeTerminalEvent.lifecycle(lifecycle))
+
+    assert result.event.as_lifecycle() is lifecycle
+    assert result.terminal_state is terminal_state
+
+
+def test_native_runtime_result_rejects_inconsistent_terminal_evidence() -> None:
+    completed = NativeTerminalEvent.lifecycle(OperationLifecycleEvent(99, OperationState.COMPLETED))
+    with pytest.raises(ValueError, match="terminal_state ERROR does not match"):
+        NativeRuntimeResult(99, ResultTerminalState.ERROR, completed)
+
+    wrong_operation = NativeTerminalEvent.lifecycle(OperationLifecycleEvent(100, OperationState.COMPLETED))
+    with pytest.raises(ValueError, match="operation_id must match"):
+        NativeRuntimeResult(99, ResultTerminalState.SUCCESS, wrong_operation)
+
+    nonterminal = NativeTerminalEvent.lifecycle(OperationLifecycleEvent(99, OperationState.RUNNING))
+    with pytest.raises(ValueError, match="not a terminal operation state"):
+        NativeRuntimeResult(99, ResultTerminalState.SUCCESS, nonterminal)
+
+    with pytest.raises(ValueError, match="operation_id"):
+        NativeRuntimeResult(0, ResultTerminalState.SUCCESS, completed)
+    with pytest.raises(TypeError, match="NativeTerminalEvent"):
+        NativeRuntimeResult(99, ResultTerminalState.SUCCESS, object())
+    with pytest.raises(TypeError, match="runtime terminal event requires NativeRuntimeEvent"):
+        NativeTerminalEvent(NativeTerminalEventKind.RUNTIME, completed.value)
+
+
+def test_native_runtime_result_validates_runtime_terminal_evidence() -> None:
+    pushed = _decode_test_wire_event(
+        MessageType.RESULT_PUSH,
+        _native_token_result_payload(),
+        kind=EVENT_KIND_RESULT_PUSHED,
+        frame_id=7,
+    )
+    pushed_result = NativeRuntimeResult._from_polled_event(pushed, operation_id=99)
+    assert pushed_result.terminal_state is ResultTerminalState.SUCCESS
+    assert pushed_result.event.as_runtime() is pushed
+
+    drop = _decode_test_wire_event(
+        MessageType.RESULT_DROP_REASON,
+        encode_runtime_control_metadata(
+            MessageType.RESULT_DROP_REASON,
+            ResultDropReasonMetadata(99, 1, ResultDropReasonCode.BACKPRESSURE, RuntimeRole.SERVER, 0, 0),
+        ),
+        kind=EVENT_KIND_CONTROL,
+        frame_id=8,
+    )
+    dropped_result = NativeRuntimeResult._from_polled_event(drop, operation_id=99)
+    assert dropped_result.terminal_state is ResultTerminalState.DROPPED
+
+    malformed_push = replace(pushed, metadata=RuntimeEventMetadata(RuntimeEventMetadataKind.NONE))
+    with pytest.raises(NativeHandleError, match="requires ResultPushMetadata"):
+        NativeRuntimeResult._from_polled_event(malformed_push, operation_id=99)
+    with pytest.raises(ValueError, match="requires ResultPushMetadata"):
+        NativeRuntimeResult(99, ResultTerminalState.SUCCESS, NativeTerminalEvent.runtime(malformed_push))
+
+    progress = _decode_test_wire_event(
+        MessageType.PROGRESS,
+        encode_runtime_control_metadata(MessageType.PROGRESS, ProgressMetadata(99, 1, 1, 100, 0, 0)),
+    )
+    with pytest.raises(NativeHandleError, match="not a terminal result event"):
+        NativeRuntimeResult._from_polled_event(progress, operation_id=99)
+    with pytest.raises(ValueError, match="not terminal result evidence"):
+        NativeRuntimeResult(99, ResultTerminalState.SUCCESS, NativeTerminalEvent.runtime(progress))
+
+
+def test_operation_lifecycle_event_rejects_invalid_or_nonterminal_result_evidence() -> None:
+    with pytest.raises(ValueError, match="operation_id"):
+        OperationLifecycleEvent(0, OperationState.FAILED)
+    with pytest.raises(NativeHandleError, match="not a terminal operation state"):
+        native_module._terminal_state_from_operation_state(OperationState.RUNNING)
 
 
 def test_native_runtime_result_maps_error_and_drop_events() -> None:
@@ -4654,10 +4737,13 @@ def test_native_runtime_result_maps_error_and_drop_events() -> None:
         diagnostic=NativeRuntimeDiagnostic(NativeStatus.ok(), 12, 41, 99, 7),
     )
 
-    assert NativeRuntimeResult.from_event(base_event).state is NativeOperationLifecycle.FAILED
-    assert NativeRuntimeResult.from_event(base_event).diagnostic.status_name == "internal_error"
-    assert NativeRuntimeResult.from_event(base_event).diagnostic.error_family_name == "none"
-    assert NativeRuntimeResult.from_event(drop_event).state is NativeOperationLifecycle.CANCELLED
+    failed = NativeRuntimeResult._from_polled_event(base_event)
+    cancelled = NativeRuntimeResult._from_polled_event(drop_event)
+
+    assert failed.terminal_state is ResultTerminalState.ERROR
+    assert failed.event.as_lifecycle() == OperationLifecycleEvent(99, OperationState.FAILED)
+    assert cancelled.terminal_state is ResultTerminalState.CANCELLED
+    assert cancelled.event.as_lifecycle() == OperationLifecycleEvent(99, OperationState.CANCELLED)
 
 
 def test_native_runtime_event_classifies_control_and_credit_updates() -> None:
@@ -5289,7 +5375,6 @@ def test_native_runtime_session_submits_and_polls_result(tmp_path: Path) -> None
     request = _native_submit_request()
     result = session.submit_and_poll_result(
         request,
-        state=NativeOperationLifecycle.PARTIAL,
         max_events=1,
         timeout_ms=25,
     )
@@ -5300,17 +5385,15 @@ def test_native_runtime_session_submits_and_polls_result(tmp_path: Path) -> None
         )
     )
 
-    assert result.state is NativeOperationLifecycle.PARTIAL
+    assert result.terminal_state is ResultTerminalState.SUCCESS
     assert result.operation_id == 99
-    assert result.frame_id == 7
-    assert result.body == b"result"
-    assert result.metadata is not None
-    assert isinstance(result.event, NativeRuntimeEvent)
-    assert result.event.header.frame_id == 7
-    assert result.event.metadata.value == result.metadata
-    assert result.event.tail.body == b"result"
-    assert async_result.state is NativeOperationLifecycle.COMPLETED
-    assert async_result.body == b"result"
+    runtime_event = result.event.as_runtime()
+    assert runtime_event is not None
+    assert runtime_event.header.frame_id == 7
+    assert isinstance(runtime_event.metadata.value, ResultPushMetadata)
+    assert runtime_event.tail.body == b"result"
+    assert async_result.terminal_state is ResultTerminalState.SUCCESS
+    assert async_result.event.as_runtime().tail.body == b"result"
     assert [_read_buffer_view(call[0].payload) for call in library.nnrp_client_submit.calls] == [
         request.metadata.pack() + request.body,
         request.metadata.pack() + request.body,
@@ -5340,8 +5423,8 @@ def test_native_runtime_session_polls_result_with_batch_when_event_budget_allows
     result = session.poll_result(operation, max_events=2)
     second_result = session.poll_result(operation, max_events=2)
 
-    assert result.body == b"result"
-    assert second_result.body == b"result"
+    assert result.event.as_lifecycle() == OperationLifecycleEvent(99, OperationState.COMPLETED)
+    assert second_result.event.as_lifecycle() == OperationLifecycleEvent(99, OperationState.COMPLETED)
     assert library.nnrp_client_await_events.calls[0][2] == 2
     assert library.nnrp_client_await_event.calls == []
 
@@ -5403,11 +5486,9 @@ def test_native_runtime_session_submit_result_preserves_related_diagnostic_ids(t
 
     result = session.submit_and_poll_result(_native_submit_request())
 
-    assert result.diagnostic.related_connection_id == 12
-    assert result.diagnostic.related_session_id == 41
-    assert result.diagnostic.related_operation_id == 99
-    assert result.diagnostic.related_frame_id == 7
-    assert result.event.diagnostic.related_operation_id == 99
+    assert result.operation_id == 99
+    assert result.event.as_lifecycle() == OperationLifecycleEvent(99, OperationState.COMPLETED)
+    assert not hasattr(result, "diagnostic")
 
 
 def test_native_runtime_session_submit_and_poll_maps_non_ok_statuses(tmp_path: Path) -> None:
@@ -5570,8 +5651,8 @@ def test_native_runtime_session_batch_poll_skips_submit_accepted_events(tmp_path
     operation = session.submit_operation(_native_submit_request(body=b""))
     result = session.poll_result(operation, max_events=2)
 
-    assert result.state is NativeOperationLifecycle.COMPLETED
-    assert result.body == b"result"
+    assert result.terminal_state is ResultTerminalState.SUCCESS
+    assert result.event.as_lifecycle() == OperationLifecycleEvent(99, OperationState.COMPLETED)
 
 
 def test_native_runtime_session_batch_poll_preserves_unmatched_owned_events(
@@ -5612,7 +5693,7 @@ def test_native_runtime_session_batch_poll_preserves_unmatched_owned_events(
 
     result = session.poll_result(operation, max_events=4)
 
-    assert result.body == b"result"
+    assert result.event.as_lifecycle() == OperationLifecycleEvent(99, OperationState.COMPLETED)
     assert copied_payloads == [
         _native_token_result_payload(b"wrong-session"),
         b"not-result",

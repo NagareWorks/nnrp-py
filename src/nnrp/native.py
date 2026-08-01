@@ -22,7 +22,6 @@ if TYPE_CHECKING:
 
 from nnrp.core import HeaderFlags, MessageType, WireFormat
 from nnrp.core.messages import (
-    RESULT_PUSH_METADATA_LENGTH,
     BudgetPolicy,
     FlowUpdateMetadata,
     FrameSubmitMetadata,
@@ -40,15 +39,19 @@ from nnrp.runtime import (
     CapabilityMetadata,
     ControlRequestMetadata,
     NativeRuntimeEvent,
+    NativeTerminalEvent,
     ObjectDeltaMetadata,
     ObjectDescriptorMetadata,
     ObjectReferenceMetadata,
     ObjectReleaseMetadata,
+    OperationLifecycleEvent,
+    OperationState,
     PartialResultMetadata,
     PressureMetadata,
     ProgressMetadata,
     RecoverableErrorMetadata,
     ResultDropReasonMetadata,
+    ResultTerminalState,
     RetryAfterMetadata,
     RouteHintMetadata,
     RuntimeEventMetadata,
@@ -2909,9 +2912,6 @@ _NATIVE_RUNTIME_DIAGNOSTIC_OK = NativeRuntimeDiagnostic(
     related_operation_id=0,
     related_frame_id=0,
 )
-_NATIVE_STRUCTURED_DIAGNOSTIC_OK = NativeStructuredDiagnostic(status=_NATIVE_STATUS_OK)
-
-
 @dataclass(frozen=True, slots=True)
 class _NativeRuntimeEventContext:
     kind: int
@@ -3262,18 +3262,6 @@ def _unpack_runtime_event_prefix(metadata_type: type[Any], payload: bytes) -> tu
     return metadata_type.unpack(payload[:metadata_length]), payload[metadata_length:]
 
 
-def _runtime_event_payload(event: NativeRuntimeEvent) -> bytes:
-    metadata_value = event.metadata.value
-    metadata_bytes = b"" if metadata_value is None else bytes(metadata_value.pack())
-    if event.tail.kind is RuntimeEventTailKind.BODY:
-        return metadata_bytes + event.tail.body
-    if event.tail.kind is RuntimeEventTailKind.DIAGNOSTIC:
-        return metadata_bytes + event.tail.diagnostic
-    if event.tail.kind is RuntimeEventTailKind.METADATA_BODY_AND_DELTA:
-        return metadata_bytes + event.tail.metadata_body + event.tail.delta
-    return metadata_bytes
-
-
 def _runtime_event_context(event: NativeRuntimeEvent) -> _NativeRuntimeEventContext:
     context = event._native_context
     if not isinstance(context, _NativeRuntimeEventContext):
@@ -3287,18 +3275,6 @@ def _native_event_kind(event: NativePolledEvent) -> int:
     return event.kind
 
 
-def _event_payload(event: NativePolledEvent) -> bytes:
-    if isinstance(event, NativeRuntimeEvent):
-        return _runtime_event_payload(event)
-    return event.payload
-
-
-def _event_frame_id(event: NativePolledEvent) -> int:
-    if isinstance(event, NativeRuntimeEvent):
-        return event.header.frame_id
-    return event.diagnostic.related_frame_id
-
-
 def _event_operation_id(event: NativePolledEvent) -> int:
     if isinstance(event, NativeRuntimeEvent):
         context = _runtime_event_context(event)
@@ -3307,21 +3283,6 @@ def _event_operation_id(event: NativePolledEvent) -> int:
         value = event.metadata.value
         return int(getattr(value, "operation_id", 0))
     return event.diagnostic.related_operation_id
-
-
-def _event_native_diagnostic(event: NativePolledEvent) -> NativeRuntimeDiagnostic:
-    if isinstance(event, NativeRuntimeEvent):
-        return _runtime_event_context(event).diagnostic
-    return event.diagnostic
-
-
-class NativeOperationLifecycle(StrEnum):
-    COMPLETED = "completed"
-    PARTIAL = "partial"
-    DEGRADED = "degraded"
-    STALE_REUSE = "stale_reuse"
-    CANCELLED = "cancelled"
-    FAILED = "failed"
 
 
 class NativeSessionPriorityClass(StrEnum):
@@ -3361,167 +3322,98 @@ class NativeOperationSchedulingHint:
         return self.parent_operation_id is not None or self.operation_group_id is not None
 
 
+@dataclass(frozen=True, slots=True)
 class NativeRuntimeResult:
-    __slots__ = (
-        "diagnostic",
-        "event",
-        "frame_id",
-        "metadata",
-        "operation_id",
-        "body",
-        "state",
-    )
+    operation_id: int
+    terminal_state: ResultTerminalState
+    event: NativeTerminalEvent
 
-    def __init__(
-        self,
-        state: NativeOperationLifecycle,
-        operation_id: int,
-        frame_id: int,
-        payload: bytes,
-        event: NativePolledEvent,
-        diagnostic: NativeStructuredDiagnostic,
-    ) -> None:
-        self.state = state
-        self.operation_id = operation_id
-        self.frame_id = frame_id
-        self.diagnostic = diagnostic
-        self.event = event
-        if _native_event_kind(event) == EVENT_KIND_RESULT_PUSHED:
-            if len(payload) < RESULT_PUSH_METADATA_LENGTH:
-                raise ValueError(
-                    "native RESULT_PUSH payload is shorter than the fixed result metadata prefix: "
-                    f"expected at least {RESULT_PUSH_METADATA_LENGTH} bytes, got {len(payload)}"
-                )
-            self.metadata = ResultPushMetadata.unpack(payload[:RESULT_PUSH_METADATA_LENGTH])
-            self.body = payload[RESULT_PUSH_METADATA_LENGTH:]
-        else:
-            self.metadata = None
-            self.body = payload
+    def __post_init__(self) -> None:
+        if type(self.operation_id) is not int or not 1 <= self.operation_id <= 0xFFFFFFFFFFFFFFFF:
+            raise ValueError("operation_id must be a non-zero unsigned 64-bit integer")
+        object.__setattr__(self, "terminal_state", ResultTerminalState(self.terminal_state))
+        if not isinstance(self.event, NativeTerminalEvent):
+            raise TypeError("event must be a NativeTerminalEvent")
+        lifecycle = self.event.as_lifecycle()
+        if lifecycle is not None and lifecycle.operation_id != self.operation_id:
+            raise ValueError("lifecycle event operation_id must match result operation_id")
+        expected_terminal_state = _terminal_state_from_terminal_event(self.event)
+        if self.terminal_state is not expected_terminal_state:
+            raise ValueError(
+                f"terminal_state {self.terminal_state.name} does not match "
+                f"{self.event.kind.value} terminal evidence ({expected_terminal_state.name})"
+            )
 
     @classmethod
-    def from_event(
+    def _from_polled_event(
         cls,
         event: NativePolledEvent,
         *,
-        state: NativeOperationLifecycle | str | None = None,
         operation_id: int | None = None,
     ) -> NativeRuntimeResult:
-        selected_state = NativeOperationLifecycle(state) if state is not None else _infer_lifecycle_from_event(event)
-        selected_operation_id = operation_id
-        if selected_operation_id is None:
-            selected_operation_id = _event_operation_id(event)
-        return cls(
-            state=selected_state,
-            operation_id=selected_operation_id,
-            frame_id=_event_frame_id(event),
-            payload=_event_payload(event),
-            event=event,
-            diagnostic=NativeStructuredDiagnostic.from_runtime_diagnostic(_event_native_diagnostic(event)),
-        )
+        selected_operation_id = _event_operation_id(event) if operation_id is None else operation_id
+        if isinstance(event, NativeRuntimeEvent):
+            message_type = event.header.message_type
+            if message_type is MessageType.RESULT_PUSH:
+                if event.metadata.kind is not RuntimeEventMetadataKind.RESULT_PUSH:
+                    raise NativeHandleError("RESULT_PUSH terminal event requires ResultPushMetadata")
+                terminal_state = ResultTerminalState.SUCCESS
+            elif message_type in {MessageType.RESULT_DROP, MessageType.RESULT_DROP_REASON}:
+                terminal_state = ResultTerminalState.DROPPED
+            else:
+                raise NativeHandleError(f"{message_type.name} is not a terminal result event")
+            terminal_event = NativeTerminalEvent.runtime(event)
+        else:
+            lifecycle = OperationLifecycleEvent(
+                selected_operation_id,
+                _operation_state_from_lifecycle_event(event),
+            )
+            terminal_state = _terminal_state_from_operation_state(lifecycle.state)
+            terminal_event = NativeTerminalEvent.lifecycle(lifecycle)
+        return cls(selected_operation_id, terminal_state, terminal_event)
 
 
-def _submit_result_from_ffi_event(
-    event: _NnrpEvent,
-    *,
-    connection: NativeHandle,
-    session: NativeHandle,
-    state: NativeOperationLifecycle | str | None,
-    operation_id: int,
-) -> NativeRuntimeResult:
-    kind = int(event.kind)
-    payload = _copy_buffer_view(event.payload)
-    raw_diagnostic = event.diagnostic
-    status = NativeStatus.from_ffi(raw_diagnostic.status)
-    if (
-        status is _NATIVE_STATUS_OK
-        and raw_diagnostic.related_connection_id == 0
-        and raw_diagnostic.related_session_id == 0
-        and raw_diagnostic.related_operation_id == 0
-        and raw_diagnostic.related_frame_id == 0
-    ):
-        diagnostic = _NATIVE_RUNTIME_DIAGNOSTIC_OK
-        structured_diagnostic = _NATIVE_STRUCTURED_DIAGNOSTIC_OK
-    else:
-        diagnostic = NativeRuntimeDiagnostic(
-            status=status,
-            related_connection_id=int(raw_diagnostic.related_connection_id),
-            related_session_id=int(raw_diagnostic.related_session_id),
-            related_operation_id=int(raw_diagnostic.related_operation_id),
-            related_frame_id=int(raw_diagnostic.related_frame_id),
-        )
-        structured_diagnostic = NativeStructuredDiagnostic(
-            status=status,
-            related_connection_id=diagnostic.related_connection_id,
-            related_session_id=diagnostic.related_session_id,
-            related_operation_id=diagnostic.related_operation_id,
-            related_frame_id=diagnostic.related_frame_id,
-        )
-    raw_operation = event.operation
-    operation = object.__new__(NativeHandle)
-    object.__setattr__(operation, "kind", int(raw_operation.kind))
-    object.__setattr__(operation, "id", int(raw_operation.id))
-    object.__setattr__(operation, "generation", int(raw_operation.generation))
-    object.__setattr__(operation, "flags", int(raw_operation.flags))
-    frame_id = int(event.header.frame_id) or diagnostic.related_frame_id
-    lifecycle_event = NativeLifecycleEvent(
-        kind,
-        connection,
-        session,
-        operation,
-        payload,
-        diagnostic,
-    )
-    if state is not None:
-        selected_state = NativeOperationLifecycle(state)
-    elif status.status_code == FFI_STATUS_OK and kind != EVENT_KIND_ERROR:
-        selected_state = (
-            NativeOperationLifecycle.CANCELLED
-            if kind == EVENT_KIND_RESULT_DROPPED
-            else NativeOperationLifecycle.COMPLETED
-        )
-    else:
-        selected_state = NativeOperationLifecycle.FAILED
-    return NativeRuntimeResult(
-        selected_state,
-        operation_id,
-        frame_id,
-        payload,
-        lifecycle_event,
-        structured_diagnostic,
-    )
+def _operation_state_from_lifecycle_event(event: NativeLifecycleEvent) -> OperationState:
+    if not event.diagnostic.status.succeeded or event.kind == EVENT_KIND_ERROR:
+        return OperationState.FAILED
+    if event.kind == EVENT_KIND_RESULT_DROPPED:
+        return OperationState.CANCELLED
+    if event.kind == EVENT_KIND_RESULT_PUSHED:
+        return OperationState.COMPLETED
+    raise NativeHandleError(f"{event.kind_name} is not a terminal operation lifecycle event")
 
 
-def _submit_result_from_ok_result_pushed_ffi_event(
-    event: _NnrpEvent,
-    *,
-    connection: NativeHandle,
-    session: NativeHandle,
-    operation_id: int,
-) -> NativeRuntimeResult:
-    payload = _copy_buffer_view(event.payload)
-    raw_operation = event.operation
-    operation = object.__new__(NativeHandle)
-    object.__setattr__(operation, "kind", int(raw_operation.kind))
-    object.__setattr__(operation, "id", int(raw_operation.id))
-    object.__setattr__(operation, "generation", int(raw_operation.generation))
-    object.__setattr__(operation, "flags", int(raw_operation.flags))
-    frame_id = int(event.header.frame_id)
-    lifecycle_event = NativeLifecycleEvent(
-        EVENT_KIND_RESULT_PUSHED,
-        connection,
-        session,
-        operation,
-        payload,
-        _NATIVE_RUNTIME_DIAGNOSTIC_OK,
-    )
-    return NativeRuntimeResult(
-        NativeOperationLifecycle.COMPLETED,
-        operation_id,
-        frame_id,
-        payload,
-        lifecycle_event,
-        _NATIVE_STRUCTURED_DIAGNOSTIC_OK,
-    )
+def _terminal_state_from_operation_state(state: OperationState) -> ResultTerminalState:
+    try:
+        return {
+            OperationState.COMPLETED: ResultTerminalState.SUCCESS,
+            OperationState.CANCELLED: ResultTerminalState.CANCELLED,
+            OperationState.SUPERSEDED: ResultTerminalState.DROPPED,
+            OperationState.FAILED: ResultTerminalState.ERROR,
+        }[OperationState(state)]
+    except KeyError as error:
+        raise NativeHandleError(f"{OperationState(state).name} is not a terminal operation state") from error
+
+
+def _terminal_state_from_terminal_event(event: NativeTerminalEvent) -> ResultTerminalState:
+    runtime_event = event.as_runtime()
+    if runtime_event is not None:
+        message_type = runtime_event.header.message_type
+        if message_type is MessageType.RESULT_PUSH:
+            if runtime_event.metadata.kind is not RuntimeEventMetadataKind.RESULT_PUSH:
+                raise ValueError("RESULT_PUSH terminal event requires ResultPushMetadata")
+            return ResultTerminalState.SUCCESS
+        if message_type in {MessageType.RESULT_DROP, MessageType.RESULT_DROP_REASON}:
+            return ResultTerminalState.DROPPED
+        raise ValueError(f"{message_type.name} is not terminal result evidence")
+
+    lifecycle = event.as_lifecycle()
+    if lifecycle is None:
+        raise TypeError("event must contain runtime or lifecycle terminal evidence")
+    try:
+        return _terminal_state_from_operation_state(lifecycle.state)
+    except NativeHandleError as error:
+        raise ValueError(str(error)) from error
 
 
 @dataclass(frozen=True)
@@ -4511,7 +4403,6 @@ class NativeRuntimeSession:
         self,
         operation: NativeRuntimeOperation,
         *,
-        state: NativeOperationLifecycle | str | None = None,
         max_events: int | None = None,
         timeout_ms: int = 0,
     ) -> NativeRuntimeResult:
@@ -4521,7 +4412,6 @@ class NativeRuntimeSession:
         _require_bounded_integer("timeout_ms", timeout_ms, 0xFFFFFFFF)
         result = self._poll_result_batch(
             operation,
-            state=state,
             max_events=1 if max_events is None else max_events,
             timeout_ms=timeout_ms,
         )
@@ -4533,12 +4423,11 @@ class NativeRuntimeSession:
         self,
         operation: NativeRuntimeOperation,
         *,
-        state: NativeOperationLifecycle | str | None,
         max_events: int,
         timeout_ms: int,
     ) -> NativeRuntimeResult | None:
         with self._poll_lock:
-            matched_result = self._take_pending_result(operation, state=state)
+            matched_result = self._take_pending_result(operation)
             if matched_result is not None or max_events == 0:
                 return matched_result
 
@@ -4567,9 +4456,8 @@ class NativeRuntimeSession:
                     and _event_is_result_event(event)
                     and _event_matches_operation(event, operation)
                 ):
-                    matched_result = NativeRuntimeResult.from_event(
+                    matched_result = NativeRuntimeResult._from_polled_event(
                         event,
-                        state=state,
                         operation_id=operation.operation_id,
                     )
                 else:
@@ -4579,15 +4467,12 @@ class NativeRuntimeSession:
     def _take_pending_result(
         self,
         operation: NativeRuntimeOperation,
-        *,
-        state: NativeOperationLifecycle | str | None,
     ) -> NativeRuntimeResult | None:
         for index, event in enumerate(self._pending_events):
             if _event_is_result_event(event) and _event_matches_operation(event, operation):
                 del self._pending_events[index]
-                return NativeRuntimeResult.from_event(
+                return NativeRuntimeResult._from_polled_event(
                     event,
-                    state=state,
                     operation_id=operation.operation_id,
                 )
         return None
@@ -4613,7 +4498,6 @@ class NativeRuntimeSession:
         parent_operation_id: int | None = None,
         operation_group_id: int | None = None,
         scheduling_hint: NativeOperationSchedulingHint | None = None,
-        state: NativeOperationLifecycle | str | None = None,
         max_events: int | None = None,
         timeout_ms: int = 0,
     ) -> NativeRuntimeResult:
@@ -4623,7 +4507,7 @@ class NativeRuntimeSession:
             operation_group_id=operation_group_id,
             scheduling_hint=scheduling_hint,
         )
-        return self.poll_result(operation, state=state, max_events=max_events, timeout_ms=timeout_ms)
+        return self.poll_result(operation, max_events=max_events, timeout_ms=timeout_ms)
 
     async def async_submit_and_poll_result(
         self,
@@ -4632,7 +4516,6 @@ class NativeRuntimeSession:
         parent_operation_id: int | None = None,
         operation_group_id: int | None = None,
         scheduling_hint: NativeOperationSchedulingHint | None = None,
-        state: NativeOperationLifecycle | str | None = None,
         max_events: int | None = None,
         timeout_ms: int = 0,
     ) -> NativeRuntimeResult:
@@ -4642,7 +4525,6 @@ class NativeRuntimeSession:
             parent_operation_id=parent_operation_id,
             operation_group_id=operation_group_id,
             scheduling_hint=scheduling_hint,
-            state=state,
             max_events=max_events,
             timeout_ms=timeout_ms,
         )
@@ -6671,14 +6553,6 @@ def _coerce_operation_scheduling_hint(
     if operation_group_id is not None and scheduling_hint.operation_group_id != operation_group_id:
         raise NativeHandleError("operation_group_id conflicts with scheduling_hint")
     return scheduling_hint
-
-
-def _infer_lifecycle_from_event(event: NativePolledEvent) -> NativeOperationLifecycle:
-    if not _event_native_diagnostic(event).status.succeeded or _native_event_kind(event) == EVENT_KIND_ERROR:
-        return NativeOperationLifecycle.FAILED
-    if _native_event_kind(event) == EVENT_KIND_RESULT_DROPPED:
-        return NativeOperationLifecycle.CANCELLED
-    return NativeOperationLifecycle.COMPLETED
 
 
 def _format_status_message(status: NativeStatus) -> str:

@@ -172,7 +172,9 @@ class NativeClientConnection:
         if self._is_cancelled_result(session, operation_id=operation.operation_id, frame_id=operation.frame_id):
             raise NativeWouldBlockError(NativeStatus(FFI_STATUS_WOULD_BLOCK))
         result = session.poll_result(operation, max_events=max_events, timeout_ms=timeout_ms)
-        if self._is_cancelled_result(session, operation_id=result.operation_id, frame_id=result.frame_id):
+        runtime_event = result.event.as_runtime()
+        result_frame_id = operation.frame_id if runtime_event is None else runtime_event.header.frame_id
+        if self._is_cancelled_result(session, operation_id=result.operation_id, frame_id=result_frame_id):
             raise NativeWouldBlockError(NativeStatus(FFI_STATUS_WOULD_BLOCK))
         return result
 

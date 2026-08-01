@@ -22,7 +22,7 @@
 
 ## Public API Boundary
 
-- [x] Expose only the preview4 host-facing client and server entrypoints frozen in `nnrp-doc`.
+- [x] Expose only the preview4 host-facing client and server entrypoints frozen in `nnrp-doc`, including the exact three-field terminal result and closed runtime/lifecycle event union enforced by CI.
 - [x] Add preview4-specific request options without overloading preview3 packet helper APIs.
 - [x] Keep fixture builders out of runtime quick-start paths.
 - [x] Document explicit native requirement for preview4 runtime-control hot paths.

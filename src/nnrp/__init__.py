@@ -166,7 +166,6 @@ from nnrp.native import (
     NativeObjectDescriptorHandle,
     NativeObjectMetadataBuffer,
     NativeOperationHandle,
-    NativeOperationLifecycle,
     NativeOperationSchedulingHint,
     NativePayloadFamilyCallback,
     NativePayloadFamilyEvent,
@@ -258,7 +257,14 @@ from nnrp.recovery import (
     validate_session_recovery_ack,
     validate_session_recovery_request,
 )
-from nnrp.runtime import CacheReuseScope
+from nnrp.runtime import (
+    CacheReuseScope,
+    NativeTerminalEvent,
+    NativeTerminalEventKind,
+    OperationLifecycleEvent,
+    OperationState,
+    ResultTerminalState,
+)
 from nnrp.schema import (
     DESCRIPTOR_FLAGS_KNOWN_MASK,
     SCHEMA_DESCRIPTOR_HEADER_LENGTH,
@@ -414,7 +420,6 @@ __all__ = [
     "NativeLifecycleEvent",
     "NativeLifecycleEventCallback",
     "NativeMutableBufferView",
-    "NativeOperationLifecycle",
     "NativeOperationHandle",
     "NativeOperationSchedulingHint",
     "NativeObjectDescriptor",
@@ -442,6 +447,11 @@ __all__ = [
     "NativeRuntimePollResult",
     "NativeRuntimeOperation",
     "NativeRuntimeResult",
+    "NativeTerminalEvent",
+    "NativeTerminalEventKind",
+    "OperationLifecycleEvent",
+    "OperationState",
+    "ResultTerminalState",
     "NativeRuntimeServer",
     "NativeRuntimeServerOperation",
     "NativeRuntimeServerSession",

@@ -276,14 +276,32 @@ def test_progress_client_validates_frames_and_terminal_result(monkeypatch: pytes
     monkeypatch.setattr(
         wire_target,
         "_poll_result",
-        lambda *args, **kwargs: SimpleNamespace(body=wire_target._RESPONSE_BODY),
+        lambda *args, **kwargs: SimpleNamespace(
+            event=SimpleNamespace(
+                as_runtime=lambda: SimpleNamespace(tail=SimpleNamespace(body=wire_target._RESPONSE_BODY))
+            )
+        ),
     )
 
     wire_target._run_progress_client(_scenario("progress", "suite_as_server"), timeout_seconds=1.0)
     assert any(name == "submit" for name, _ in session.calls)
 
-    monkeypatch.setattr(wire_target, "_poll_result", lambda *args, **kwargs: SimpleNamespace(body=b"wrong"))
+    monkeypatch.setattr(
+        wire_target,
+        "_poll_result",
+        lambda *args, **kwargs: SimpleNamespace(
+            event=SimpleNamespace(as_runtime=lambda: SimpleNamespace(tail=SimpleNamespace(body=b"wrong")))
+        ),
+    )
     with pytest.raises(RuntimeError, match="expected canonical result body"):
+        wire_target._run_progress_client(_scenario("progress", "suite_as_server"), timeout_seconds=1.0)
+
+    monkeypatch.setattr(
+        wire_target,
+        "_poll_result",
+        lambda *args, **kwargs: SimpleNamespace(event=SimpleNamespace(as_runtime=lambda: None)),
+    )
+    with pytest.raises(RuntimeError, match="expected a wire RESULT_PUSH terminal event"):
         wire_target._run_progress_client(_scenario("progress", "suite_as_server"), timeout_seconds=1.0)
 
 

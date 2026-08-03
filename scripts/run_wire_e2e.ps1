@@ -9,8 +9,16 @@ param(
 $ErrorActionPreference = "Stop"
 $repositoryRoot = Split-Path -Parent $PSScriptRoot
 $conformanceRoot = [System.IO.Path]::GetFullPath($ConformanceRoot)
-$artifactRoot = [System.IO.Path]::GetFullPath((Join-Path $repositoryRoot $ArtifactDirectory))
-$nativeArtifactRoot = [System.IO.Path]::GetFullPath((Join-Path $repositoryRoot $NativeArtifactRoot))
+$artifactRoot = if ([System.IO.Path]::IsPathRooted($ArtifactDirectory)) {
+  [System.IO.Path]::GetFullPath($ArtifactDirectory)
+} else {
+  [System.IO.Path]::GetFullPath((Join-Path $repositoryRoot $ArtifactDirectory))
+}
+$nativeArtifactRoot = if ([System.IO.Path]::IsPathRooted($NativeArtifactRoot)) {
+  [System.IO.Path]::GetFullPath($NativeArtifactRoot)
+} else {
+  [System.IO.Path]::GetFullPath((Join-Path $repositoryRoot $NativeArtifactRoot))
+}
 $suiteManifest = Join-Path $conformanceRoot "wire-conformance/nnrp-1-preview4/manifest.json"
 $executableSuffix = if ($IsWindows) { ".exe" } else { "" }
 $runnerExecutable = Join-Path $conformanceRoot "target/debug/nnrp-conformance-runner$executableSuffix"

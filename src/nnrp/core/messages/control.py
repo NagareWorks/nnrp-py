@@ -67,6 +67,12 @@ class CachePutFlags(IntFlag):
     REUSABLE = 0x00000002
 
 
+class SessionPriorityClass(IntEnum):
+    INTERACTIVE = 0
+    BALANCED = 1
+    BACKGROUND = 2
+
+
 class SessionPatchField(IntFlag):
     NONE = 0
     TARGET_CADENCE = 0x00000001
@@ -175,6 +181,8 @@ TRANSPORT_PROBE_STRUCT = struct.Struct("<IIQ")
 TRANSPORT_PROBE_ACK_STRUCT = struct.Struct("<IIQ")
 SESSION_MIGRATE_STRUCT = struct.Struct("<IIQQ")
 SESSION_MIGRATE_ACK_STRUCT = struct.Struct("<IQIQ")
+SESSION_OPEN_STRUCT = struct.Struct("<IHBBIIIHHIIIIQ")
+SESSION_OPEN_METADATA_LENGTH = SESSION_OPEN_STRUCT.size
 
 _FLOW_UPDATE_ALLOWED_FLAGS = (
     FlowUpdateFlags.CREDIT_VALID
@@ -182,6 +190,91 @@ _FLOW_UPDATE_ALLOWED_FLAGS = (
     | FlowUpdateFlags.BACKGROUND_ONLY
     | FlowUpdateFlags.DRAIN_IN_FLIGHT_ONLY
 )
+
+
+@dataclass(slots=True)
+class SessionOpenMetadata(_FixedWidthMetadata):
+    """Canonical 48-byte SESSION_OPEN metadata passed to admission policy."""
+
+    STRUCT: ClassVar[struct.Struct] = SESSION_OPEN_STRUCT
+
+    requested_session_id: int
+    profile_id: int
+    priority_class: SessionPriorityClass
+    session_flags: int
+    schema_id: int
+    schema_version: int
+    default_deadline_ms: int
+    max_in_flight_operations: int
+    lease_ttl_hint_ms: int
+    resume_token_bytes: int
+    auth_bytes: int
+    session_extension_bytes: int
+    client_session_tag: int
+
+    def _validate(self) -> None:
+        if not 0 <= self.requested_session_id <= 0xFFFFFFFF:
+            raise ValueError("requested_session_id must fit in u32")
+        if not 0 <= self.profile_id <= 0xFFFF:
+            raise ValueError("profile_id must fit in u16")
+        if self.session_flags & ~0x0F:
+            raise ValueError("session_flags contains unknown bits")
+        for name in (
+            "schema_id",
+            "schema_version",
+            "default_deadline_ms",
+            "lease_ttl_hint_ms",
+            "resume_token_bytes",
+            "auth_bytes",
+            "session_extension_bytes",
+        ):
+            if not 0 <= getattr(self, name) <= 0xFFFFFFFF:
+                raise ValueError(f"{name} must fit in u32")
+        if not 0 <= self.max_in_flight_operations <= 0xFFFF:
+            raise ValueError("max_in_flight_operations must fit in u16")
+        if not 0 <= self.client_session_tag <= 0xFFFFFFFFFFFFFFFF:
+            raise ValueError("client_session_tag must fit in u64")
+
+    def pack(self) -> bytes:
+        self._validate()
+        return self.STRUCT.pack(
+            self.requested_session_id,
+            self.profile_id,
+            int(self.priority_class),
+            self.session_flags,
+            self.schema_id,
+            self.schema_version,
+            self.default_deadline_ms,
+            self.max_in_flight_operations,
+            0,
+            self.lease_ttl_hint_ms,
+            self.resume_token_bytes,
+            self.auth_bytes,
+            self.session_extension_bytes,
+            self.client_session_tag,
+        )
+
+    @classmethod
+    def _from_tuple(cls, values: tuple[int, ...]) -> SessionOpenMetadata:
+        if values[8] != 0:
+            raise ValueError("SESSION_OPEN reserved0 must be zero")
+        metadata = cls(
+            requested_session_id=values[0],
+            profile_id=values[1],
+            priority_class=SessionPriorityClass(values[2]),
+            session_flags=values[3],
+            schema_id=values[4],
+            schema_version=values[5],
+            default_deadline_ms=values[6],
+            max_in_flight_operations=values[7],
+            lease_ttl_hint_ms=values[9],
+            resume_token_bytes=values[10],
+            auth_bytes=values[11],
+            session_extension_bytes=values[12],
+            client_session_tag=values[13],
+        )
+        metadata._validate()
+        return metadata
 
 
 @dataclass(slots=True)

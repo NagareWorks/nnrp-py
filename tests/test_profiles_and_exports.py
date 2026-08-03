@@ -47,10 +47,10 @@ from nnrp.client import (
     MigrationTriggerPolicy,
     MigrationTriggerSnapshot,
     NativeClientConnection,
-    NativeClientConnectionOptions,
+    NativeClientOptions,
     NativeClientProviderRoute,
-    NativeClientSessionOpenOptions,
     NativeClientSessionOptions,
+    NativeSessionRecoveryTicket,
     PathHealthSample,
     Result,
     ResultRouter,
@@ -73,7 +73,6 @@ from nnrp.client import (
     connect_client_control,
     connect_client_control_with_probe,
     connect_native_client_connection,
-    connect_native_client_session,
     plan_client_transport,
     probe_client_transport,
     resolve_client_hello_transport_policy,
@@ -163,7 +162,15 @@ from nnrp.core import (
 )
 from nnrp.enums import ErrorCode, FrameClass, HeaderFlags, MessageType, WireFormat
 from nnrp.header import HEADER_LENGTH, HEADER_MAGIC, NnrpHeader
-from nnrp.server import NativeServerProviderRoute, ServerProfile, listen_native_server
+from nnrp.server import (
+    NativeServerAcceptOptions,
+    NativeServerBootstrapOptions,
+    NativeServerProviderRoute,
+    NativeServerSessionOptions,
+    NativeServerSessionPolicyDecision,
+    ServerProfile,
+    listen_native_server,
+)
 
 
 def test_client_profile_defaults_and_overrides() -> None:
@@ -372,12 +379,11 @@ def test_connect_client_session_is_exported() -> None:
     assert "packet transport smoke/tooling" in (connect_client_session.__doc__ or "")
     assert "packet transport smoke/tooling" in (connect_client_session_with_probe.__doc__ or "")
     assert NativeClientConnection.__name__ == "NativeClientConnection"
-    assert NativeClientConnectionOptions.__name__ == "NativeClientConnectionOptions"
+    assert NativeClientOptions.__name__ == "NativeClientOptions"
     assert NativeClientProviderRoute.__name__ == "NativeClientProviderRoute"
     assert NativeClientSessionOptions.__name__ == "NativeClientSessionOptions"
-    assert NativeClientSessionOpenOptions.__name__ == "NativeClientSessionOpenOptions"
+    assert NativeSessionRecoveryTicket.__name__ == "NativeSessionRecoveryTicket"
     assert callable(connect_native_client_connection)
-    assert callable(connect_native_client_session)
     assert callable(select_client_native_backend)
     assert SessionRecoveryReport.__name__ == "SessionRecoveryReport"
     assert callable(validate_session_recovery_request)
@@ -398,26 +404,64 @@ def test_preview4_host_runtime_api_keeps_request_options_off_packet_helpers() ->
     assert NativeLifecycleEventCallback is not None
     assert NativePolledEventCallback is not None
 
-    assert set(NativeClientConnectionOptions.__annotations__) == {
-        "connection_id",
-        "connection_generation",
+    assert set(NativeClientOptions.__annotations__) == {
+        "endpoint",
+        "provider_routes",
+        "transport_policy",
+        "session_defaults",
     }
     assert set(NativeClientProviderRoute.__annotations__) == {"provider_endpoint", "security"}
     assert set(NativeServerProviderRoute.__annotations__) == {"provider_endpoint", "security"}
     client_signature = inspect.signature(connect_native_client_connection)
     server_signature = inspect.signature(listen_native_server)
-    assert "provider_routes" in client_signature.parameters
-    assert "provider_routes" in server_signature.parameters
+    assert tuple(client_signature.parameters) == (
+        "options",
+        "_transports",
+        "_artifact_path",
+        "_root",
+        "_native_platform",
+        "_library",
+        "_fallback",
+    )
+    assert tuple(server_signature.parameters) == ("options", "_transports")
+    assert inspect.iscoroutinefunction(NativeClientConnection.open_session)
+    assert inspect.iscoroutinefunction(NativeClientConnection.resume_session)
     for removed_name in ("provider_endpoint", "transport", "security"):
         assert removed_name not in client_signature.parameters
         assert removed_name not in server_signature.parameters
-    assert set(NativeClientSessionOpenOptions.__annotations__) == {
+    assert set(NativeClientSessionOptions.__annotations__) == {
         "requested_session_id",
-        "session_generation",
         "profile_id",
         "schema_id",
         "schema_version",
+        "priority_class",
+        "default_deadline_ms",
+        "max_in_flight_operations",
+        "lease_ttl_hint_ms",
+        "allow_resume",
+        "resume_token_bytes",
+        "cache_hints",
     }
+    assert set(NativeServerBootstrapOptions.__annotations__) == {
+        "endpoint",
+        "provider_routes",
+        "transport_policy",
+        "session_defaults",
+    }
+    assert set(NativeServerSessionOptions.__annotations__) == {
+        "supported_profiles",
+        "supported_cache_objects",
+        "max_cache_objects",
+        "max_cache_object_bytes",
+        "schema_registry",
+        "resume_token_bytes",
+        "max_in_flight_operations",
+        "granted_operation_credit",
+        "lease_ttl_ms",
+        "resume_window_ms",
+        "application_policy",
+    }
+    assert set(NativeServerAcceptOptions.__annotations__) == {"timeout_ms"}
     assert "deadline_unix_ms" not in SubmitRequest.__dataclass_fields__
     assert "priority_class" not in SubmitRequest.__dataclass_fields__
 
@@ -428,6 +472,37 @@ def test_preview4_host_runtime_api_keeps_request_options_off_packet_helpers() ->
     assert "priority_class" in priority_signature.parameters
     assert "deadline_unix_ms" in deadline_signature.parameters
     assert "expire_at_unix_ms" in expire_signature.parameters
+
+
+def test_contract_v9_role_option_defaults_are_exact() -> None:
+    client = NativeClientSessionOptions()
+    assert (
+        client.requested_session_id,
+        client.profile_id,
+        client.schema_id,
+        client.schema_version,
+        client.priority_class.name,
+        client.default_deadline_ms,
+        client.max_in_flight_operations,
+        client.lease_ttl_hint_ms,
+        client.allow_resume,
+        client.resume_token_bytes,
+        client.cache_hints,
+    ) == (0, 2, 0x00001001, 3, "BALANCED", 500, 4, 30_000, False, 0, ())
+
+    server = NativeServerSessionOptions()
+    assert (
+        server.supported_profiles,
+        server.supported_cache_objects,
+        server.max_cache_objects,
+        server.max_cache_object_bytes,
+        server.resume_token_bytes,
+        server.max_in_flight_operations,
+        server.granted_operation_credit,
+        server.lease_ttl_ms,
+        server.resume_window_ms,
+    ) == ((2,), (), 0, 0, 24, 4, 2, 30_000, 120_000)
+    assert asyncio.run(server.application_policy.evaluate(None)) == NativeServerSessionPolicyDecision.accept()
 
 
 def test_preview4_submit_api_matches_frozen_builder_contract() -> None:

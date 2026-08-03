@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import asyncio
 import gc
 import importlib.metadata
 import json
@@ -22,8 +23,9 @@ from typing import Any
 from uuid import uuid4
 
 from nnrp.client.native import (
+    NativeClientOptions,
     NativeClientProviderRoute,
-    NativeClientSessionOpenOptions,
+    NativeClientSessionOptions,
     connect_native_client_connection,
 )
 from nnrp.client.transport import SubmitIdentity, SubmitPolicy, SubmitRequest, TokenChunk, TokenSubmitInput
@@ -33,6 +35,7 @@ from nnrp.core.messages.control import (
     ClientHelloMetadata,
     PayloadKind,
     ServerHelloAckMetadata,
+    TransportPolicy,
 )
 from nnrp.core.messages.data import (
     BudgetPolicy,
@@ -99,7 +102,7 @@ from nnrp.schema import (
 )
 from nnrp.server import (
     NativeServerAcceptOptions,
-    NativeServerOptions,
+    NativeServerBootstrapOptions,
     NativeServerProviderRoute,
     listen_native_server,
 )
@@ -452,36 +455,30 @@ def _open_native_role_loopback(transport: str = "ipc") -> Any:
         socket_path.unlink(missing_ok=True)
     try:
         with listen_native_server(
-            "nnrp://benchmark.local",
-            provider_routes={
-                transport: NativeServerProviderRoute(provider_endpoint=provider_endpoint),
-            },
-            transport_policy=f"force_{transport}",
-            require_native=True,
-            options=NativeServerOptions(server_id=2),
+            NativeServerBootstrapOptions(
+                endpoint="nnrp://benchmark.local",
+                provider_routes={
+                    transport: NativeServerProviderRoute(provider_endpoint=provider_endpoint),
+                },
+                transport_policy=TransportPolicy[f"FORCE_{transport.upper()}"],
+            )
         ) as server:
             with ThreadPoolExecutor(max_workers=1, thread_name_prefix="nnrp-benchmark-accept") as executor:
                 accepted = executor.submit(
                     server.accept,
-                    NativeServerAcceptOptions(
-                        session_handle_id=4,
-                        session_generation=1,
-                        timeout_ms=5_000,
-                    ),
+                    NativeServerAcceptOptions(timeout_ms=5_000),
                 )
                 with connect_native_client_connection(
-                    "nnrp://benchmark.local",
-                    provider_routes={
-                        transport: NativeClientProviderRoute(provider_endpoint=provider_endpoint),
-                    },
-                    transport_policy=f"force_{transport}",
-                    require_native=True,
+                    NativeClientOptions(
+                        endpoint="nnrp://benchmark.local",
+                        provider_routes={
+                            transport: NativeClientProviderRoute(provider_endpoint=provider_endpoint),
+                        },
+                        transport_policy=TransportPolicy[f"FORCE_{transport.upper()}"],
+                    )
                 ) as client:
-                    client_session = client.open_session(
-                        NativeClientSessionOpenOptions(
-                            requested_session_id=3,
-                            session_generation=1,
-                        )
+                    client_session = asyncio.run(
+                        client.open_session(NativeClientSessionOptions(requested_session_id=3))
                     )
                     server_session = accepted.result(timeout=10)
                     try:

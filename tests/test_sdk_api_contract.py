@@ -24,7 +24,7 @@ def load_checker():
 
 def frozen_contract() -> dict[str, object]:
     return {
-        "contractVersion": 8,
+        "contractVersion": 9,
         "enums": {
             "OperationState": {
                 "values": {
@@ -38,9 +38,7 @@ def frozen_contract() -> dict[str, object]:
                     "completed": 7,
                 }
             },
-            "ResultTerminalState": {
-                "values": {"success": 0, "cancelled": 1, "dropped": 2, "error": 3}
-            },
+            "ResultTerminalState": {"values": {"success": 0, "cancelled": 1, "dropped": 2, "error": 3}},
         },
         "types": {
             "OperationLifecycleEvent": {
@@ -67,13 +65,43 @@ def frozen_contract() -> dict[str, object]:
                     {"name": "event", "type": "TerminalEvent", "required": True},
                 ]
             },
+            "SessionRecoveryTicket": {
+                "fields": [
+                    {"name": "session_id", "type": "u32", "required": True},
+                    {"name": "resume_token", "type": "bytes", "required": True},
+                    {"name": "resume_from_operation_id", "type": "u64?", "required": False},
+                    {"name": "resume_window_ms", "type": "u32", "required": True},
+                ],
+                "opaqueEncoding": {
+                    "name": "NRTK",
+                    "version": 1,
+                    "byteOrder": "little-endian",
+                    "fixedPrefixBytes": 28,
+                    "reservedFlagsMask": 65_534,
+                    "tail": "resume_token[resume_token_bytes]",
+                },
+            },
         },
         "languageProjections": {
             "python": {
                 "operationLifecycleEvent": "nnrp.runtime.OperationLifecycleEvent",
                 "terminalEvent": "nnrp.runtime.NativeTerminalEvent",
                 "result": "nnrp.NativeRuntimeResult",
+                "clientBootstrapOptions": "nnrp.client.NativeClientOptions",
+                "clientSessionOptions": "nnrp.client.NativeClientSessionOptions",
+                "sessionRecoveryTicket": "nnrp.client.NativeSessionRecoveryTicket",
+                "sessionRecoveryTicketEncode": "NativeSessionRecoveryTicket.to_bytes",
+                "sessionRecoveryTicketDecode": "NativeSessionRecoveryTicket.from_bytes",
+                "serverBootstrapOptions": "nnrp.server.NativeServerBootstrapOptions",
+                "serverSessionOptions": "nnrp.server.NativeServerSessionOptions",
+                "serverAcceptOptions": "nnrp.server.NativeServerAcceptOptions",
+                "serverSessionPolicy": "nnrp.server.NativeServerSessionPolicy",
             }
+        },
+        "roleOperations": {
+            "client.open_session": {"returns": "ClientSession", "async": True},
+            "client.resume_session": {"returns": "ClientSession", "async": True},
+            "client_session.recovery_ticket": {"returns": "SessionRecoveryTicket?", "async": False},
         },
     }
 
@@ -94,8 +122,9 @@ def test_rejects_result_contract_drift() -> None:
     checker = load_checker()
     contract = frozen_contract()
     contract["types"]["NnrpResult"]["fields"][2]["type"] = "RuntimeEvent"
-    with tempfile.TemporaryDirectory() as directory, pytest.raises(
-        SystemExit, match="NnrpResult field contract drifted"
+    with (
+        tempfile.TemporaryDirectory() as directory,
+        pytest.raises(SystemExit, match="NnrpResult field contract drifted"),
     ):
         checker.check_contract(write_contract(Path(directory), contract), ROOT)
 
@@ -104,8 +133,9 @@ def test_rejects_python_projection_drift() -> None:
     checker = load_checker()
     contract = frozen_contract()
     contract["languageProjections"]["python"]["terminalEvent"] = "nnrp.LegacyEvent"
-    with tempfile.TemporaryDirectory() as directory, pytest.raises(
-        SystemExit, match="Python NativeTerminalEvent projection drifted"
+    with (
+        tempfile.TemporaryDirectory() as directory,
+        pytest.raises(SystemExit, match="Python NativeTerminalEvent projection drifted"),
     ):
         checker.check_contract(write_contract(Path(directory), contract), ROOT)
 
@@ -137,6 +167,8 @@ def test_ast_helpers_reject_missing_contract_symbols() -> None:
         checker.method_parameters(example, "missing")
     with pytest.raises(SystemExit, match="missing Example.missing"):
         checker.method_return_annotation(example, "missing")
+    with pytest.raises(SystemExit, match="missing Example.missing"):
+        checker.method_is_async(example, "missing")
     with pytest.raises(SystemExit, match="static __all__"):
         checker.exported_names(module)
 

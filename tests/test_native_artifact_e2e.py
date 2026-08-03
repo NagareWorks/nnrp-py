@@ -15,8 +15,9 @@ import pytest
 
 from nnrp.client import SubmitIdentity, SubmitPolicy, SubmitRequest, TokenChunk, TokenSubmitInput
 from nnrp.client.native import (
+    NativeClientOptions,
     NativeClientProviderRoute,
-    NativeClientSessionOpenOptions,
+    NativeClientSessionOptions,
     connect_native_client_connection,
 )
 from nnrp.core import (
@@ -26,6 +27,7 @@ from nnrp.core import (
     ResultClass,
     ResultFlags,
     ResultPushMetadata,
+    TransportPolicy,
     build_ping_packet,
     build_pong_packet,
 )
@@ -42,8 +44,9 @@ from nnrp.runtime import NativeRuntimeEvent, PartialResultMetadata, ProgressMeta
 from nnrp.schema import StandardProfile
 from nnrp.server import (
     NativeServerAcceptOptions,
-    NativeServerOptions,
+    NativeServerBootstrapOptions,
     NativeServerProviderRoute,
+    NativeServerSessionOptions,
     listen_native_server,
 )
 
@@ -127,25 +130,26 @@ def _open_native_role_loopback() -> Any:
         socket_path.unlink(missing_ok=True)
     try:
         with listen_native_server(
-            "nnrp://abi.local",
-            provider_routes={"ipc": NativeServerProviderRoute(provider_endpoint=provider_endpoint)},
-            transport_policy="force_ipc",
-            require_native=True,
-            options=NativeServerOptions(server_id=2),
+            NativeServerBootstrapOptions(
+                "nnrp://abi.local",
+                provider_routes={"ipc": NativeServerProviderRoute(provider_endpoint=provider_endpoint)},
+                transport_policy=TransportPolicy.FORCE_IPC,
+            )
         ) as server:
             with ThreadPoolExecutor(max_workers=1, thread_name_prefix="nnrp-abi-accept") as executor:
                 accepted = executor.submit(
                     server.accept,
-                    NativeServerAcceptOptions(session_handle_id=4, session_generation=1, timeout_ms=5_000),
+                    NativeServerAcceptOptions(timeout_ms=5_000),
                 )
                 with connect_native_client_connection(
-                    "nnrp://abi.local",
-                    provider_routes={"ipc": NativeClientProviderRoute(provider_endpoint=provider_endpoint)},
-                    transport_policy="force_ipc",
-                    require_native=True,
+                    NativeClientOptions(
+                        "nnrp://abi.local",
+                        provider_routes={"ipc": NativeClientProviderRoute(provider_endpoint=provider_endpoint)},
+                        transport_policy=TransportPolicy.FORCE_IPC,
+                    )
                 ) as client:
-                    client_session = client.open_session(
-                        NativeClientSessionOpenOptions(requested_session_id=3, session_generation=1)
+                    client_session = asyncio.run(
+                        client.open_session(NativeClientSessionOptions(requested_session_id=3))
                     )
                     server_session = accepted.result(timeout=10)
                     try:
@@ -221,8 +225,24 @@ async def test_foreign_artifact_cannot_take_carrier_or_listener_ownership() -> N
 
     second_listener = await tcp.listen("tcp://127.0.0.1:0", timeout_ms=10_000)
     try:
+        session_options = NativeServerSessionOptions()
         with pytest.raises(NativeArtifactError, match="owning transport artifact"):
-            quic.adopt_server(second_listener, server_id=1, generation=1)
+            quic.adopt_server(
+                second_listener,
+                server_id=1,
+                generation=1,
+                supported_profiles=session_options.supported_profiles,
+                supported_cache_objects=session_options.supported_cache_objects,
+                max_cache_objects=session_options.max_cache_objects,
+                max_cache_object_bytes=session_options.max_cache_object_bytes,
+                resume_token_bytes=session_options.resume_token_bytes,
+                max_in_flight_operations=session_options.max_in_flight_operations,
+                granted_operation_credit=session_options.granted_operation_credit,
+                lease_ttl_ms=session_options.lease_ttl_ms,
+                resume_window_ms=session_options.resume_window_ms,
+                schema_descriptors=session_options.schema_registry.descriptors(),
+                application_policy=None,
+            )
 
         second_accept = asyncio.create_task(second_listener.accept(timeout_ms=10_000))
         second_client = await tcp.connect(second_listener.endpoint, timeout_ms=10_000)

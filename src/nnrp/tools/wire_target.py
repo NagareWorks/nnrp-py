@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import threading
 import time
@@ -11,7 +12,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from nnrp.client.native import NativeClientProviderRoute, connect_native_client_connection
+from nnrp.client.native import NativeClientOptions, NativeClientProviderRoute, connect_native_client_connection
 from nnrp.client.transport import SubmitIdentity, SubmitPolicy, SubmitRequest, TokenChunk, TokenSubmitInput
 from nnrp.core import (
     BudgetPolicy,
@@ -20,6 +21,7 @@ from nnrp.core import (
     ResultClass,
     ResultFlags,
     ResultPushMetadata,
+    TransportPolicy,
 )
 from nnrp.native import (
     NativeRuntimeError,
@@ -41,7 +43,12 @@ from nnrp.runtime import (
     RuntimeRole,
     TraceContextMetadata,
 )
-from nnrp.server.native import NativeServerAcceptOptions, NativeServerProviderRoute, listen_native_server
+from nnrp.server.native import (
+    NativeServerAcceptOptions,
+    NativeServerBootstrapOptions,
+    NativeServerProviderRoute,
+    listen_native_server,
+)
 
 _APPLICATION_ENDPOINT = "nnrp://wire-conformance.local"
 _REQUEST_BODY = b"wire-external-request"
@@ -152,14 +159,16 @@ def _run_server_scenario(
     timeout_seconds: float,
 ) -> None:
     with listen_native_server(
-        _APPLICATION_ENDPOINT,
-        provider_routes={
-            scenario.transport.name: NativeServerProviderRoute(
-                provider_endpoint=scenario.transport.endpoint,
-                security=scenario.transport.server_security,
-            )
-        },
-        transport_policy=f"force_{scenario.transport.name}",
+        NativeServerBootstrapOptions(
+            endpoint=_APPLICATION_ENDPOINT,
+            provider_routes={
+                scenario.transport.name: NativeServerProviderRoute(
+                    provider_endpoint=scenario.transport.endpoint,
+                    security=scenario.transport.server_security,
+                )
+            },
+            transport_policy=TransportPolicy[f"FORCE_{scenario.transport.name.upper()}"],
+        )
     ) as server:
         ready_event.set()
         session = server.accept(NativeServerAcceptOptions(timeout_ms=max(1, int(timeout_seconds * 1000))))
@@ -233,7 +242,7 @@ def _handle_cache_server(session: Any, *, timeout_seconds: float) -> None:
 def _run_progress_client(scenario: LiveWireScenario, *, timeout_seconds: float) -> None:
     deadline = time.monotonic() + timeout_seconds
     with _open_connection(scenario.transport, deadline=deadline) as connection:
-        session = connection.open_session()
+        session = asyncio.run(connection.open_session())
         operation = session.submit_operation(_token_submit_request(301, 1, _REQUEST_BODY))
         frames = _await_runtime_frames(
             session,
@@ -255,14 +264,16 @@ def _open_connection(transport: LiveWireTransport, *, deadline: float) -> Any:
     last_error: NativeRuntimeError | None = None
     while time.monotonic() < deadline:
         context = connect_native_client_connection(
-            _APPLICATION_ENDPOINT,
-            provider_routes={
-                transport.name: NativeClientProviderRoute(
-                    provider_endpoint=transport.endpoint,
-                    security=transport.client_security,
-                )
-            },
-            transport_policy=f"force_{transport.name}",
+            NativeClientOptions(
+                endpoint=_APPLICATION_ENDPOINT,
+                provider_routes={
+                    transport.name: NativeClientProviderRoute(
+                        provider_endpoint=transport.endpoint,
+                        security=transport.client_security,
+                    )
+                },
+                transport_policy=TransportPolicy[f"FORCE_{transport.name.upper()}"],
+            )
         )
         try:
             connection = context.__enter__()

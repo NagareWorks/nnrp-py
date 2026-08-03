@@ -522,7 +522,7 @@ def test_open_native_role_loopback_yields_roles_and_coordinates_close(monkeypatc
             return server_session
 
     class Client:
-        def open_session(self, options: object) -> object:
+        async def open_session(self, options: object) -> object:
             calls.append(("open-session", options))
             return client_session
 

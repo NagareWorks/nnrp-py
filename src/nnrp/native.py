@@ -18,9 +18,9 @@ from typing import TYPE_CHECKING, Any, Protocol, TypeVar, runtime_checkable
 from urllib.parse import SplitResult, urlsplit
 
 if TYPE_CHECKING:
-    from nnrp.client import SubmitRequest
+    from nnrp.client import NativeSessionRecoveryTicket, SubmitRequest
 
-from nnrp.core import HeaderFlags, MessageType, WireFormat
+from nnrp.core import HeaderFlags, MessageType, SessionOpenMetadata, WireFormat
 from nnrp.core.messages import (
     BudgetPolicy,
     FlowUpdateMetadata,
@@ -73,11 +73,22 @@ from nnrp.runtime.types import _FixedRuntimeMetadata
 _NATIVE_RUNTIME_SHUTDOWN_LOCK = threading.Lock()
 _NATIVE_RUNTIME_SHUTDOWNS: dict[str, tuple[Any, Any]] = {}
 _NATIVE_RUNTIME_ATEXIT_REGISTERED = False
+_NATIVE_HANDLE_ID_LOCK = threading.Lock()
+_NATIVE_NEXT_HANDLE_ID = 1
+
+
+def _allocate_native_handle_id() -> int:
+    global _NATIVE_NEXT_HANDLE_ID
+    with _NATIVE_HANDLE_ID_LOCK:
+        handle_id = _NATIVE_NEXT_HANDLE_ID
+        _NATIVE_NEXT_HANDLE_ID = 1 if handle_id == 0xFFFFFFFFFFFFFFFF else handle_id + 1
+    return handle_id
+
 
 EXPECTED_PROTOCOL_MAJOR = 1
 EXPECTED_PROTOCOL_WIRE_FORMAT = 0
 EXPECTED_ABI_MAJOR = 4
-EXPECTED_ABI_MINOR = 3
+EXPECTED_ABI_MINOR = 4
 EXPECTED_ABI_PATCH = 0
 TRANSPORT_SLOT_QUIC = 0x00000001
 TRANSPORT_SLOT_TCP = 0x00000002
@@ -1129,6 +1140,44 @@ class _NnrpBufferViewMut(ctypes.Structure):
     ]
 
 
+class _NnrpU16Slice(ctypes.Structure):
+    _fields_ = [
+        ("ptr", ctypes.POINTER(ctypes.c_uint16)),
+        ("len", ctypes.c_size_t),
+    ]
+
+
+class _NnrpU32Slice(ctypes.Structure):
+    _fields_ = [
+        ("ptr", ctypes.POINTER(ctypes.c_uint32)),
+        ("len", ctypes.c_size_t),
+    ]
+
+
+class _NnrpServerPolicyDecision(ctypes.Structure):
+    _fields_ = [
+        ("accepted", ctypes.c_uint8),
+        ("reserved0", ctypes.c_uint8 * 3),
+        ("session_error_code", ctypes.c_uint32),
+        ("diagnostic", _NnrpBufferView),
+    ]
+
+
+_NnrpServerPolicyCallback = ctypes.CFUNCTYPE(
+    ctypes.c_uint32,
+    ctypes.c_void_p,
+    _NnrpBufferView,
+    ctypes.POINTER(_NnrpServerPolicyDecision),
+)
+
+
+class _NnrpServerPolicySink(ctypes.Structure):
+    _fields_ = [
+        ("user_data", ctypes.c_void_p),
+        ("evaluate", _NnrpServerPolicyCallback),
+    ]
+
+
 class _NnrpRuntimeCapabilities(ctypes.Structure):
     _fields_ = [
         ("abi_major", ctypes.c_uint16),
@@ -1218,6 +1267,17 @@ class _NnrpServerBindRequest(ctypes.Structure):
         ("generation", ctypes.c_uint32),
         ("reserved0", ctypes.c_uint32),
         ("transport_listener", _NnrpHandle),
+        ("supported_profiles", _NnrpU16Slice),
+        ("supported_cache_objects", _NnrpU32Slice),
+        ("max_cache_objects", ctypes.c_uint64),
+        ("max_cache_object_bytes", ctypes.c_uint32),
+        ("resume_token_bytes", ctypes.c_uint32),
+        ("max_in_flight_operations", ctypes.c_uint16),
+        ("granted_operation_credit", ctypes.c_uint16),
+        ("lease_ttl_ms", ctypes.c_uint32),
+        ("resume_window_ms", ctypes.c_uint32),
+        ("schema_registry", _NnrpHandle),
+        ("application_policy", _NnrpServerPolicySink),
     ]
 
 
@@ -1225,10 +1285,19 @@ class _NnrpSessionOpenRequest(ctypes.Structure):
     _fields_ = [
         ("connection", _NnrpHandle),
         ("requested_session_id", ctypes.c_uint32),
+        ("session_handle_id", ctypes.c_uint64),
         ("generation", ctypes.c_uint32),
         ("profile_id", ctypes.c_uint16),
+        ("priority_class", ctypes.c_uint8),
+        ("allow_resume", ctypes.c_uint8),
         ("schema_id", ctypes.c_uint32),
         ("schema_version", ctypes.c_uint32),
+        ("default_deadline_ms", ctypes.c_uint32),
+        ("max_in_flight_operations", ctypes.c_uint16),
+        ("reserved0", ctypes.c_uint16),
+        ("lease_ttl_hint_ms", ctypes.c_uint32),
+        ("resume_token_bytes", ctypes.c_uint32),
+        ("cache_hints", _NnrpU32Slice),
     ]
 
 
@@ -1400,13 +1469,8 @@ class _NnrpCacheLeaseResult(ctypes.Structure):
 
 class _NnrpSessionResumeRequest(ctypes.Structure):
     _fields_ = [
-        ("connection", _NnrpHandle),
-        ("requested_session_id", ctypes.c_uint32),
-        ("generation", ctypes.c_uint32),
-        ("profile_id", ctypes.c_uint16),
-        ("schema_id", ctypes.c_uint32),
-        ("schema_version", ctypes.c_uint32),
-        ("resume_token_bytes", ctypes.c_uint32),
+        ("open", _NnrpSessionOpenRequest),
+        ("recovery_ticket", _NnrpBufferView),
     ]
 
 
@@ -1531,6 +1595,12 @@ class NativeRuntimeEntrypoints:
             "nnrp_client_resume_session",
             _NnrpFfiStatus,
             [_NnrpSessionResumeRequest, ctypes.POINTER(_NnrpHandle), ctypes.POINTER(_NnrpSessionRecoveryOutcome)],
+        )
+        self.client_session_recovery_ticket = _bind_native_function(
+            library,
+            "nnrp_client_session_recovery_ticket",
+            _NnrpFfiStatus,
+            [_NnrpHandle, ctypes.POINTER(_NnrpHandle), ctypes.POINTER(_NnrpBufferView)],
         )
         self.submit = _bind_native_function(
             library,
@@ -2065,19 +2135,78 @@ class NativeTransportListener:
         *,
         server_id: int,
         generation: int,
+        supported_profiles: Iterable[int],
+        supported_cache_objects: Iterable[int],
+        max_cache_objects: int,
+        max_cache_object_bytes: int,
+        resume_token_bytes: int,
+        max_in_flight_operations: int,
+        granted_operation_credit: int,
+        lease_ttl_ms: int,
+        resume_window_ms: int,
+        schema_descriptors: Iterable[Any],
+        application_policy: Callable[[SessionOpenMetadata], tuple[bool, int, str | None]] | None,
     ) -> NativeRuntimeServer:
         _validate_u64("server_id", server_id)
         _validate_u32("generation", generation)
         with self._lock:
             self._require_open()
-            request = _NnrpServerBindRequest(
-                server_id,
-                generation,
-                0,
-                self._handle.to_ffi(),
-            )
-            output = _NnrpHandle()
-            status = entrypoints.server_bind(request, ctypes.byref(output))
+            profile_slice, profile_owner = _u16_slice_from_values(supported_profiles)
+            cache_slice, cache_owner = _u32_slice_from_values(supported_cache_objects)
+            schema_registry = NativeSchemaRegistry.create(entrypoints)
+            policy_callback: Any | None = None
+            diagnostic_owner_box: list[object | None] = [None]
+            try:
+                for descriptor in schema_descriptors:
+                    schema_registry.install(descriptor)
+                if application_policy is None:
+                    policy_sink = _NnrpServerPolicySink(None, _NnrpServerPolicyCallback())
+                else:
+
+                    @_NnrpServerPolicyCallback
+                    def policy_callback(
+                        _user_data: int,
+                        metadata_view: _NnrpBufferView,
+                        out_decision: ctypes.POINTER(_NnrpServerPolicyDecision),
+                    ) -> int:
+                        try:
+                            open_metadata = SessionOpenMetadata.unpack(_copy_buffer_view(metadata_view))
+                            accepted, session_error_code, diagnostic = application_policy(open_metadata)
+                            diagnostic_view, diagnostic_owner = _buffer_view_from_payload(
+                                b"" if diagnostic is None else diagnostic.encode("utf-8")
+                            )
+                            diagnostic_owner_box[0] = diagnostic_owner
+                            out_decision.contents.accepted = int(accepted)
+                            out_decision.contents.reserved0[:] = (0, 0, 0)
+                            out_decision.contents.session_error_code = session_error_code
+                            out_decision.contents.diagnostic = diagnostic_view
+                            return FFI_STATUS_OK
+                        except BaseException:
+                            return FFI_STATUS_CALLBACK_REJECTED
+
+                    policy_sink = _NnrpServerPolicySink(None, policy_callback)
+                request = _NnrpServerBindRequest(
+                    server_id,
+                    generation,
+                    0,
+                    self._handle.to_ffi(),
+                    profile_slice,
+                    cache_slice,
+                    max_cache_objects,
+                    max_cache_object_bytes,
+                    resume_token_bytes,
+                    max_in_flight_operations,
+                    granted_operation_credit,
+                    lease_ttl_ms,
+                    resume_window_ms,
+                    schema_registry.handle.to_ffi(),
+                    policy_sink,
+                )
+                output = _NnrpHandle()
+                status = entrypoints.server_bind(request, ctypes.byref(output))
+            finally:
+                schema_registry.close()
+                del profile_owner, cache_owner
             raise_for_native_status(status)
             self._closed = True
             self._handle = NativeHandle.invalid()
@@ -2085,6 +2214,7 @@ class NativeTransportListener:
                 entrypoints,
                 NativeConnectionHandle.from_ffi(output),
                 self._provider.name,
+                policy_callback,
             )
 
     def _require_open(self) -> None:
@@ -2152,6 +2282,17 @@ class NativeTransportBinding:
         *,
         server_id: int,
         generation: int,
+        supported_profiles: Iterable[int],
+        supported_cache_objects: Iterable[int],
+        max_cache_objects: int,
+        max_cache_object_bytes: int,
+        resume_token_bytes: int,
+        max_in_flight_operations: int,
+        granted_operation_credit: int,
+        lease_ttl_ms: int,
+        resume_window_ms: int,
+        schema_descriptors: Iterable[Any],
+        application_policy: Callable[[SessionOpenMetadata], tuple[bool, int, str | None]] | None,
     ) -> NativeRuntimeServer:
         self._require_available()
         if listener._entrypoints is not self.entrypoints:
@@ -2162,6 +2303,17 @@ class NativeTransportBinding:
             self._role_entrypoints,
             server_id=server_id,
             generation=generation,
+            supported_profiles=supported_profiles,
+            supported_cache_objects=supported_cache_objects,
+            max_cache_objects=max_cache_objects,
+            max_cache_object_bytes=max_cache_object_bytes,
+            resume_token_bytes=resume_token_bytes,
+            max_in_flight_operations=max_in_flight_operations,
+            granted_operation_credit=granted_operation_credit,
+            lease_ttl_ms=lease_ttl_ms,
+            resume_window_ms=resume_window_ms,
+            schema_descriptors=schema_descriptors,
+            application_policy=application_policy,
         )
 
     @property
@@ -2912,6 +3064,8 @@ _NATIVE_RUNTIME_DIAGNOSTIC_OK = NativeRuntimeDiagnostic(
     related_operation_id=0,
     related_frame_id=0,
 )
+
+
 @dataclass(frozen=True, slots=True)
 class _NativeRuntimeEventContext:
     kind: int
@@ -3569,10 +3723,24 @@ class NativeRuntimeClient:
         generation: int,
         transport_listener: NativeTransportListener,
     ) -> NativeRuntimeServer:
+        from nnrp.schema import token_delta_schema_descriptor
+
+        descriptor = token_delta_schema_descriptor()
         return transport_listener._adopt_server_role(
             self.entrypoints,
             server_id=server_id,
             generation=generation,
+            supported_profiles=(int(descriptor.profile_id),),
+            supported_cache_objects=(),
+            max_cache_objects=0,
+            max_cache_object_bytes=0,
+            resume_token_bytes=24,
+            max_in_flight_operations=4,
+            granted_operation_credit=2,
+            lease_ttl_ms=30_000,
+            resume_window_ms=120_000,
+            schema_descriptors=(descriptor,),
+            application_policy=None,
         )
 
 
@@ -3581,6 +3749,7 @@ class NativeRuntimeServer:
     entrypoints: NativeRuntimeEntrypoints
     handle: NativeConnectionHandle
     transport_name: str
+    _policy_callback: Any | None = field(default=None, repr=False, compare=False)
     _closed: bool = field(default=False, init=False, repr=False, compare=False)
     _accept_ticket: NativeHandle | None = field(default=None, init=False, repr=False, compare=False)
 
@@ -3672,24 +3841,40 @@ class NativeRuntimeConnection:
         self,
         *,
         requested_session_id: int,
-        generation: int,
         profile_id: int,
         schema_id: int,
         schema_version: int,
         priority_class: NativeSessionPriorityClass | str = NativeSessionPriorityClass.BALANCED,
+        default_deadline_ms: int = 500,
+        max_in_flight_operations: int = 4,
+        lease_ttl_hint_ms: int = 30_000,
+        allow_resume: bool = False,
+        resume_token_bytes: int = 0,
+        cache_hints: Iterable[int] = (),
     ) -> NativeRuntimeSession:
         self._ensure_open()
         selected_priority_class = NativeSessionPriorityClass(priority_class)
+        cache_hint_slice, cache_hint_owner = _u32_slice_from_values(cache_hints)
         request = _NnrpSessionOpenRequest(
-            self.handle.to_ffi(),
-            requested_session_id,
-            generation,
-            profile_id,
-            schema_id,
-            schema_version,
+            connection=self.handle.to_ffi(),
+            requested_session_id=requested_session_id,
+            session_handle_id=_allocate_native_handle_id(),
+            generation=1,
+            profile_id=profile_id,
+            priority_class=selected_priority_class.code,
+            allow_resume=int(allow_resume),
+            schema_id=schema_id,
+            schema_version=schema_version,
+            default_deadline_ms=default_deadline_ms,
+            max_in_flight_operations=max_in_flight_operations,
+            reserved0=0,
+            lease_ttl_hint_ms=lease_ttl_hint_ms,
+            resume_token_bytes=resume_token_bytes,
+            cache_hints=cache_hint_slice,
         )
         out_session = _NnrpHandle()
         status = self.entrypoints.client_open_session(request, ctypes.byref(out_session))
+        del cache_hint_owner
         raise_for_native_status(status)
         return NativeRuntimeSession(
             self.entrypoints,
@@ -3701,28 +3886,46 @@ class NativeRuntimeConnection:
     def resume_session(
         self,
         *,
+        recovery_ticket: bytes | bytearray | memoryview,
         requested_session_id: int,
-        generation: int,
         profile_id: int,
         schema_id: int,
         schema_version: int,
         resume_token_bytes: int,
         priority_class: NativeSessionPriorityClass | str = NativeSessionPriorityClass.BALANCED,
+        default_deadline_ms: int = 500,
+        max_in_flight_operations: int = 4,
+        lease_ttl_hint_ms: int = 30_000,
+        cache_hints: Iterable[int] = (),
     ) -> tuple[NativeRuntimeSession, NativeSessionRecoveryOutcome]:
         self._ensure_open()
         selected_priority_class = NativeSessionPriorityClass(priority_class)
+        cache_hint_slice, cache_hint_owner = _u32_slice_from_values(cache_hints)
+        ticket_view, ticket_owner = _buffer_view_from_payload(recovery_ticket)
         request = _NnrpSessionResumeRequest(
-            self.handle.to_ffi(),
-            requested_session_id,
-            generation,
-            profile_id,
-            schema_id,
-            schema_version,
-            resume_token_bytes,
+            _NnrpSessionOpenRequest(
+                connection=self.handle.to_ffi(),
+                requested_session_id=requested_session_id,
+                session_handle_id=_allocate_native_handle_id(),
+                generation=1,
+                profile_id=profile_id,
+                priority_class=selected_priority_class.code,
+                allow_resume=1,
+                schema_id=schema_id,
+                schema_version=schema_version,
+                default_deadline_ms=default_deadline_ms,
+                max_in_flight_operations=max_in_flight_operations,
+                reserved0=0,
+                lease_ttl_hint_ms=lease_ttl_hint_ms,
+                resume_token_bytes=resume_token_bytes,
+                cache_hints=cache_hint_slice,
+            ),
+            ticket_view,
         )
         out_session = _NnrpHandle()
         out_outcome = _NnrpSessionRecoveryOutcome()
         status = self.entrypoints.client_resume_session(request, ctypes.byref(out_session), ctypes.byref(out_outcome))
+        del cache_hint_owner, ticket_owner
         raise_for_native_status(status)
         return (
             NativeRuntimeSession(
@@ -3870,6 +4073,29 @@ class NativeRuntimeSession:
     _pending_events: list[NativePolledEvent] = field(default_factory=list, init=False, repr=False, compare=False)
     _poll_lock: threading.Lock = field(default_factory=threading.Lock, init=False, repr=False, compare=False)
     _next_runtime_frame_id: int = field(default=1, init=False, repr=False, compare=False)
+
+    def recovery_ticket(self) -> NativeSessionRecoveryTicket | None:
+        self._ensure_open()
+        out_buffer = _NnrpHandle()
+        out_ticket = _NnrpBufferView()
+        status = self.entrypoints.client_session_recovery_ticket(
+            self.handle.to_ffi(),
+            ctypes.byref(out_buffer),
+            ctypes.byref(out_ticket),
+        )
+        native_status = NativeStatus.from_ffi(status)
+        if native_status.status_code == FFI_STATUS_INVALID_ARGUMENT and native_status.detail_code == 104:
+            return None
+        raise_for_native_status(native_status)
+        owner = NativeHandle.from_ffi(out_buffer)
+        owner.require_kind(HANDLE_KIND_BUFFER)
+        try:
+            encoded = _copy_buffer_view(out_ticket)
+        finally:
+            raise_for_native_status(self.entrypoints.buffer_release(owner.to_ffi()))
+        from nnrp.client.native import NativeSessionRecoveryTicket
+
+        return NativeSessionRecoveryTicket.from_bytes(encoded)
 
     def await_event(self) -> NativeRuntimePollResult:
         self._ensure_open()
@@ -6315,6 +6541,26 @@ def _buffer_view_from_payload(payload: bytes | bytearray | memoryview) -> tuple[
     except TypeError:
         buffer = ctypes.c_char_p(view.tobytes())
     return _NnrpBufferView(ctypes.cast(buffer, ctypes.c_void_p), view.nbytes), buffer
+
+
+def _u16_slice_from_values(values: Iterable[int]) -> tuple[_NnrpU16Slice, object | None]:
+    normalized = tuple(int(value) for value in values)
+    if any(not 0 <= value <= 0xFFFF for value in normalized):
+        raise ValueError("u16 slice values must fit in u16")
+    if not normalized:
+        return _NnrpU16Slice(ctypes.POINTER(ctypes.c_uint16)(), 0), None
+    owner = (ctypes.c_uint16 * len(normalized))(*normalized)
+    return _NnrpU16Slice(ctypes.cast(owner, ctypes.POINTER(ctypes.c_uint16)), len(normalized)), owner
+
+
+def _u32_slice_from_values(values: Iterable[int]) -> tuple[_NnrpU32Slice, object | None]:
+    normalized = tuple(int(value) for value in values)
+    if any(not 0 <= value <= 0xFFFFFFFF for value in normalized):
+        raise ValueError("u32 slice values must fit in u32")
+    if not normalized:
+        return _NnrpU32Slice(ctypes.POINTER(ctypes.c_uint32)(), 0), None
+    owner = (ctypes.c_uint32 * len(normalized))(*normalized)
+    return _NnrpU32Slice(ctypes.cast(owner, ctypes.POINTER(ctypes.c_uint32)), len(normalized)), owner
 
 
 def _normalize_transport_packets(

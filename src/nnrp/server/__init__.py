@@ -3,8 +3,11 @@
 from nnrp.server.native import (
     NativeServer,
     NativeServerAcceptOptions,
-    NativeServerOptions,
+    NativeServerBootstrapOptions,
     NativeServerProviderRoute,
+    NativeServerSessionOptions,
+    NativeServerSessionPolicy,
+    NativeServerSessionPolicyDecision,
     listen_native_server,
 )
 from nnrp.server.profile import ServerProfile
@@ -24,8 +27,11 @@ __all__ = [
     "ClientHelloContext",
     "NativeServer",
     "NativeServerAcceptOptions",
-    "NativeServerOptions",
+    "NativeServerBootstrapOptions",
     "NativeServerProviderRoute",
+    "NativeServerSessionOptions",
+    "NativeServerSessionPolicy",
+    "NativeServerSessionPolicyDecision",
     "ServerProfile",
     "accept_server_connection",
     "accept_server_session",

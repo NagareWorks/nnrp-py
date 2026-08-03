@@ -6,7 +6,7 @@ import json
 from pathlib import Path
 from typing import Any
 
-EXPECTED_CONTRACT_VERSION = 8
+EXPECTED_CONTRACT_VERSION = 9
 EXPECTED_OPERATION_STATES = {
     "ACCEPTED": 0,
     "RUNNING": 1,
@@ -72,6 +72,13 @@ def method_return_annotation(class_node: ast.ClassDef, name: str) -> str | None:
     raise SystemExit(f"Python SDK is missing {class_node.name}.{name}")
 
 
+def method_is_async(class_node: ast.ClassDef, name: str) -> bool:
+    for node in class_node.body:
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == name:
+            return isinstance(node, ast.AsyncFunctionDef)
+    raise SystemExit(f"Python SDK is missing {class_node.name}.{name}")
+
+
 def exported_names(module: ast.Module) -> set[str]:
     for node in module.body:
         if (
@@ -96,8 +103,7 @@ def check_contract(contract_path: Path, source_root: Path) -> None:
 
     enums = contract["enums"]
     require(
-        {name.upper(): value for name, value in enums["OperationState"]["values"].items()}
-        == EXPECTED_OPERATION_STATES,
+        {name.upper(): value for name, value in enums["OperationState"]["values"].items()} == EXPECTED_OPERATION_STATES,
         "OperationState contract drifted",
     )
     require(
@@ -137,6 +143,29 @@ def check_contract(contract_path: Path, source_root: Path) -> None:
         "NnrpResult field contract drifted",
     )
 
+    recovery_ticket = types["SessionRecoveryTicket"]
+    require(
+        field_shape(recovery_ticket)
+        == [
+            ("session_id", "u32", True),
+            ("resume_token", "bytes", True),
+            ("resume_from_operation_id", "u64?", False),
+            ("resume_window_ms", "u32", True),
+        ],
+        "SessionRecoveryTicket field contract drifted",
+    )
+    encoding = recovery_ticket.get("opaqueEncoding")
+    require(
+        encoding is not None
+        and encoding.get("name") == "NRTK"
+        and encoding.get("version") == 1
+        and encoding.get("byteOrder") == "little-endian"
+        and encoding.get("fixedPrefixBytes") == 28
+        and encoding.get("reservedFlagsMask") == 65_534
+        and encoding.get("tail") == "resume_token[resume_token_bytes]",
+        "SessionRecoveryTicket opaque encoding drifted",
+    )
+
     python_projection = contract["languageProjections"]["python"]
     require(
         python_projection.get("operationLifecycleEvent") == "nnrp.runtime.OperationLifecycleEvent",
@@ -150,10 +179,43 @@ def check_contract(contract_path: Path, source_root: Path) -> None:
         python_projection.get("result") == "nnrp.NativeRuntimeResult",
         "Python NativeRuntimeResult projection drifted",
     )
+    expected_recovery_projections = {
+        "clientBootstrapOptions": "nnrp.client.NativeClientOptions",
+        "clientSessionOptions": "nnrp.client.NativeClientSessionOptions",
+        "sessionRecoveryTicket": "nnrp.client.NativeSessionRecoveryTicket",
+        "sessionRecoveryTicketEncode": "NativeSessionRecoveryTicket.to_bytes",
+        "sessionRecoveryTicketDecode": "NativeSessionRecoveryTicket.from_bytes",
+        "serverBootstrapOptions": "nnrp.server.NativeServerBootstrapOptions",
+        "serverSessionOptions": "nnrp.server.NativeServerSessionOptions",
+        "serverAcceptOptions": "nnrp.server.NativeServerAcceptOptions",
+        "serverSessionPolicy": "nnrp.server.NativeServerSessionPolicy",
+    }
+    require(
+        all(python_projection.get(name) == value for name, value in expected_recovery_projections.items()),
+        "Python recovery and role option projections drifted",
+    )
+
+    role_operations = contract.get("roleOperations", {})
+    require(
+        role_operations.get("client.open_session", {}).get("returns") == "ClientSession"
+        and role_operations.get("client.resume_session", {}).get("returns") == "ClientSession"
+        and role_operations.get("client_session.recovery_ticket", {}).get("returns") == "SessionRecoveryTicket?",
+        "recovery role operations drifted",
+    )
+    require(
+        role_operations.get("client.open_session", {}).get("async") is True
+        and role_operations.get("client.resume_session", {}).get("async") is True
+        and role_operations.get("client_session.recovery_ticket", {}).get("async") is False,
+        "recovery role operation async semantics drifted",
+    )
 
     runtime_module = parse_module(source_root / "src" / "nnrp" / "runtime" / "types.py")
     runtime_public_module = parse_module(source_root / "src" / "nnrp" / "runtime" / "__init__.py")
     native_module = parse_module(source_root / "src" / "nnrp" / "native.py")
+    client_module = parse_module(source_root / "src" / "nnrp" / "client" / "native.py")
+    client_public_module = parse_module(source_root / "src" / "nnrp" / "client" / "__init__.py")
+    server_module = parse_module(source_root / "src" / "nnrp" / "server" / "native.py")
+    server_public_module = parse_module(source_root / "src" / "nnrp" / "server" / "__init__.py")
     root_module = parse_module(source_root / "src" / "nnrp" / "__init__.py")
     require(
         enum_values(class_definition(runtime_module, "OperationState")) == EXPECTED_OPERATION_STATES,
@@ -178,8 +240,7 @@ def check_contract(contract_path: Path, source_root: Path) -> None:
     )
     runtime_exports = exported_names(runtime_public_module)
     require(
-        {"OperationLifecycleEvent", "NativeTerminalEvent", "OperationState", "ResultTerminalState"}
-        <= runtime_exports,
+        {"OperationLifecycleEvent", "NativeTerminalEvent", "OperationState", "ResultTerminalState"} <= runtime_exports,
         "nnrp.runtime is missing frozen terminal API exports",
     )
     root_exports = exported_names(root_module)
@@ -197,6 +258,112 @@ def check_contract(contract_path: Path, source_root: Path) -> None:
             method_return_annotation(session, method_name) == "NativeRuntimeResult",
             f"{method_name} return type drifted from NativeRuntimeResult",
         )
+    require(
+        method_parameters(session, "recovery_ticket") == ["self"],
+        "NativeRuntimeSession.recovery_ticket signature drifted",
+    )
+    require(
+        method_return_annotation(session, "recovery_ticket") == "NativeSessionRecoveryTicket | None",
+        "NativeRuntimeSession.recovery_ticket return type drifted",
+    )
+
+    require(
+        annotated_fields(class_definition(client_module, "NativeClientSessionOptions"))
+        == [
+            "requested_session_id",
+            "profile_id",
+            "schema_id",
+            "schema_version",
+            "priority_class",
+            "default_deadline_ms",
+            "max_in_flight_operations",
+            "lease_ttl_hint_ms",
+            "allow_resume",
+            "resume_token_bytes",
+            "cache_hints",
+        ],
+        "NativeClientSessionOptions fields drifted",
+    )
+    require(
+        annotated_fields(class_definition(client_module, "NativeClientOptions"))
+        == ["endpoint", "provider_routes", "transport_policy", "session_defaults"],
+        "NativeClientOptions fields drifted",
+    )
+    require(
+        annotated_fields(class_definition(client_module, "NativeSessionRecoveryTicket"))
+        == ["session_id", "resume_token", "resume_from_operation_id", "resume_window_ms"],
+        "NativeSessionRecoveryTicket fields drifted",
+    )
+    client_connection = class_definition(client_module, "NativeClientConnection")
+    require(
+        method_parameters(client_connection, "open_session") == ["self", "options"],
+        "NativeClientConnection.open_session signature drifted",
+    )
+    require(
+        method_parameters(client_connection, "resume_session") == ["self", "ticket", "options"],
+        "NativeClientConnection.resume_session signature drifted",
+    )
+    require(
+        method_is_async(client_connection, "open_session") and method_is_async(client_connection, "resume_session"),
+        "NativeClientConnection open and resume operations must be async",
+    )
+
+    require(
+        annotated_fields(class_definition(server_module, "NativeServerSessionOptions"))
+        == [
+            "supported_profiles",
+            "supported_cache_objects",
+            "max_cache_objects",
+            "max_cache_object_bytes",
+            "schema_registry",
+            "resume_token_bytes",
+            "max_in_flight_operations",
+            "granted_operation_credit",
+            "lease_ttl_ms",
+            "resume_window_ms",
+            "application_policy",
+        ],
+        "NativeServerSessionOptions fields drifted",
+    )
+    require(
+        annotated_fields(class_definition(server_module, "NativeServerBootstrapOptions"))
+        == ["endpoint", "provider_routes", "transport_policy", "session_defaults"],
+        "NativeServerBootstrapOptions fields drifted",
+    )
+    require(
+        annotated_fields(class_definition(server_module, "NativeServerAcceptOptions")) == ["timeout_ms"],
+        "NativeServerAcceptOptions fields drifted",
+    )
+    require(
+        annotated_fields(class_definition(server_module, "NativeServerSessionPolicyDecision"))
+        == ["accepted", "session_error_code", "diagnostic"],
+        "NativeServerSessionPolicyDecision fields drifted",
+    )
+
+    client_exports = exported_names(client_public_module)
+    require(
+        {"NativeClientOptions", "NativeClientSessionOptions", "NativeSessionRecoveryTicket"} <= client_exports,
+        "nnrp.client is missing frozen v9 exports",
+    )
+    require(
+        {"NativeClientConnectionOptions", "NativeClientSessionOpenOptions", "connect_native_client_session"}.isdisjoint(
+            client_exports
+        ),
+        "nnrp.client still exports legacy role options",
+    )
+    server_exports = exported_names(server_public_module)
+    require(
+        {
+            "NativeServerBootstrapOptions",
+            "NativeServerSessionOptions",
+            "NativeServerAcceptOptions",
+            "NativeServerSessionPolicy",
+            "NativeServerSessionPolicyDecision",
+        }
+        <= server_exports,
+        "nnrp.server is missing frozen v9 exports",
+    )
+    require("NativeServerOptions" not in server_exports, "nnrp.server still exports legacy NativeServerOptions")
 
 
 def main() -> None:

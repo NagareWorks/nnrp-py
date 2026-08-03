@@ -63,7 +63,7 @@ def test_ci_runs_independent_process_wire_conformance() -> None:
     workflow = _read_ci_workflow()
 
     assert "wire-conformance:" in workflow
-    assert "NNRP_RS_SOURCE_COMMIT: f9cb68b4f958f45a9d844716f786a56ea439bc96" in workflow
+    assert "NNRP_RS_SOURCE_COMMIT: 7963f7e9f94be79ce4922f2b06990bd49c257bbb" in workflow
     assert "Checkout pinned nnrp-rs source" in workflow
     assert "ref: ${{ env.NNRP_RS_SOURCE_COMMIT }}" in workflow
     for transport in ("tcp", "quic", "ipc", "websocket"):
@@ -75,6 +75,15 @@ def test_ci_runs_independent_process_wire_conformance() -> None:
     assert "Run independent-process Preview4 wire E2E" in workflow
     assert "run-plan" not in workflow
     assert "- wire-conformance" in workflow
+
+
+def test_wire_e2e_accepts_isolated_absolute_artifact_roots() -> None:
+    script = WIRE_E2E_SCRIPT.read_text(encoding="utf-8")
+
+    assert "IsPathRooted($ArtifactDirectory)" in script
+    assert "GetFullPath($ArtifactDirectory)" in script
+    assert "IsPathRooted($NativeArtifactRoot)" in script
+    assert "GetFullPath($NativeArtifactRoot)" in script
 
 
 def test_ci_wire_conformance_declares_preview4_modes_transports_and_capabilities() -> None:

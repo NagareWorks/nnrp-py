@@ -176,9 +176,11 @@ def test_run_server_scenario_dispatches_typed_handlers(
 
     @contextmanager
     def listen(*args, **kwargs):
-        route = kwargs["provider_routes"]["tcp"]
+        assert not kwargs
+        options = args[0]
+        route = options.provider_routes["tcp"]
         assert route.provider_endpoint == "tcp://127.0.0.1:19091"
-        assert kwargs["transport_policy"] == "force_tcp"
+        assert options.transport_policy.name == "FORCE_TCP"
         yield server
 
     monkeypatch.setattr(wire_target, "listen_native_server", listen)
@@ -246,7 +248,11 @@ def test_server_handlers_exchange_typed_control_frames(monkeypatch: pytest.Monke
 
 def test_progress_client_validates_frames_and_terminal_result(monkeypatch: pytest.MonkeyPatch) -> None:
     session = _FakeSession()
-    connection = SimpleNamespace(open_session=lambda: session, close=lambda: None)
+
+    async def open_session():
+        return session
+
+    connection = SimpleNamespace(open_session=open_session, close=lambda: None)
 
     @contextmanager
     def open_connection(*args, **kwargs):

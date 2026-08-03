@@ -6,6 +6,18 @@ runtime-object, transport-provider, and wire-conformance surfaces needed by NNRP
 This document is the preview4 release note entry point. Historical preview3 performance notes remain in their own
 benchmark documents and are not used as preview4 release criteria.
 
+## Unreleased Contract V9 Work
+
+- Adopts the frozen transport-neutral client and server bootstrap/session option models without exposing native handles
+  or generations.
+- Makes client session open and resume asynchronous, keeps one connection reusable across many sessions, and obtains
+  recovery tickets only from the Rust runtime.
+- Persists recovery tickets with the canonical NRTK version 1 envelope and keeps resume tokens opaque.
+- Evaluates the asynchronous server admission policy for every session open, including when the host already owns an
+  active event loop.
+- Requires Rust FFI ABI 4.4 for the expanded role requests and runtime-issued recovery-ticket boundary. The release
+  version and artifact pin remain unset until the audited Rust release exists.
+
 ## 1.0.0rc4.post12
 
 - Pins Rust `1.0.0-preview.4.21` at commit `bcebd1b` and requires the exact FFI ABI `4.3.0`.

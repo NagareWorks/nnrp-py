@@ -2,11 +2,15 @@
 
 from __future__ import annotations
 
+import asyncio
+import struct
+import threading
 from collections.abc import Iterator, Mapping, Sequence
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
-from types import TracebackType
+from types import MappingProxyType, TracebackType
 from typing import Any, Literal, cast
 
 from nnrp._native_routes import (
@@ -31,6 +35,7 @@ from nnrp.native import (
     NativeRuntimeOperation,
     NativeRuntimeResult,
     NativeRuntimeSession,
+    NativeSessionPriorityClass,
     NativeStatus,
     NativeTransportBinding,
     NativeTransportCandidateDiagnostic,
@@ -43,6 +48,7 @@ from nnrp.native import (
     NativeTransportSelectionErrorCode,
     NativeWouldBlockError,
     NnrpEndpoint,
+    _allocate_native_handle_id,
     _select_native_transport_provider_from_providers,
     discover_native_transport_providers,
     load_native_transport_binding,
@@ -66,23 +72,131 @@ from nnrp.schema import TOKEN_DELTA_SCHEMA_ID, TOKEN_DELTA_SCHEMA_VERSION, Stand
 NativeControlTarget = NativeRuntimeSession
 
 _MAX_CANCELLED_RESULT_SUPPRESSIONS_PER_SESSION = 4096
+_RECOVERY_TICKET_PREFIX = struct.Struct("<4sHHIIIQ")
+_RECOVERY_TICKET_MAGIC = b"NRTK"
+_RECOVERY_TICKET_VERSION = 1
+_RECOVERY_TICKET_OPERATION_PRESENT = 0x0001
+
+
+@dataclass(frozen=True, slots=True, init=False)
+class NativeSessionRecoveryTicket:
+    session_id: int
+    resume_token: bytes
+    resume_from_operation_id: int | None
+    resume_window_ms: int
+
+    def __init__(self, *_args: object, **_kwargs: object) -> None:
+        raise TypeError("recovery tickets are created only by the runtime or from_bytes()")
+
+    @classmethod
+    def _create(
+        cls,
+        *,
+        session_id: int,
+        resume_token: bytes,
+        resume_from_operation_id: int | None,
+        resume_window_ms: int,
+    ) -> NativeSessionRecoveryTicket:
+        if not 1 <= session_id <= 0xFFFFFFFF:
+            raise ValueError("session_id must be a non-zero u32")
+        if not resume_token:
+            raise ValueError("resume_token must be non-empty")
+        if len(resume_token) > 0xFFFFFFFF:
+            raise ValueError("resume_token length must fit in u32")
+        if resume_from_operation_id is not None and not 1 <= resume_from_operation_id <= 0xFFFFFFFFFFFFFFFF:
+            raise ValueError("resume_from_operation_id must be a non-zero u64 when present")
+        if not 0 <= resume_window_ms <= 0xFFFFFFFF:
+            raise ValueError("resume_window_ms must fit in u32")
+        ticket = object.__new__(cls)
+        object.__setattr__(ticket, "session_id", session_id)
+        object.__setattr__(ticket, "resume_token", bytes(resume_token))
+        object.__setattr__(ticket, "resume_from_operation_id", resume_from_operation_id)
+        object.__setattr__(ticket, "resume_window_ms", resume_window_ms)
+        return ticket
+
+    def to_bytes(self) -> bytes:
+        flags = _RECOVERY_TICKET_OPERATION_PRESENT if self.resume_from_operation_id is not None else 0
+        return (
+            _RECOVERY_TICKET_PREFIX.pack(
+                _RECOVERY_TICKET_MAGIC,
+                _RECOVERY_TICKET_VERSION,
+                flags,
+                self.session_id,
+                len(self.resume_token),
+                self.resume_window_ms,
+                self.resume_from_operation_id or 0,
+            )
+            + self.resume_token
+        )
+
+    @classmethod
+    def from_bytes(cls, encoded: bytes | bytearray | memoryview) -> NativeSessionRecoveryTicket:
+        payload = bytes(encoded)
+        if len(payload) < _RECOVERY_TICKET_PREFIX.size:
+            raise ValueError("recovery ticket is truncated")
+        magic, version, flags, session_id, token_bytes, window_ms, operation_id = _RECOVERY_TICKET_PREFIX.unpack_from(
+            payload
+        )
+        if magic != _RECOVERY_TICKET_MAGIC:
+            raise ValueError("recovery ticket magic is invalid")
+        if version != _RECOVERY_TICKET_VERSION:
+            raise ValueError("recovery ticket version is unsupported")
+        if flags & ~_RECOVERY_TICKET_OPERATION_PRESENT:
+            raise ValueError("recovery ticket contains reserved flags")
+        expected_bytes = _RECOVERY_TICKET_PREFIX.size + token_bytes
+        if len(payload) != expected_bytes:
+            raise ValueError("recovery ticket length does not match its token length")
+        if flags & _RECOVERY_TICKET_OPERATION_PRESENT:
+            resume_from_operation_id: int | None = operation_id
+        else:
+            if operation_id != 0:
+                raise ValueError("recovery ticket carries an operation id without its presence flag")
+            resume_from_operation_id = None
+        return cls._create(
+            session_id=session_id,
+            resume_token=payload[_RECOVERY_TICKET_PREFIX.size :],
+            resume_from_operation_id=resume_from_operation_id,
+            resume_window_ms=window_ms,
+        )
 
 
 @dataclass(frozen=True, slots=True)
 class NativeClientSessionOptions:
-    connection_id: int = 1
-    connection_generation: int = 1
-    requested_session_id: int = 1
-    session_generation: int = 1
+    requested_session_id: int = 0
     profile_id: int = int(StandardProfile.TOKEN)
     schema_id: int = TOKEN_DELTA_SCHEMA_ID
     schema_version: int = TOKEN_DELTA_SCHEMA_VERSION
+    priority_class: NativeSessionPriorityClass = NativeSessionPriorityClass.BALANCED
+    default_deadline_ms: int = 500
+    max_in_flight_operations: int = 4
+    lease_ttl_hint_ms: int = 30_000
+    allow_resume: bool = False
+    resume_token_bytes: int = 0
+    cache_hints: tuple[int, ...] = ()
 
-
-@dataclass(frozen=True, slots=True)
-class NativeClientConnectionOptions:
-    connection_id: int = 1
-    connection_generation: int = 1
+    def __post_init__(self) -> None:
+        if not 0 <= self.requested_session_id <= 0xFFFFFFFF:
+            raise ValueError("requested_session_id must fit in u32")
+        if not 0 <= self.profile_id <= 0xFFFF:
+            raise ValueError("profile_id must fit in u16")
+        for name, value in (
+            ("schema_id", self.schema_id),
+            ("schema_version", self.schema_version),
+            ("default_deadline_ms", self.default_deadline_ms),
+            ("lease_ttl_hint_ms", self.lease_ttl_hint_ms),
+            ("resume_token_bytes", self.resume_token_bytes),
+        ):
+            if not 0 <= value <= 0xFFFFFFFF:
+                raise ValueError(f"{name} must fit in u32")
+        if not 1 <= self.max_in_flight_operations <= 0xFFFF:
+            raise ValueError("max_in_flight_operations must be a non-zero u16")
+        if not self.allow_resume and self.resume_token_bytes != 0:
+            raise ValueError("resume_token_bytes requires allow_resume")
+        normalized_hints = tuple(int(hint) for hint in self.cache_hints)
+        if any(not 0 <= hint <= 0xFFFFFFFF for hint in normalized_hints):
+            raise ValueError("cache_hints values must fit in u32")
+        object.__setattr__(self, "priority_class", NativeSessionPriorityClass(self.priority_class))
+        object.__setattr__(self, "cache_hints", normalized_hints)
 
 
 @dataclass(frozen=True, slots=True)
@@ -92,20 +206,30 @@ class NativeClientProviderRoute:
 
 
 @dataclass(frozen=True, slots=True)
+class NativeClientOptions:
+    endpoint: str | NnrpEndpoint
+    provider_routes: Mapping[str, NativeClientProviderRoute] = field(default_factory=dict)
+    transport_policy: TransportPolicy = TransportPolicy.AUTO
+    session_defaults: NativeClientSessionOptions = field(default_factory=NativeClientSessionOptions)
+
+    def __post_init__(self) -> None:
+        endpoint = self.endpoint if isinstance(self.endpoint, NnrpEndpoint) else parse_nnrp_endpoint(self.endpoint)
+        routes = MappingProxyType(dict(self.provider_routes))
+        if any(not isinstance(route, NativeClientProviderRoute) for route in routes.values()):
+            raise TypeError("provider_routes values must be NativeClientProviderRoute")
+        if not isinstance(self.session_defaults, NativeClientSessionOptions):
+            raise TypeError("session_defaults must be NativeClientSessionOptions")
+        object.__setattr__(self, "endpoint", endpoint)
+        object.__setattr__(self, "provider_routes", routes)
+        object.__setattr__(self, "transport_policy", TransportPolicy(self.transport_policy))
+
+
+@dataclass(frozen=True, slots=True)
 class _ResolvedClientRoute:
     endpoint: NativeTransportEndpoint | None
     security: NativeTransportClientSecurity | None
     route_resolved: bool
     security_satisfied: bool
-
-
-@dataclass(frozen=True, slots=True)
-class NativeClientSessionOpenOptions:
-    requested_session_id: int = 1
-    session_generation: int = 1
-    profile_id: int = int(StandardProfile.TOKEN)
-    schema_id: int = TOKEN_DELTA_SCHEMA_ID
-    schema_version: int = TOKEN_DELTA_SCHEMA_VERSION
 
 
 @dataclass(slots=True)
@@ -138,24 +262,80 @@ class NativeClientOperationScope:
 class NativeClientConnection:
     connection: NativeRuntimeConnection
     transport_selection: NativeTransportSelection
+    session_defaults: NativeClientSessionOptions = field(default_factory=NativeClientSessionOptions)
     _sessions: list[NativeRuntimeSession] = field(default_factory=list, init=False, repr=False)
     _cancelled_frames: dict[int, dict[int, None]] = field(default_factory=dict, init=False, repr=False)
     _cancelled_operations: dict[int, dict[int, None]] = field(default_factory=dict, init=False, repr=False)
     _closed: bool = field(default=False, init=False, repr=False)
+    _role_executor: ThreadPoolExecutor = field(
+        default_factory=lambda: ThreadPoolExecutor(max_workers=1, thread_name_prefix="nnrp-client-role"),
+        init=False,
+        repr=False,
+    )
+    _close_lock: threading.Lock = field(default_factory=threading.Lock, init=False, repr=False)
 
     @property
     def active_transport_name(self) -> str:
         return self.transport_selection.selected_transport_name
 
-    def open_session(self, options: NativeClientSessionOpenOptions | None = None) -> NativeRuntimeSession:
+    async def open_session(self, options: NativeClientSessionOptions | None = None) -> NativeRuntimeSession:
+        loop = asyncio.get_running_loop()
+        with self._close_lock:
+            self._ensure_open()
+            pending = self._role_executor.submit(self._open_session, options)
+        return await asyncio.wrap_future(pending, loop=loop)
+
+    def _open_session(self, options: NativeClientSessionOptions | None = None) -> NativeRuntimeSession:
         self._ensure_open()
-        resolved_options = options or NativeClientSessionOpenOptions()
+        resolved_options = options or self.session_defaults
         session = self.connection.open_session(
             requested_session_id=resolved_options.requested_session_id,
-            generation=resolved_options.session_generation,
             profile_id=resolved_options.profile_id,
             schema_id=resolved_options.schema_id,
             schema_version=resolved_options.schema_version,
+            priority_class=resolved_options.priority_class,
+            default_deadline_ms=resolved_options.default_deadline_ms,
+            max_in_flight_operations=resolved_options.max_in_flight_operations,
+            lease_ttl_hint_ms=resolved_options.lease_ttl_hint_ms,
+            allow_resume=resolved_options.allow_resume,
+            resume_token_bytes=resolved_options.resume_token_bytes,
+            cache_hints=resolved_options.cache_hints,
+        )
+        self._sessions.append(session)
+        return session
+
+    async def resume_session(
+        self,
+        ticket: NativeSessionRecoveryTicket,
+        options: NativeClientSessionOptions | None = None,
+    ) -> NativeRuntimeSession:
+        loop = asyncio.get_running_loop()
+        with self._close_lock:
+            self._ensure_open()
+            pending = self._role_executor.submit(self._resume_session, ticket, options)
+        return await asyncio.wrap_future(pending, loop=loop)
+
+    def _resume_session(
+        self,
+        ticket: NativeSessionRecoveryTicket,
+        options: NativeClientSessionOptions | None = None,
+    ) -> NativeRuntimeSession:
+        self._ensure_open()
+        if not isinstance(ticket, NativeSessionRecoveryTicket):
+            raise TypeError("ticket must be NativeSessionRecoveryTicket")
+        resolved_options = options or self.session_defaults
+        session, _outcome = self.connection.resume_session(
+            recovery_ticket=ticket.to_bytes(),
+            requested_session_id=ticket.session_id,
+            profile_id=resolved_options.profile_id,
+            schema_id=resolved_options.schema_id,
+            schema_version=resolved_options.schema_version,
+            priority_class=resolved_options.priority_class,
+            default_deadline_ms=resolved_options.default_deadline_ms,
+            max_in_flight_operations=resolved_options.max_in_flight_operations,
+            lease_ttl_hint_ms=resolved_options.lease_ttl_hint_ms,
+            resume_token_bytes=max(resolved_options.resume_token_bytes, len(ticket.resume_token)),
+            cache_hints=resolved_options.cache_hints,
         )
         self._sessions.append(session)
         return session
@@ -471,8 +651,15 @@ class NativeClientConnection:
         )
 
     def close(self) -> None:
-        if self._closed:
-            return
+        with self._close_lock:
+            if self._closed:
+                return
+            try:
+                self._role_executor.submit(self._close_role_resources).result()
+            finally:
+                self._role_executor.shutdown(wait=True)
+
+    def _close_role_resources(self) -> None:
         try:
             try:
                 for session in reversed(self._sessions):
@@ -828,9 +1015,7 @@ def _select_client_transport(
             supported_transports=tuple(sorted(peer_supported_transports)),
             candidate_readiness=readiness,
             probe_observations=observations,
-            provider_availability={
-                binding.provider.metadata.id: binding.local_available for binding in bindings
-            },
+            provider_availability={binding.provider.metadata.id: binding.local_available for binding in bindings},
             provider_diagnostics={binding.provider.metadata.id: binding.diagnostic for binding in bindings},
         )
     except NativeTransportSelectionError as native_error:
@@ -882,97 +1067,50 @@ def _resolve_client_transport_bindings(
 
 @contextmanager
 def connect_native_client_connection(
-    endpoint: str | NnrpEndpoint,
+    options: NativeClientOptions,
     *,
-    provider_routes: Mapping[str, NativeClientProviderRoute] | None = None,
-    transports: Sequence[NativeTransportBinding] | None = None,
-    transport_policy: TransportPolicy | str | int = TransportPolicy.AUTO,
-    artifact_path: Path | str | None = None,
-    root: Path | str | None = None,
-    native_platform: NativePlatform | None = None,
-    library: Any | None = None,
-    fallback: NativeRuntimeBackend | None = None,
-    require_native: bool = False,
-    options: NativeClientConnectionOptions | None = None,
+    _transports: Sequence[NativeTransportBinding] | None = None,
+    _artifact_path: Path | str | None = None,
+    _root: Path | str | None = None,
+    _native_platform: NativePlatform | None = None,
+    _library: Any | None = None,
+    _fallback: NativeRuntimeBackend | None = None,
 ) -> Iterator[NativeClientConnection]:
-    application_endpoint = endpoint if isinstance(endpoint, NnrpEndpoint) else parse_nnrp_endpoint(endpoint)
-    resolved_options = options or NativeClientConnectionOptions()
+    if not isinstance(options, NativeClientOptions):
+        raise TypeError("options must be NativeClientOptions")
+    application_endpoint = cast(NnrpEndpoint, options.endpoint)
     selection, route, binding = _select_client_transport(
         application_endpoint,
-        provider_routes=provider_routes,
-        transport_policy=transport_policy,
-        artifact_path=artifact_path,
-        root=root,
-        native_platform=native_platform,
-        library=library,
-        transports=transports,
+        provider_routes=options.provider_routes,
+        transport_policy=options.transport_policy,
+        artifact_path=_artifact_path,
+        root=_root,
+        native_platform=_native_platform,
+        library=_library,
+        transports=_transports,
     )
     if route.endpoint is None:
         raise AssertionError("selected client route must have a resolved endpoint")
     carrier = binding._connect(route.endpoint, route.security, 0, 0)
     try:
         connection = (
-            fallback.connect(
-                connection_id=resolved_options.connection_id,
-                generation=resolved_options.connection_generation,
+            _fallback.connect(
+                connection_id=_allocate_native_handle_id(),
+                generation=1,
                 transport_connection=carrier,
             )
-            if fallback is not None and not require_native
+            if _fallback is not None
             else binding.adopt_client(
                 carrier,
-                connection_id=resolved_options.connection_id,
-                generation=resolved_options.connection_generation,
+                connection_id=_allocate_native_handle_id(),
+                generation=1,
             )
         )
     except BaseException:
         carrier._close()
         raise
-    client_connection = NativeClientConnection(connection, selection)
+    client_connection = NativeClientConnection(connection, selection, options.session_defaults)
     try:
         yield client_connection
     finally:
         client_connection.close()
-
-
-@contextmanager
-def connect_native_client_session(
-    endpoint: str | NnrpEndpoint,
-    *,
-    provider_routes: Mapping[str, NativeClientProviderRoute] | None = None,
-    transports: Sequence[NativeTransportBinding] | None = None,
-    transport_policy: TransportPolicy | str | int = TransportPolicy.AUTO,
-    artifact_path: Path | str | None = None,
-    root: Path | str | None = None,
-    native_platform: NativePlatform | None = None,
-    library: Any | None = None,
-    fallback: NativeRuntimeBackend | None = None,
-    require_native: bool = False,
-    options: NativeClientSessionOptions | None = None,
-) -> Iterator[NativeRuntimeSession]:
-    resolved_options = options or NativeClientSessionOptions()
-    connection_options = NativeClientConnectionOptions(
-        connection_id=resolved_options.connection_id,
-        connection_generation=resolved_options.connection_generation,
-    )
-    session_options = NativeClientSessionOpenOptions(
-        requested_session_id=resolved_options.requested_session_id,
-        session_generation=resolved_options.session_generation,
-        profile_id=resolved_options.profile_id,
-        schema_id=resolved_options.schema_id,
-        schema_version=resolved_options.schema_version,
-    )
-    with connect_native_client_connection(
-        endpoint,
-        provider_routes=provider_routes,
-        transports=transports,
-        transport_policy=transport_policy,
-        artifact_path=artifact_path,
-        root=root,
-        native_platform=native_platform,
-        library=library,
-        fallback=fallback,
-        require_native=require_native,
-        options=connection_options,
-    ) as client_connection:
-        session = client_connection.open_session(session_options)
-        yield session

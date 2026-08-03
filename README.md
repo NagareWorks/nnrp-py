@@ -58,51 +58,52 @@ The top-level `nnrp` package keeps top-level re-exports for common imports, whil
 Host integrations should start with the Rust-backed client helpers in `nnrp.client`. The Python layer owns a small, Pythonic surface, while protocol-critical session, operation, polling, and status behavior is delegated to the packaged `nnrp-rs` native runtime.
 
 ```python
+import asyncio
+
 from nnrp.client import (
-	NativeClientConnectionOptions,
-	NativeClientSessionOpenOptions,
-	connect_native_client_connection,
+    NativeClientOptions,
+    NativeClientSessionOptions,
+    SubmitIdentity,
+    SubmitPolicy,
+    SubmitRequest,
+    TokenChunk,
+    TokenSubmitInput,
+    connect_native_client_connection,
 )
 
-with connect_native_client_connection(
-	"nnrp://runtime.example/session/default",
-	options=NativeClientConnectionOptions(connection_id=7),
-	require_native=True,
-) as connection:
-	session = connection.open_session(
-		NativeClientSessionOpenOptions(
-			requested_session_id=42,
-			profile_id=1,
-			schema_id=1,
-			schema_version=1,
-		)
-	)
-	result = connection.submit_and_poll_result(
-		session,
-		operation_id=1001,
-		frame_id=1,
-		body=b"tensor-or-typed-payload-bytes",
-		max_events=8,
-	)
-	print(result.terminal_state)
-	runtime_event = result.event.as_runtime()
-	if runtime_event is not None:
-		print(runtime_event.tail.body)
-	else:
-		print(result.event.as_lifecycle().state)
+
+async def main() -> None:
+    with connect_native_client_connection(
+        NativeClientOptions("nnrp://runtime.example/session/default")
+    ) as connection:
+        session = await connection.open_session(
+            NativeClientSessionOptions(requested_session_id=42)
+        )
+        request = SubmitRequest.token(
+            TokenSubmitInput(
+                identity=SubmitIdentity(operation_id=1001, frame_id=1),
+                policy=SubmitPolicy(),
+                chunks=(TokenChunk(b"token-or-typed-payload-bytes"),),
+            )
+        )
+        result = connection.submit_and_poll_result(session, request, max_events=8)
+        print(result.terminal_state)
+
+
+asyncio.run(main())
 ```
 
 The native helpers provide:
 
 1. `connect_native_client_connection()` for one Rust-backed connection that can own multiple sessions.
-2. `NativeClientConnection.open_session()` for explicit session creation.
+2. `await NativeClientConnection.open_session()` for explicit session creation.
 3. `NativeClientConnection.submit_and_poll_result()` for a host-friendly submit/result roundtrip over native session operations.
 4. `NativeRuntimeSession.submit_operation()` and `NativeClientConnection.operation_scope()` for operation handles, parent/group metadata, and cancellation on exceptional exits.
 5. `NativeClientConnection.poll_result()`, native async polling helpers, and callback dispatch helpers for result/event delivery.
 6. `NativeClientConnection.cancel_frame()` and `NativeClientConnection.cancel_operation()` for operation-aware cancellation.
 7. Named Preview4 runtime-control helpers for scheduling, route hints, execution hints, capability negotiation, and profile degradation. Raw control codes are internal.
 
-By default the native loader searches `nnrp/native_artifacts/<os>-<arch>/` inside the installed package. Set `NNRP_NATIVE_ARTIFACT_ROOT` when testing an external artifact tree. Pass `require_native=True` in host code that must fail fast instead of using an explicitly supplied test or diagnostic fallback.
+By default the native loader searches `nnrp/native_artifacts/<os>-<arch>/` inside the installed package. Set `NNRP_NATIVE_ARTIFACT_ROOT` only when testing an external artifact tree. Public host APIs require the native runtime; fallback injection is private test infrastructure.
 
 The production binding is the ABI 4 carrier/role surface exposed through `ctypes`. A provider artifact opens the TCP, QUIC, IPC, or WebSocket carrier, then transfers that carrier to the Rust client or server role. Submit, cancellation, server receive/result delivery, and event polling remain coarse role calls; the Python package does not ship a second compact-result runtime or a compiled CFFI side path.
 
@@ -113,35 +114,35 @@ Polled native events and results expose Python-owned `bytes` payload snapshots. 
 Client control helpers build the frozen preview4 metadata payloads and send one coarse `nnrp_runtime_frame_send` ABI call through the selected session. Applications do not construct raw frames or pass control codes:
 
 ```python
-from nnrp.client import NativeClientSessionOpenOptions, connect_native_client_connection
+import asyncio
 
-with connect_native_client_connection(
-	"nnrp://runtime.example/session/default",
-	require_native=True,
-) as connection:
-	session = connection.open_session(NativeClientSessionOpenOptions(requested_session_id=42))
+from nnrp.client import NativeClientOptions, NativeClientSessionOptions, connect_native_client_connection
 
-	connection.update_runtime_priority(
-		session,
-		operation_id=1001,
-		control_sequence=1,
-		priority_class=2,
-		priority_delta=4,
-	)
-	connection.cancel_runtime_operation(
-		session,
-		operation_id=1001,
-		control_sequence=2,
-		reason_code=7,
-		diagnostic=b"superseded by fresher frame",
-	)
-	connection.send_runtime_route_hint(
-		connection.connection,
-		operation_id=1002,
-		route_id=9,
-		executor_class=3,
-		body=b"local-subagent",
-	)
+
+async def configure_session() -> None:
+    with connect_native_client_connection(
+        NativeClientOptions("nnrp://runtime.example/session/default")
+    ) as connection:
+        session = await connection.open_session(
+            NativeClientSessionOptions(requested_session_id=42)
+        )
+        connection.update_runtime_priority(
+            session,
+            operation_id=1001,
+            control_sequence=1,
+            priority_class=2,
+            priority_delta=4,
+        )
+        connection.cancel_runtime_operation(
+            session,
+            operation_id=1001,
+            control_sequence=2,
+            reason_code=7,
+            diagnostic=b"superseded by fresher frame",
+        )
+
+
+asyncio.run(configure_session())
 ```
 
 Server helpers expose the same runtime-control frame family from `ServerSession` without forcing callers to manually build packets:
@@ -177,7 +178,7 @@ await session.send_backpressure(
 )
 ```
 
-These helpers are runtime-control API conveniences, not a pure-Python runtime replacement. Host hot paths should use native artifacts with `require_native=True`; packet builders under `nnrp.core` remain for fixtures, diagnostics, and conformance tooling.
+These helpers are runtime-control API conveniences, not a pure-Python runtime replacement. Public host APIs require the packaged native artifacts; packet builders under `nnrp.core` remain for fixtures, diagnostics, and conformance tooling.
 
 ### Preview4 Transport Providers
 
@@ -223,33 +224,38 @@ implementation, and live connect/listen paths invoke that provider rather than t
 Cache leases and schema validation follow the same host/runtime split. Python code passes stable identifiers, descriptors, and payload views into the native runtime; lease policy, schema matching, and diagnostics remain owned by Rust:
 
 ```python
+import asyncio
+
 from nnrp import (
-	CacheObjectIdentity,
-	cache_query,
-	cache_touch,
-	token_delta_payload_descriptor,
-	token_delta_schema_descriptor,
+    CacheObjectIdentity,
+    cache_query,
+    cache_touch,
+    token_delta_payload_descriptor,
+    token_delta_schema_descriptor,
 )
-from nnrp.client import NativeClientSessionOpenOptions, connect_native_client_connection
+from nnrp.client import NativeClientOptions, NativeClientSessionOptions, connect_native_client_connection
 
-with connect_native_client_connection(
-	"nnrp://runtime.example/session/default",
-	require_native=True,
-) as connection:
-	session = connection.open_session(NativeClientSessionOpenOptions(requested_session_id=42))
 
-	cache = session.cache_backend(now_ms=10_000, ttl_ms=30_000)
-	identity = CacheObjectIdentity(cache_namespace=1, object_kind=1, cache_key_hi=0, cache_key_lo=7)
-	lease = cache_query(cache, identity)
-	if lease.succeeded and lease.lease is not None and lease.object_version is not None:
-		lease.lease.validate_version(lease.object_version.object_version)
-		cache_touch(cache, identity, ttl_ms=60_000)
+async def use_cache_and_schema() -> None:
+    with connect_native_client_connection(
+        NativeClientOptions("nnrp://runtime.example/session/default")
+    ) as connection:
+        session = await connection.open_session(
+            NativeClientSessionOptions(requested_session_id=42)
+        )
+        cache = session.cache_backend(now_ms=10_000, ttl_ms=30_000)
+        identity = CacheObjectIdentity(cache_namespace=1, object_kind=1, cache_key_hi=0, cache_key_lo=7)
+        lease = cache_query(cache, identity)
+        if lease.succeeded and lease.lease is not None and lease.object_version is not None:
+            lease.lease.validate_version(lease.object_version.object_version)
+            cache_touch(cache, identity, ttl_ms=60_000)
 
-	registry = connection.schema_registry()
-	registry.install(token_delta_schema_descriptor())
-	registry.validate_typed_payload_binding(
-		token_delta_payload_descriptor(offset=0, length=128)
-	)
+        registry = connection.schema_registry()
+        registry.install(token_delta_schema_descriptor())
+        registry.validate_typed_payload_binding(token_delta_payload_descriptor(offset=0, length=128))
+
+
+asyncio.run(use_cache_and_schema())
 ```
 
 `profile_id = 0` means unspecified. It must not be treated as an implicit tensor profile. Tensor and token payloads are peer standard profiles, while structured-event, tool-delta, and workflow-state remain payload families routed through schema/profile bindings before any profile-private body decoding happens.
@@ -417,33 +423,23 @@ The replay helpers currently provide:
 The canonical host shape is a long-lived native connection with one or more explicit sessions. Hosts submit operations through a session and consume results through the native result/event pump.
 
 ```python
-from nnrp.client import NativeClientSessionOpenOptions, connect_native_client_connection
+import asyncio
 
-with connect_native_client_connection(
-	"nnrp://runtime.example/session/default",
-	require_native=True,
-) as connection:
-	interactive = connection.open_session(
-		NativeClientSessionOpenOptions(requested_session_id=10, profile_id=1)
-	)
-	batch = connection.open_session(
-		NativeClientSessionOpenOptions(requested_session_id=11, profile_id=2)
-	)
+from nnrp.client import NativeClientOptions, NativeClientSessionOptions, connect_native_client_connection
 
-	interactive_op = interactive.submit_operation(
-		operation_id=2001,
-		frame_id=1,
-		body=b"interactive-frame",
-	)
-	batch_op = batch.submit_operation(
-		operation_id=3001,
-		frame_id=1,
-		body=b"batch-frame",
-	)
 
-	interactive_result = connection.poll_result(interactive, interactive_op, max_events=16)
-	batch_result = connection.poll_result(batch, batch_op, max_events=16)
-	print(interactive_result.terminal_state, batch_result.terminal_state)
+async def open_sessions() -> None:
+    with connect_native_client_connection(
+        NativeClientOptions("nnrp://runtime.example/session/default")
+    ) as connection:
+        interactive, batch = await asyncio.gather(
+            connection.open_session(NativeClientSessionOptions(requested_session_id=10)),
+            connection.open_session(NativeClientSessionOptions(requested_session_id=11)),
+        )
+        print(interactive.requested_session_id, batch.requested_session_id)
+
+
+asyncio.run(open_sessions())
 ```
 
 Hosts should keep submission and result consumption decoupled so multiple operations can remain in flight while result, cancellation, control, and diagnostic events continue to arrive on the same connection. The connection context closes owned sessions on exit.

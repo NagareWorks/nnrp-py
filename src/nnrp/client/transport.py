@@ -80,8 +80,7 @@ _PAYLOAD_KIND_ORDER = (
 )
 _PACKET_TRANSPORT_TOOLING_WARNING = (
     "connect_client_session and connect_client_session_with_probe are packet transport smoke/tooling helpers; "
-    "host runtime integrations should use nnrp.client.connect_native_client_connection or "
-    "nnrp.client.connect_native_client_session."
+    "host runtime integrations should use nnrp.client.connect_native_client_connection."
 )
 
 

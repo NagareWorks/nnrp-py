@@ -3752,6 +3752,8 @@ class NativeRuntimeServer:
     _policy_callback: Any | None = field(default=None, repr=False, compare=False)
     _closed: bool = field(default=False, init=False, repr=False, compare=False)
     _accept_ticket: NativeHandle | None = field(default=None, init=False, repr=False, compare=False)
+    _accept_session_handle_id: int | None = field(default=None, init=False, repr=False, compare=False)
+    _accept_generation: int | None = field(default=None, init=False, repr=False, compare=False)
 
     def accept_session(
         self,
@@ -3778,6 +3780,13 @@ class NativeRuntimeServer:
             accept_ticket = NativeHandle.from_ffi(out_accept)
             accept_ticket.require_kind(HANDLE_KIND_SERVER_ACCEPT)
             object.__setattr__(self, "_accept_ticket", accept_ticket)
+            object.__setattr__(self, "_accept_session_handle_id", session_handle_id)
+            object.__setattr__(self, "_accept_generation", generation)
+        elif session_handle_id != self._accept_session_handle_id or generation != self._accept_generation:
+            raise NativeInvalidStateError(
+                NativeStatus(FFI_STATUS_INVALID_STATE),
+                "pending native server accept ticket requires the original session handle id and generation",
+            )
 
         wait_request = _NnrpServerAcceptWaitRequest(accept_ticket.to_ffi(), timeout_ms, 0)
         status = self.entrypoints.server_accept_wait(wait_request)
@@ -3793,6 +3802,8 @@ class NativeRuntimeServer:
         status = self.entrypoints.server_accept_claim(claim_request, ctypes.byref(result))
         raise_for_native_status(status)
         object.__setattr__(self, "_accept_ticket", None)
+        object.__setattr__(self, "_accept_session_handle_id", None)
+        object.__setattr__(self, "_accept_generation", None)
         try:
             active_transport_id = TransportId(int(result.active_transport_id))
         except ValueError as error:
@@ -3810,14 +3821,10 @@ class NativeRuntimeServer:
     def close(self) -> None:
         self._ensure_open()
         first_error: BaseException | None = None
-        accept_ticket = self._accept_ticket
-        if accept_ticket is not None:
-            try:
-                raise_for_native_status(self.entrypoints.server_accept_release(accept_ticket.to_ffi()))
-            except BaseException as error:
-                first_error = error
-            finally:
-                object.__setattr__(self, "_accept_ticket", None)
+        try:
+            self._release_pending_accept_ticket()
+        except BaseException as error:
+            first_error = error
         try:
             raise_for_native_status(self.entrypoints.client_close_connection(self.handle.to_ffi()))
         except BaseException as error:
@@ -3825,6 +3832,17 @@ class NativeRuntimeServer:
         object.__setattr__(self, "_closed", True)
         if first_error is not None:
             raise first_error
+
+    def _release_pending_accept_ticket(self) -> None:
+        accept_ticket = self._accept_ticket
+        if accept_ticket is None:
+            return
+        try:
+            raise_for_native_status(self.entrypoints.server_accept_release(accept_ticket.to_ffi()))
+        finally:
+            object.__setattr__(self, "_accept_ticket", None)
+            object.__setattr__(self, "_accept_session_handle_id", None)
+            object.__setattr__(self, "_accept_generation", None)
 
     def _ensure_open(self) -> None:
         if self._closed:

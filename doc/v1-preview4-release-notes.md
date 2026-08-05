@@ -6,6 +6,15 @@ runtime-object, transport-provider, and wire-conformance surfaces needed by NNRP
 This document is the preview4 release note entry point. Historical preview3 performance notes remain in their own
 benchmark documents and are not used as preview4 release criteria.
 
+## 1.0.0rc4.post14
+
+- Completes the Rust ABI `4.4.0` asynchronous server admission-policy boundary: the native callback only copies the
+  request and returns, Python evaluates policy on a bounded worker pool, and completion is reported by request id.
+- Waits for pending policy completions during server shutdown and preserves the first cleanup failure while still
+  releasing pending accept tickets and closing the native connection.
+- Covers the corrected path with unit tests, four-provider native loopback tests, adapter conformance, and the full
+  Preview4 wire and host-route matrix against Rust `1.0.0-preview.4.22`.
+
 ## 1.0.0rc4.post13
 
 - Adopts the frozen transport-neutral client and server bootstrap/session option models without exposing native handles
@@ -82,7 +91,7 @@ benchmark documents and are not used as preview4 release criteria.
 ## Transport Providers
 
 - Rust preview4 artifacts are transport scoped and expose TCP, QUIC, IPC, and WebSocket capability slots.
-- Python `1.0.0rc4.post13` consumes Rust `1.0.0-preview.4.22` and exposes the frozen provider cost, preference,
+- Python `1.0.0rc4.post14` consumes Rust `1.0.0-preview.4.22` and exposes the frozen provider cost, preference,
   frame-limit, limitation, probe-metrics, and ordered candidate models without a Python-specific weighted score.
 - Multi-provider selection follows the cross-SDK deterministic comparator and reports every eligible or rejected
   candidate; probe samples bind to the stable provider id carried by the owning artifact.
@@ -105,7 +114,7 @@ benchmark documents and are not used as preview4 release criteria.
 
 ## Release Gates
 
-- Python `1.0.0rc4.post13` pins Rust `1.0.0-preview.4.22` and requires the exact ABI `4.4.0`.
+- Python `1.0.0rc4.post14` pins Rust `1.0.0-preview.4.22` and requires the exact ABI `4.4.0`.
 - The release candidate must pass the complete Python suite with at least 90% total and incremental line coverage, all
   selected adapter-conformance cases, all independent-process frame scenarios, and all native host-route scenarios
   without skips or synthesized success paths.

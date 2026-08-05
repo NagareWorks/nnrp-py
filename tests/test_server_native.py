@@ -396,6 +396,35 @@ def test_async_session_policy_runs_without_an_application_loop() -> None:
     )
 
 
+def test_session_policy_rejects_non_awaitable_evaluation() -> None:
+    metadata = SessionOpenMetadata(1, 2, SessionPriorityClass.BALANCED, 0, 3, 4, 5, 6, 7, 8, 9, 10, 11)
+
+    class InvalidPolicy:
+        def evaluate(self, _open_metadata):
+            return NativeServerSessionPolicyDecision.accept()
+
+    with pytest.raises(TypeError, match="must return a coroutine"):
+        server_native_module._evaluate_session_policy(InvalidPolicy(), metadata)
+
+
+def test_session_policy_rejects_non_coroutine_awaitable() -> None:
+    metadata = SessionOpenMetadata(1, 2, SessionPriorityClass.BALANCED, 0, 3, 4, 5, 6, 7, 8, 9, 10, 11)
+
+    class CustomAwaitable:
+        def __await__(self):
+            async def resolve():
+                return NativeServerSessionPolicyDecision.accept()
+
+            return resolve().__await__()
+
+    class InvalidPolicy:
+        def evaluate(self, _open_metadata):
+            return CustomAwaitable()
+
+    with pytest.raises(TypeError, match="must return a coroutine"):
+        server_native_module._evaluate_session_policy(InvalidPolicy(), metadata)
+
+
 def test_native_server_policy_decision_rejects_inconsistent_states() -> None:
     with pytest.raises(ValueError, match="fit in u32"):
         NativeServerSessionPolicyDecision(False, -1)

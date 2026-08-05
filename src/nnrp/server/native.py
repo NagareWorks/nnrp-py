@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import asyncio
+import atexit
 import time
 from collections.abc import Iterator, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from dataclasses import dataclass, field
+from inspect import iscoroutine
 from types import MappingProxyType
 from typing import Protocol
 
@@ -51,6 +53,7 @@ from nnrp.schema import SchemaRegistryCatalog, StandardProfile, token_delta_sche
 _DEFAULT_ACCEPT_TIMEOUT_MS = 5_000
 _ACCEPT_POLL_SLICE_MS = 1
 _SESSION_POLICY_EXECUTOR = ThreadPoolExecutor(max_workers=4, thread_name_prefix="nnrp-session-policy")
+atexit.register(_SESSION_POLICY_EXECUTOR.shutdown, wait=True, cancel_futures=True)
 
 
 @dataclass(frozen=True, slots=True)
@@ -94,6 +97,8 @@ def _evaluate_session_policy(
     open_metadata: SessionOpenMetadata,
 ) -> NativeServerSessionPolicyDecision:
     evaluation = policy.evaluate(open_metadata)
+    if not iscoroutine(evaluation):
+        raise TypeError("application_policy.evaluate(open) must return a coroutine")
     try:
         asyncio.get_running_loop()
     except RuntimeError:

@@ -4,6 +4,7 @@ import asyncio
 import ctypes
 import json
 import struct
+import threading
 import time
 from collections.abc import Callable
 from dataclasses import replace
@@ -83,6 +84,7 @@ from nnrp.native import (
     RUNTIME_CONTROL_FEATURE_FLAGS,
     RUNTIME_OBJECT_FEATURE_FLAGS,
     SCHEMA_ERROR_HASH_CONFLICT,
+    SESSION_ERROR_LIMIT_REACHED,
     SESSION_ERROR_PRIORITY_REJECTED,
     SESSION_RECOVERY_OUTCOME_RESUME_ENABLED,
     SESSION_RECOVERY_OUTCOME_RESUMED,
@@ -174,7 +176,7 @@ from nnrp.native import (
     _NnrpServerAcceptResult,
     _NnrpServerAcceptWaitRequest,
     _NnrpServerBindRequest,
-    _NnrpServerPolicyDecision,
+    _NnrpServerPolicyCompleteRequest,
     _NnrpServerSendResultRequest,
     _NnrpSessionOpenRequest,
     _NnrpSessionRecoveryOutcome,
@@ -365,6 +367,7 @@ class FakeRuntimeLibrary(FakeEntrypointLibrary):
         self.nnrp_client_await_event.handler = self._await_event
         self.nnrp_client_await_events.handler = self._await_events
         self.nnrp_server_bind.handler = self._server_bind
+        self.nnrp_server_policy_complete.handler = self._server_policy_complete
         self.nnrp_server_accept_begin.handler = self._server_accept_begin
         self.nnrp_server_accept_wait.handler = self._server_accept_wait
         self.nnrp_server_accept_claim.handler = self._server_accept_claim
@@ -412,6 +415,9 @@ class FakeRuntimeLibrary(FakeEntrypointLibrary):
         self._cache_lease_owners: dict[int, tuple[int, int]] = {}
         self._session_protocol_ids: dict[int, int] = {}
         self._server_accepts: dict[int, _NnrpHandle] = {}
+        self.server_policy_completions: list[tuple[int, bool, int, bytes]] = []
+        self.server_policy_completion_event = threading.Event()
+        self.server_policy_completion_status: _NnrpFfiStatus | None = None
 
     def _client_connect(self, request: _NnrpClientConnectRequest, out_handle: object) -> _NnrpFfiStatus:
         _write_handle(out_handle, _NnrpHandle(HANDLE_KIND_CONNECTION, request.connection_id, request.generation, 0))
@@ -420,6 +426,18 @@ class FakeRuntimeLibrary(FakeEntrypointLibrary):
     def _server_bind(self, request: _NnrpServerBindRequest, out_handle: object) -> _NnrpFfiStatus:
         _write_handle(out_handle, _NnrpHandle(HANDLE_KIND_CONNECTION, request.server_id, request.generation, 0))
         return self.status
+
+    def _server_policy_complete(self, request: _NnrpServerPolicyCompleteRequest) -> _NnrpFfiStatus:
+        self.server_policy_completions.append(
+            (
+                request.request_id,
+                bool(request.decision.accepted),
+                request.decision.session_error_code,
+                _read_buffer_view(request.decision.diagnostic),
+            )
+        )
+        self.server_policy_completion_event.set()
+        return self.server_policy_completion_status or self.status
 
     def _server_accept_begin(
         self,
@@ -1336,6 +1354,7 @@ RUNTIME_ENTRYPOINT_SYMBOLS = [
     "nnrp_client_await_event",
     "nnrp_client_await_events",
     "nnrp_server_bind",
+    "nnrp_server_policy_complete",
     "nnrp_server_accept_begin",
     "nnrp_server_accept_wait",
     "nnrp_server_accept_claim",
@@ -1716,21 +1735,27 @@ def test_native_server_policy_callback_receives_exact_session_open_metadata() ->
     )
     encoded = metadata.pack()
     owner = ctypes.create_string_buffer(encoded, len(encoded))
-    decision = _NnrpServerPolicyDecision()
-
-    status = request.application_policy.evaluate(
+    status = request.application_policy.begin(
         None,
+        901,
         _NnrpBufferView(ctypes.cast(owner, ctypes.c_void_p), len(encoded)),
-        ctypes.byref(decision),
     )
 
     assert status == FFI_STATUS_OK
+    assert role_library.server_policy_completion_event.wait(timeout=1)
     assert observed == [metadata]
-    assert decision.accepted == 0
-    assert decision.session_error_code == 17
-    assert _read_buffer_view(decision.diagnostic) == b"policy rejected"
-    assert server._policy_callback is not None
+    assert role_library.server_policy_completions == [(901, False, 17, b"policy rejected")]
+    assert server._policy_dispatcher is not None
     server.close()
+    assert (
+        request.application_policy.begin(
+            None,
+            903,
+            _NnrpBufferView(ctypes.cast(owner, ctypes.c_void_p), len(encoded)),
+        )
+        == FFI_STATUS_CALLBACK_REJECTED
+    )
+    assert role_library.server_policy_completions == [(901, False, 17, b"policy rejected")]
 
 
 def test_native_server_policy_callback_rejects_application_exceptions() -> None:
@@ -1755,16 +1780,252 @@ def test_native_server_policy_callback_rejects_application_exceptions() -> None:
     request = role_library.nnrp_server_bind.calls[0][0]
     encoded = SessionOpenMetadata(1, 2, SessionPriorityClass.BALANCED, 0, 3, 4, 5, 6, 7, 8, 9, 10, 11).pack()
     owner = ctypes.create_string_buffer(encoded, len(encoded))
-    decision = _NnrpServerPolicyDecision()
-
-    status = request.application_policy.evaluate(
+    status = request.application_policy.begin(
         None,
+        902,
         _NnrpBufferView(ctypes.cast(owner, ctypes.c_void_p), len(encoded)),
-        ctypes.byref(decision),
     )
 
-    assert status == FFI_STATUS_CALLBACK_REJECTED
+    assert status == FFI_STATUS_OK
+    assert role_library.server_policy_completion_event.wait(timeout=1)
+    assert role_library.server_policy_completions == [
+        (902, False, SESSION_ERROR_LIMIT_REACHED, b"application policy evaluation failed")
+    ]
     server.close()
+
+
+def test_native_server_policy_dispatcher_rejects_invalid_metadata_and_stopped_executor(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    transport_entrypoints = SimpleNamespace(close=FakeFunction(NativeStatus.ok().to_ffi()))
+    role_library = FakeRuntimeLibrary()
+    listener = NativeTransportListener(
+        transport_entrypoints,
+        SimpleNamespace(name="ipc"),
+        _test_transport_endpoint("ipc"),
+        NativeHandle(HANDLE_KIND_TRANSPORT_LISTENER, 801, 1, 0),
+    )
+    server = listener._adopt_server_role(
+        NativeRuntimeEntrypoints(role_library),
+        server_id=21,
+        generation=2,
+        **(_test_server_role_options() | {"application_policy": lambda _metadata: (True, 0, None)}),
+    )
+    request = role_library.nnrp_server_bind.calls[0][0]
+    encoded = SessionOpenMetadata(1, 2, SessionPriorityClass.BALANCED, 0, 3, 4, 5, 6, 7, 8, 9, 10, 11).pack()
+    owner = ctypes.create_string_buffer(encoded, len(encoded))
+    metadata_view = _NnrpBufferView(ctypes.cast(owner, ctypes.c_void_p), len(encoded))
+
+    def reject_copy(_view: _NnrpBufferView) -> bytes:
+        raise ValueError("invalid metadata view")
+
+    original_copy = native_module._copy_buffer_view
+    monkeypatch.setattr(native_module, "_copy_buffer_view", reject_copy)
+    assert request.application_policy.begin(None, 904, metadata_view) == FFI_STATUS_CALLBACK_REJECTED
+    monkeypatch.setattr(native_module, "_copy_buffer_view", original_copy)
+
+    assert server._policy_dispatcher is not None
+    server._policy_dispatcher._executor.shutdown(wait=True)
+    assert request.application_policy.begin(None, 905, metadata_view) == FFI_STATUS_CALLBACK_REJECTED
+    server.close()
+
+
+def test_native_server_policy_dispatcher_does_not_swallow_fatal_exceptions(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    entrypoints = NativeRuntimeEntrypoints(FakeRuntimeLibrary())
+    dispatcher = native_module._NativeServerPolicyDispatcher(entrypoints, lambda _metadata: (True, 0, None))
+    assert dispatcher._executor._max_workers == 4
+
+    def interrupt_copy(_view: _NnrpBufferView) -> bytes:
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(native_module, "_copy_buffer_view", interrupt_copy)
+    with pytest.raises(KeyboardInterrupt):
+        dispatcher._begin(908, _NnrpBufferView())
+    dispatcher.close()
+
+
+def test_native_server_policy_worker_does_not_convert_fatal_exception_to_rejection() -> None:
+    transport_entrypoints = SimpleNamespace(close=FakeFunction(NativeStatus.ok().to_ffi()))
+    role_library = FakeRuntimeLibrary()
+    listener = NativeTransportListener(
+        transport_entrypoints,
+        SimpleNamespace(name="ipc"),
+        _test_transport_endpoint("ipc"),
+        NativeHandle(HANDLE_KIND_TRANSPORT_LISTENER, 801, 1, 0),
+    )
+
+    def interrupt_policy(_metadata: SessionOpenMetadata) -> tuple[bool, int, None]:
+        raise KeyboardInterrupt
+
+    server = listener._adopt_server_role(
+        NativeRuntimeEntrypoints(role_library),
+        server_id=21,
+        generation=2,
+        **(_test_server_role_options() | {"application_policy": interrupt_policy}),
+    )
+    request = role_library.nnrp_server_bind.calls[0][0]
+    encoded = SessionOpenMetadata(1, 2, SessionPriorityClass.BALANCED, 0, 3, 4, 5, 6, 7, 8, 9, 10, 11).pack()
+    owner = ctypes.create_string_buffer(encoded, len(encoded))
+    assert (
+        request.application_policy.begin(
+            None,
+            909,
+            _NnrpBufferView(ctypes.cast(owner, ctypes.c_void_p), len(encoded)),
+        )
+        == FFI_STATUS_OK
+    )
+    with pytest.raises(KeyboardInterrupt):
+        server.close()
+    assert role_library.server_policy_completions == []
+
+
+def test_native_server_policy_completion_failure_surfaces_from_server_close() -> None:
+    transport_entrypoints = SimpleNamespace(close=FakeFunction(NativeStatus.ok().to_ffi()))
+    role_library = FakeRuntimeLibrary()
+    listener = NativeTransportListener(
+        transport_entrypoints,
+        SimpleNamespace(name="ipc"),
+        _test_transport_endpoint("ipc"),
+        NativeHandle(HANDLE_KIND_TRANSPORT_LISTENER, 801, 1, 0),
+    )
+    server = listener._adopt_server_role(
+        NativeRuntimeEntrypoints(role_library),
+        server_id=21,
+        generation=2,
+        **(_test_server_role_options() | {"application_policy": lambda _metadata: (True, 0, None)}),
+    )
+    role_library.server_policy_completion_status = _NnrpFfiStatus(FFI_STATUS_INVALID_STATE, 0, 0, 0)
+    request = role_library.nnrp_server_bind.calls[0][0]
+    encoded = SessionOpenMetadata(1, 2, SessionPriorityClass.BALANCED, 0, 3, 4, 5, 6, 7, 8, 9, 10, 11).pack()
+    owner = ctypes.create_string_buffer(encoded, len(encoded))
+
+    assert (
+        request.application_policy.begin(
+            None,
+            906,
+            _NnrpBufferView(ctypes.cast(owner, ctypes.c_void_p), len(encoded)),
+        )
+        == FFI_STATUS_OK
+    )
+    assert role_library.server_policy_completion_event.wait(timeout=1)
+    with pytest.raises(NativeInvalidStateError):
+        server.close()
+
+
+def test_native_server_close_preserves_policy_failure_when_ticket_release_also_fails() -> None:
+    transport_entrypoints = SimpleNamespace(close=FakeFunction(NativeStatus.ok().to_ffi()))
+    role_library = FakeRuntimeLibrary(
+        accept_wait_statuses=[NativeStatus(FFI_STATUS_WOULD_BLOCK).to_ffi()],
+    )
+    listener = NativeTransportListener(
+        transport_entrypoints,
+        SimpleNamespace(name="ipc"),
+        _test_transport_endpoint("ipc"),
+        NativeHandle(HANDLE_KIND_TRANSPORT_LISTENER, 801, 1, 0),
+    )
+    server = listener._adopt_server_role(
+        NativeRuntimeEntrypoints(role_library),
+        server_id=21,
+        generation=2,
+        **(_test_server_role_options() | {"application_policy": lambda _metadata: (True, 0, None)}),
+    )
+    role_library.server_policy_completion_status = _NnrpFfiStatus(FFI_STATUS_INVALID_ARGUMENT, 0, 0, 0)
+    request = role_library.nnrp_server_bind.calls[0][0]
+    encoded = SessionOpenMetadata(1, 2, SessionPriorityClass.BALANCED, 0, 3, 4, 5, 6, 7, 8, 9, 10, 11).pack()
+    owner = ctypes.create_string_buffer(encoded, len(encoded))
+
+    assert (
+        request.application_policy.begin(
+            None,
+            910,
+            _NnrpBufferView(ctypes.cast(owner, ctypes.c_void_p), len(encoded)),
+        )
+        == FFI_STATUS_OK
+    )
+    assert role_library.server_policy_completion_event.wait(timeout=1)
+    with pytest.raises(NativeWouldBlockError):
+        server.accept_session(session_handle_id=41, generation=3, timeout_ms=1)
+    role_library.nnrp_server_accept_release.handler = lambda _accept: _NnrpFfiStatus(
+        FFI_STATUS_INVALID_STATE,
+        0,
+        0,
+        0,
+    )
+
+    with pytest.raises(NativeInvalidArgumentError):
+        server.close()
+
+    assert server._closed is True
+    assert len(role_library.nnrp_server_accept_release.calls) == 1
+    assert len(role_library.nnrp_client_close_connection.calls) == 1
+
+
+def test_native_server_close_waits_for_pending_policy_completion() -> None:
+    transport_entrypoints = SimpleNamespace(close=FakeFunction(NativeStatus.ok().to_ffi()))
+    role_library = FakeRuntimeLibrary()
+    listener = NativeTransportListener(
+        transport_entrypoints,
+        SimpleNamespace(name="ipc"),
+        _test_transport_endpoint("ipc"),
+        NativeHandle(HANDLE_KIND_TRANSPORT_LISTENER, 801, 1, 0),
+    )
+    started = threading.Event()
+    release = threading.Event()
+
+    def wait_then_accept(_metadata: SessionOpenMetadata) -> tuple[bool, int, None]:
+        started.set()
+        assert release.wait(timeout=1)
+        return True, 0, None
+
+    server = listener._adopt_server_role(
+        NativeRuntimeEntrypoints(role_library),
+        server_id=21,
+        generation=2,
+        **(_test_server_role_options() | {"application_policy": wait_then_accept}),
+    )
+    request = role_library.nnrp_server_bind.calls[0][0]
+    encoded = SessionOpenMetadata(1, 2, SessionPriorityClass.BALANCED, 0, 3, 4, 5, 6, 7, 8, 9, 10, 11).pack()
+    owner = ctypes.create_string_buffer(encoded, len(encoded))
+    assert (
+        request.application_policy.begin(
+            None,
+            907,
+            _NnrpBufferView(ctypes.cast(owner, ctypes.c_void_p), len(encoded)),
+        )
+        == FFI_STATUS_OK
+    )
+    assert started.wait(timeout=1)
+    timer = threading.Timer(0.05, release.set)
+    timer.start()
+    try:
+        server.close()
+    finally:
+        timer.cancel()
+    assert role_library.server_policy_completions == [(907, True, 0, b"")]
+
+
+def test_native_server_bind_failure_closes_policy_dispatcher() -> None:
+    transport_entrypoints = SimpleNamespace(close=FakeFunction(NativeStatus.ok().to_ffi()))
+    role_library = FakeRuntimeLibrary()
+    role_library.nnrp_server_bind.handler = lambda _request, _output: _NnrpFfiStatus(
+        FFI_STATUS_INVALID_STATE, 0, 0, 0
+    )
+    listener = NativeTransportListener(
+        transport_entrypoints,
+        SimpleNamespace(name="ipc"),
+        _test_transport_endpoint("ipc"),
+        NativeHandle(HANDLE_KIND_TRANSPORT_LISTENER, 801, 1, 0),
+    )
+
+    with pytest.raises(NativeInvalidStateError):
+        listener._adopt_server_role(
+            NativeRuntimeEntrypoints(role_library),
+            server_id=21,
+            generation=2,
+            **(_test_server_role_options() | {"application_policy": lambda _metadata: (True, 0, None)}),
+        )
 
 
 def test_native_integer_slices_validate_and_preserve_values() -> None:
@@ -6413,6 +6674,7 @@ def test_native_runtime_entrypoints_bind_frozen_symbol_table() -> None:
         ctypes.POINTER(ctypes.c_size_t),
     ]
     assert library.nnrp_server_bind.argtypes == [_NnrpServerBindRequest, ctypes.POINTER(_NnrpHandle)]
+    assert library.nnrp_server_policy_complete.argtypes == [_NnrpServerPolicyCompleteRequest]
     assert library.nnrp_server_accept_begin.argtypes == [
         _NnrpServerAcceptBeginRequest,
         ctypes.POINTER(_NnrpHandle),

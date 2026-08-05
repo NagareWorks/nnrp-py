@@ -10,6 +10,7 @@ import os
 import platform
 import threading
 from collections.abc import AsyncIterator, Callable, Iterable, Mapping
+from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass, field, replace
 from enum import IntFlag, StrEnum
 from functools import cmp_to_key
@@ -1163,18 +1164,25 @@ class _NnrpServerPolicyDecision(ctypes.Structure):
     ]
 
 
-_NnrpServerPolicyCallback = ctypes.CFUNCTYPE(
+class _NnrpServerPolicyCompleteRequest(ctypes.Structure):
+    _fields_ = [
+        ("request_id", ctypes.c_uint64),
+        ("decision", _NnrpServerPolicyDecision),
+    ]
+
+
+_NnrpServerPolicyBeginCallback = ctypes.CFUNCTYPE(
     ctypes.c_uint32,
     ctypes.c_void_p,
+    ctypes.c_uint64,
     _NnrpBufferView,
-    ctypes.POINTER(_NnrpServerPolicyDecision),
 )
 
 
 class _NnrpServerPolicySink(ctypes.Structure):
     _fields_ = [
         ("user_data", ctypes.c_void_p),
-        ("evaluate", _NnrpServerPolicyCallback),
+        ("begin", _NnrpServerPolicyBeginCallback),
     ]
 
 
@@ -1640,6 +1648,12 @@ class NativeRuntimeEntrypoints:
             _NnrpFfiStatus,
             [_NnrpServerBindRequest, ctypes.POINTER(_NnrpHandle)],
         )
+        self.server_policy_complete = _bind_native_function(
+            library,
+            "nnrp_server_policy_complete",
+            _NnrpFfiStatus,
+            [_NnrpServerPolicyCompleteRequest],
+        )
         self.server_accept_begin = _bind_native_function(
             library,
             "nnrp_server_accept_begin",
@@ -2069,6 +2083,96 @@ class NativeTransportConnection:
             )
 
 
+class _NativeServerPolicyDispatcher:
+    def __init__(
+        self,
+        entrypoints: NativeRuntimeEntrypoints,
+        application_policy: Callable[[SessionOpenMetadata], tuple[bool, int, str | None]],
+    ) -> None:
+        self._entrypoints = entrypoints
+        self._application_policy = application_policy
+        self._executor = ThreadPoolExecutor(
+            max_workers=4,
+            thread_name_prefix="nnrp-server-policy",
+        )
+        self._lock = threading.Lock()
+        self._futures: set[Future[None]] = set()
+        self._closed = False
+        self._first_error: BaseException | None = None
+
+        @_NnrpServerPolicyBeginCallback
+        def begin_callback(
+            _user_data: int,
+            request_id: int,
+            metadata_view: _NnrpBufferView,
+        ) -> int:
+            return self._begin(request_id, metadata_view)
+
+        self.callback = begin_callback
+        self.sink = _NnrpServerPolicySink(None, begin_callback)
+
+    def _begin(self, request_id: int, metadata_view: _NnrpBufferView) -> int:
+        try:
+            encoded_metadata = _copy_buffer_view(metadata_view)
+        except Exception:
+            return FFI_STATUS_CALLBACK_REJECTED
+        with self._lock:
+            if self._closed:
+                return FFI_STATUS_CALLBACK_REJECTED
+            try:
+                future = self._executor.submit(self._evaluate_and_complete, request_id, encoded_metadata)
+            except RuntimeError:
+                return FFI_STATUS_CALLBACK_REJECTED
+            self._futures.add(future)
+        future.add_done_callback(self._on_complete)
+        return FFI_STATUS_OK
+
+    def _evaluate_and_complete(self, request_id: int, encoded_metadata: bytes) -> None:
+        try:
+            open_metadata: SessionOpenMetadata = SessionOpenMetadata.unpack(encoded_metadata)
+            accepted, session_error_code, diagnostic = self._application_policy(open_metadata)
+        except Exception:
+            accepted = False
+            session_error_code = SESSION_ERROR_LIMIT_REACHED
+            diagnostic = "application policy evaluation failed"
+        diagnostic_view, diagnostic_owner = _buffer_view_from_payload(
+            b"" if diagnostic is None else diagnostic.encode("utf-8")
+        )
+        decision = _NnrpServerPolicyDecision(
+            int(accepted),
+            (ctypes.c_uint8 * 3)(0, 0, 0),
+            session_error_code,
+            diagnostic_view,
+        )
+        status = self._entrypoints.server_policy_complete(
+            _NnrpServerPolicyCompleteRequest(request_id, decision)
+        )
+        del diagnostic_owner
+        raise_for_native_status(status)
+
+    def _on_complete(self, future: Future[None]) -> None:
+        error = future.exception()
+        with self._lock:
+            self._futures.discard(future)
+            if error is not None and self._first_error is None:
+                self._first_error = error
+
+    def close(self) -> None:
+        with self._lock:
+            if self._closed:
+                return
+            self._closed = True
+            futures = tuple(self._futures)
+        self._executor.shutdown(wait=True, cancel_futures=False)
+        completion_error: BaseException | None = None
+        for future in futures:
+            completion_error = completion_error or future.exception()
+        with self._lock:
+            final_error = self._first_error or completion_error
+        if final_error is not None:
+            raise final_error
+
+
 class NativeTransportListener:
     """One native carrier listener that accepts complete-packet connections."""
 
@@ -2154,37 +2258,15 @@ class NativeTransportListener:
             profile_slice, profile_owner = _u16_slice_from_values(supported_profiles)
             cache_slice, cache_owner = _u32_slice_from_values(supported_cache_objects)
             schema_registry = NativeSchemaRegistry.create(entrypoints)
-            policy_callback: Any | None = None
-            diagnostic_owner_box: list[object | None] = [None]
+            policy_dispatcher: _NativeServerPolicyDispatcher | None = None
             try:
                 for descriptor in schema_descriptors:
                     schema_registry.install(descriptor)
                 if application_policy is None:
-                    policy_sink = _NnrpServerPolicySink(None, _NnrpServerPolicyCallback())
+                    policy_sink = _NnrpServerPolicySink(None, _NnrpServerPolicyBeginCallback())
                 else:
-
-                    @_NnrpServerPolicyCallback
-                    def policy_callback(
-                        _user_data: int,
-                        metadata_view: _NnrpBufferView,
-                        out_decision: ctypes.POINTER(_NnrpServerPolicyDecision),
-                    ) -> int:
-                        try:
-                            open_metadata = SessionOpenMetadata.unpack(_copy_buffer_view(metadata_view))
-                            accepted, session_error_code, diagnostic = application_policy(open_metadata)
-                            diagnostic_view, diagnostic_owner = _buffer_view_from_payload(
-                                b"" if diagnostic is None else diagnostic.encode("utf-8")
-                            )
-                            diagnostic_owner_box[0] = diagnostic_owner
-                            out_decision.contents.accepted = int(accepted)
-                            out_decision.contents.reserved0[:] = (0, 0, 0)
-                            out_decision.contents.session_error_code = session_error_code
-                            out_decision.contents.diagnostic = diagnostic_view
-                            return FFI_STATUS_OK
-                        except BaseException:
-                            return FFI_STATUS_CALLBACK_REJECTED
-
-                    policy_sink = _NnrpServerPolicySink(None, policy_callback)
+                    policy_dispatcher = _NativeServerPolicyDispatcher(entrypoints, application_policy)
+                    policy_sink = policy_dispatcher.sink
                 request = _NnrpServerBindRequest(
                     server_id,
                     generation,
@@ -2207,14 +2289,19 @@ class NativeTransportListener:
             finally:
                 schema_registry.close()
                 del profile_owner, cache_owner
-            raise_for_native_status(status)
+            try:
+                raise_for_native_status(status)
+            except BaseException:
+                if policy_dispatcher is not None:
+                    policy_dispatcher.close()
+                raise
             self._closed = True
             self._handle = NativeHandle.invalid()
             return NativeRuntimeServer(
                 entrypoints,
                 NativeConnectionHandle.from_ffi(output),
                 self._provider.name,
-                policy_callback,
+                policy_dispatcher,
             )
 
     def _require_open(self) -> None:
@@ -3749,7 +3836,7 @@ class NativeRuntimeServer:
     entrypoints: NativeRuntimeEntrypoints
     handle: NativeConnectionHandle
     transport_name: str
-    _policy_callback: Any | None = field(default=None, repr=False, compare=False)
+    _policy_dispatcher: _NativeServerPolicyDispatcher | None = field(default=None, repr=False, compare=False)
     _closed: bool = field(default=False, init=False, repr=False, compare=False)
     _accept_ticket: NativeHandle | None = field(default=None, init=False, repr=False, compare=False)
     _accept_session_handle_id: int | None = field(default=None, init=False, repr=False, compare=False)
@@ -3821,10 +3908,15 @@ class NativeRuntimeServer:
     def close(self) -> None:
         self._ensure_open()
         first_error: BaseException | None = None
+        if self._policy_dispatcher is not None:
+            try:
+                self._policy_dispatcher.close()
+            except BaseException as error:
+                first_error = error
         try:
             self._release_pending_accept_ticket()
         except BaseException as error:
-            first_error = error
+            first_error = first_error or error
         try:
             raise_for_native_status(self.entrypoints.client_close_connection(self.handle.to_ffi()))
         except BaseException as error:

@@ -279,11 +279,10 @@ class NativeClientConnection:
         return self.transport_selection.selected_transport_name
 
     async def open_session(self, options: NativeClientSessionOptions | None = None) -> NativeRuntimeSession:
-        loop = asyncio.get_running_loop()
         with self._close_lock:
             self._ensure_open()
             pending = self._role_executor.submit(self._open_session, options)
-        return await asyncio.wrap_future(pending, loop=loop)
+        return await asyncio.wrap_future(pending)
 
     def _open_session(self, options: NativeClientSessionOptions | None = None) -> NativeRuntimeSession:
         self._ensure_open()
@@ -309,11 +308,10 @@ class NativeClientConnection:
         ticket: NativeSessionRecoveryTicket,
         options: NativeClientSessionOptions | None = None,
     ) -> NativeRuntimeSession:
-        loop = asyncio.get_running_loop()
         with self._close_lock:
             self._ensure_open()
             pending = self._role_executor.submit(self._resume_session, ticket, options)
-        return await asyncio.wrap_future(pending, loop=loop)
+        return await asyncio.wrap_future(pending)
 
     def _resume_session(
         self,

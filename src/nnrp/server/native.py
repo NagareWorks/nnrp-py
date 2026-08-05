@@ -67,6 +67,8 @@ class NativeServerSessionPolicyDecision:
             raise ValueError("session_error_code must fit in u32")
         if self.accepted and self.session_error_code != 0:
             raise ValueError("accepted policy decisions require session_error_code 0")
+        if not self.accepted and self.session_error_code == 0:
+            raise ValueError("rejected policy decisions require a non-zero session_error_code")
 
     @classmethod
     def accept(cls) -> NativeServerSessionPolicyDecision:
@@ -74,8 +76,6 @@ class NativeServerSessionPolicyDecision:
 
     @classmethod
     def reject(cls, session_error_code: int, diagnostic: str | None = None) -> NativeServerSessionPolicyDecision:
-        if session_error_code == 0:
-            raise ValueError("rejected policy decisions require a non-zero session_error_code")
         return cls(False, session_error_code, diagnostic)
 
 

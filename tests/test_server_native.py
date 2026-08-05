@@ -511,6 +511,8 @@ def test_native_server_policy_decision_rejects_inconsistent_states() -> None:
     with pytest.raises(ValueError, match="require session_error_code 0"):
         NativeServerSessionPolicyDecision(True, 1)
     with pytest.raises(ValueError, match="non-zero"):
+        NativeServerSessionPolicyDecision(False, 0)
+    with pytest.raises(ValueError, match="non-zero"):
         NativeServerSessionPolicyDecision.reject(0)
 
 

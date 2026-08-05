@@ -132,6 +132,14 @@ jobs:
         with:
           fetch-depth: 0
 
+      - name: Checkout frozen SDK API contract
+        uses: actions/checkout@v5
+        with:
+          repository: ${{ github.repository_owner }}/nnrp-doc
+          path: nnrp-doc-contract
+          ref: master
+          fetch-depth: 1
+
       - name: Setup Python
         uses: actions/setup-python@v6
         with:
@@ -151,6 +159,11 @@ jobs:
 
       - name: Lint
         run: ruff check .
+
+      - name: SDK API contract parity
+        run: >-
+          python scripts/check_sdk_api_contract.py
+          --contract nnrp-doc-contract/docs/public/contracts/nnrp-1-preview4-sdk-api.json
 
       - name: Test with coverage
         shell: pwsh
@@ -247,7 +260,7 @@ jobs:
   wire-conformance:
     runs-on: ubuntu-latest
     env:
-      NNRP_RS_SOURCE_COMMIT: bcebd1b309326a787f68c5b196dd733527fc1d81
+      NNRP_RS_SOURCE_COMMIT: 784a4a354f4e6a73798248f93cf574bd7a5af829
 
     steps:
       - name: Checkout

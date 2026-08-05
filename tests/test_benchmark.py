@@ -522,7 +522,7 @@ def test_open_native_role_loopback_yields_roles_and_coordinates_close(monkeypatc
             return server_session
 
     class Client:
-        def open_session(self, options: object) -> object:
+        async def open_session(self, options: object) -> object:
             calls.append(("open-session", options))
             return client_session
 
@@ -1025,7 +1025,7 @@ class FakeNativeSession:
     ) -> SimpleNamespace:
         self.entrypoints.client_await_events(max_events, timeout_ms)
         for index, result in enumerate(self.connection.results):
-            if result.frame_id == operation.frame_id:
+            if result.event.as_runtime().header.frame_id == operation.frame_id:
                 return self.connection.results.pop(index)
         raise AssertionError("fake role loopback result was not queued")
 
@@ -1056,8 +1056,12 @@ class FakeNativeServerOperation:
         self.server_session.connection.results.append(
             SimpleNamespace(
                 operation_id=self.operation_id,
-                frame_id=self.frame_id,
-                body=bytes(body),
+                event=SimpleNamespace(
+                    as_runtime=lambda: SimpleNamespace(
+                        header=SimpleNamespace(frame_id=self.frame_id),
+                        tail=SimpleNamespace(body=bytes(body)),
+                    )
+                ),
             )
         )
 

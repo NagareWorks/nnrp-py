@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import asyncio
 import json
 import os
 import sys
@@ -11,7 +12,7 @@ from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
-from nnrp.client import NativeClientProviderRoute, connect_native_client_connection
+from nnrp.client import NativeClientOptions, NativeClientProviderRoute, connect_native_client_connection
 from nnrp.core import TransportPolicy
 from nnrp.native import (
     NativeArtifactError,
@@ -27,13 +28,12 @@ from nnrp.native import (
 )
 from nnrp.server import (
     NativeServerAcceptOptions,
+    NativeServerBootstrapOptions,
     NativeServerProviderRoute,
     listen_native_server,
 )
 
-_RESULT_SCHEMA = (
-    "https://github.com/NagareWorks/nnrp-conformance/schemas/wire-conformance-case-results.schema.json"
-)
+_RESULT_SCHEMA = "https://github.com/NagareWorks/nnrp-conformance/schemas/wire-conformance-case-results.schema.json"
 _READY_SCHEMA = "https://github.com/NagareWorks/nnrp-conformance/schemas/wire-host-route-ready.schema.json"
 _PROTOCOL_VERSION = "nnrp-1-preview4"
 _OFFICIAL_PROVIDER_IDS = {
@@ -192,15 +192,17 @@ def _run_client_case(
     application_endpoint = _required_string(fixture, "application_endpoint")
     try:
         connection_scope = connect_native_client_connection(
-            application_endpoint,
-            provider_routes=provider_routes,
-            transports=tuple(bindings),
-            transport_policy=TransportPolicy.AUTO,
+            NativeClientOptions(
+                endpoint=application_endpoint,
+                provider_routes=provider_routes,
+                transport_policy=TransportPolicy.AUTO,
+            ),
+            _transports=tuple(bindings),
         )
         connection = connection_scope.__enter__()
         try:
             selection = connection.transport_selection
-            session = connection.open_session()
+            session = asyncio.run(connection.open_session())
             try:
                 session.close()
             except (NativeArtifactError, NativeRuntimeError):
@@ -254,10 +256,12 @@ def _run_server_case(
     application_endpoint = _required_string(fixture, "application_endpoint")
     try:
         with listen_native_server(
-            application_endpoint,
-            provider_routes=provider_routes,
-            transports=tuple(bindings),
-            transport_policy=policy,
+            NativeServerBootstrapOptions(
+                endpoint=application_endpoint,
+                provider_routes=provider_routes,
+                transport_policy=policy,
+            ),
+            _transports=tuple(bindings),
         ) as server:
             _write_ready_report(scenario, routes, server.bound_provider_endpoints, ready_output)
             if terminal_provider is not None:
@@ -277,14 +281,8 @@ def _run_server_case(
                 raise AssertionError("terminal listener injection accepted a session")
 
             accepted = []
-            for index in range(len(routes)):
-                session = server.accept(
-                    NativeServerAcceptOptions(
-                        session_handle_id=index + 1,
-                        session_generation=1,
-                        timeout_ms=3_000,
-                    )
-                )
+            for _index in range(len(routes)):
+                session = server.accept(NativeServerAcceptOptions(timeout_ms=3_000))
                 accepted.append(session.active_transport_name)
                 session.close()
             evidence = _server_evidence(
@@ -310,9 +308,7 @@ def _binding_for_route(route: Mapping[str, Any]) -> NativeTransportBinding:
     transport = _required_string(route, "transport")
     provider_id = _required_string(route, "provider_id")
     if provider_id == "example.transport.quic.uninstalled":
-        provider = next(
-            provider for provider in discover_native_transport_providers() if provider.name == transport
-        )
+        provider = next(provider for provider in discover_native_transport_providers() if provider.name == transport)
         provider = replace(provider, metadata=replace(provider.metadata, id=provider_id))
         return NativeTransportBinding.unavailable(provider, "provider package is not installed")
     expected = _OFFICIAL_PROVIDER_IDS.get(transport)
@@ -383,9 +379,7 @@ def _client_evidence(
     if selected_provider is not None:
         route = next(route for route in routes if route["provider_id"] == selected_provider)
         transport = _required_string(route, "transport")
-        accepted.append(
-            {"transport": transport, "provider_id": selected_provider, "active_transport": transport}
-        )
+        accepted.append({"transport": transport, "provider_id": selected_provider, "active_transport": transport})
     return {
         "application_endpoint": _required_string(fixture, "application_endpoint"),
         "candidates": candidate_evidence,
@@ -424,9 +418,7 @@ def _server_evidence(
             {
                 "transport": transport,
                 "provider_id": next(
-                    _required_string(route, "provider_id")
-                    for route in routes
-                    if route["transport"] == transport
+                    _required_string(route, "provider_id") for route in routes if route["transport"] == transport
                 ),
                 "active_transport": transport,
             }
@@ -488,9 +480,7 @@ def _write_ready_report(
                 {
                     "transport": transport,
                     "provider_id": next(
-                        _required_string(route, "provider_id")
-                        for route in routes
-                        if route["transport"] == transport
+                        _required_string(route, "provider_id") for route in routes if route["transport"] == transport
                     ),
                     "bound_endpoint": _endpoint_uri(endpoint),
                 }

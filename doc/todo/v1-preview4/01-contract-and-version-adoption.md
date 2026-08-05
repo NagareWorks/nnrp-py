@@ -2,7 +2,7 @@
 
 ## Rust Artifact Baseline
 
-- [x] Pin Rust artifact `1.0.0-preview.4.21` and ABI `4.3.0` used by Python.
+- [x] Pin Rust artifact `1.0.0-preview.4.22` and ABI `4.4.0` used by Python.
 - [x] Probe preview4 protocol version before accepting native artifacts.
 - [x] Probe ABI version before enabling preview4 native paths.
 - [x] Probe transport slots.
@@ -22,7 +22,7 @@
 
 ## Public API Boundary
 
-- [x] Expose only the preview4 host-facing client and server entrypoints frozen in `nnrp-doc`.
+- [x] Expose only the preview4 host-facing client and server entrypoints frozen in `nnrp-doc`, including the exact three-field terminal result and closed runtime/lifecycle event union enforced by CI.
 - [x] Add preview4-specific request options without overloading preview3 packet helper APIs.
 - [x] Keep fixture builders out of runtime quick-start paths.
 - [x] Document explicit native requirement for preview4 runtime-control hot paths.

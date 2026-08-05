@@ -45,6 +45,21 @@ from nnrp.runtime.types import (
     TraceContextMetadata,
     _FixedRuntimeMetadata,
 )
+from nnrp.runtime.types import (
+    NativeTerminalEvent as NativeTerminalEvent,
+)
+from nnrp.runtime.types import (
+    NativeTerminalEventKind as NativeTerminalEventKind,
+)
+from nnrp.runtime.types import (
+    OperationLifecycleEvent as OperationLifecycleEvent,
+)
+from nnrp.runtime.types import (
+    OperationState as OperationState,
+)
+from nnrp.runtime.types import (
+    ResultTerminalState as ResultTerminalState,
+)
 
 CONTROL_REQUEST_METADATA_LENGTH = ControlRequestMetadata.STRUCT.size
 SCHEDULING_METADATA_LENGTH = SchedulingMetadata.STRUCT.size
@@ -395,6 +410,11 @@ __all__ = [
     "RuntimeEventTailKind",
     "RuntimeFrameHeader",
     "NativeRuntimeEvent",
+    "NativeTerminalEvent",
+    "NativeTerminalEventKind",
+    "OperationLifecycleEvent",
+    "OperationState",
+    "ResultTerminalState",
     "RuntimeObjectKind",
     "RuntimeRole",
     "SessionCloseMetadata",

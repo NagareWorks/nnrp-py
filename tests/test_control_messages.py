@@ -21,6 +21,7 @@ from nnrp.core.messages import (
     SERVER_HELLO_ACK_TRANSPORT_POLICY_EXTENSION,
     SESSION_MIGRATE_ACK_METADATA_LENGTH,
     SESSION_MIGRATE_METADATA_LENGTH,
+    SESSION_OPEN_METADATA_LENGTH,
     SESSION_PATCH_ACK_METADATA_LENGTH,
     SESSION_PATCH_METADATA_LENGTH,
     TENSOR_PROFILE_CACHE_OBJECT_BITMAP,
@@ -58,11 +59,13 @@ from nnrp.core.messages import (
     ServerHelloAckTransportPolicyExtension,
     SessionMigrateAckMetadata,
     SessionMigrateMetadata,
+    SessionOpenMetadata,
     SessionPatchAckMetadata,
     SessionPatchAckStatus,
     SessionPatchField,
     SessionPatchMetadata,
     SessionPatchRejectReason,
+    SessionPriorityClass,
     TensorProfilePatchAckBlock,
     TensorProfilePatchBlock,
     TransportId,
@@ -89,6 +92,72 @@ from nnrp.core.messages import (
     unpack_session_patch_ack_body,
     unpack_session_patch_body,
 )
+
+
+def test_session_open_metadata_round_trips_exact_policy_input() -> None:
+    metadata = SessionOpenMetadata(
+        requested_session_id=41,
+        profile_id=2,
+        priority_class=SessionPriorityClass.INTERACTIVE,
+        session_flags=0x0F,
+        schema_id=7,
+        schema_version=8,
+        default_deadline_ms=500,
+        max_in_flight_operations=4,
+        lease_ttl_hint_ms=30_000,
+        resume_token_bytes=24,
+        auth_bytes=12,
+        session_extension_bytes=16,
+        client_session_tag=99,
+    )
+
+    encoded = metadata.pack()
+
+    assert len(encoded) == SESSION_OPEN_METADATA_LENGTH == 48
+    assert SessionOpenMetadata.unpack(encoded) == metadata
+
+
+def test_session_open_metadata_rejects_reserved_and_unknown_fields() -> None:
+    metadata = SessionOpenMetadata(1, 2, SessionPriorityClass.BALANCED, 0, 3, 4, 5, 6, 7, 8, 9, 10, 11)
+    reserved = bytearray(metadata.pack())
+    reserved[22] = 1
+
+    with pytest.raises(ValueError, match="reserved0"):
+        SessionOpenMetadata.unpack(reserved)
+    with pytest.raises(ValueError, match="unknown bits"):
+        SessionOpenMetadata(1, 2, SessionPriorityClass.BALANCED, 0x10, 3, 4, 5, 6, 7, 8, 9, 10, 11).pack()
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("requested_session_id", -1),
+        ("profile_id", 0x1_0000),
+        ("schema_id", -1),
+        ("max_in_flight_operations", 0x1_0000),
+        ("client_session_tag", -1),
+    ],
+)
+def test_session_open_metadata_rejects_out_of_range_wire_fields(field: str, value: int) -> None:
+    fields = {
+        "requested_session_id": 1,
+        "profile_id": 2,
+        "priority_class": SessionPriorityClass.BALANCED,
+        "session_flags": 0,
+        "schema_id": 3,
+        "schema_version": 4,
+        "default_deadline_ms": 5,
+        "max_in_flight_operations": 6,
+        "lease_ttl_hint_ms": 7,
+        "resume_token_bytes": 8,
+        "auth_bytes": 9,
+        "session_extension_bytes": 10,
+        "client_session_tag": 11,
+    }
+    fields[field] = value
+
+    with pytest.raises(ValueError):
+        SessionOpenMetadata(**fields).pack()
 
 
 def test_flow_update_metadata_roundtrip() -> None:

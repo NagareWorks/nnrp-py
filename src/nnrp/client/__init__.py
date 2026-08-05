@@ -2,13 +2,12 @@
 
 from nnrp.client.native import (
     NativeClientConnection,
-    NativeClientConnectionOptions,
     NativeClientOperationScope,
+    NativeClientOptions,
     NativeClientProviderRoute,
-    NativeClientSessionOpenOptions,
     NativeClientSessionOptions,
+    NativeSessionRecoveryTicket,
     connect_native_client_connection,
-    connect_native_client_session,
     select_client_native_backend,
 )
 from nnrp.client.profile import (
@@ -62,11 +61,11 @@ __all__ = [
     "MigrationTriggerPolicy",
     "MigrationTriggerSnapshot",
     "NativeClientConnection",
-    "NativeClientConnectionOptions",
+    "NativeClientOptions",
     "NativeClientOperationScope",
     "NativeClientProviderRoute",
     "NativeClientSessionOptions",
-    "NativeClientSessionOpenOptions",
+    "NativeSessionRecoveryTicket",
     "PathHealthSample",
     "Result",
     "ResultRouter",
@@ -89,7 +88,6 @@ __all__ = [
     "connect_client_control",
     "connect_client_control_with_probe",
     "connect_native_client_connection",
-    "connect_native_client_session",
     "probe_client_transport",
     "plan_client_transport",
     "resolve_client_hello_transport_policy",

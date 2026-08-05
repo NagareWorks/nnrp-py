@@ -18,11 +18,10 @@ from typing import TYPE_CHECKING, Any, Protocol, TypeVar, runtime_checkable
 from urllib.parse import SplitResult, urlsplit
 
 if TYPE_CHECKING:
-    from nnrp.client import SubmitRequest
+    from nnrp.client import NativeSessionRecoveryTicket, SubmitRequest
 
-from nnrp.core import HeaderFlags, MessageType, WireFormat
+from nnrp.core import HeaderFlags, MessageType, SessionOpenMetadata, WireFormat
 from nnrp.core.messages import (
-    RESULT_PUSH_METADATA_LENGTH,
     BudgetPolicy,
     FlowUpdateMetadata,
     FrameSubmitMetadata,
@@ -40,15 +39,19 @@ from nnrp.runtime import (
     CapabilityMetadata,
     ControlRequestMetadata,
     NativeRuntimeEvent,
+    NativeTerminalEvent,
     ObjectDeltaMetadata,
     ObjectDescriptorMetadata,
     ObjectReferenceMetadata,
     ObjectReleaseMetadata,
+    OperationLifecycleEvent,
+    OperationState,
     PartialResultMetadata,
     PressureMetadata,
     ProgressMetadata,
     RecoverableErrorMetadata,
     ResultDropReasonMetadata,
+    ResultTerminalState,
     RetryAfterMetadata,
     RouteHintMetadata,
     RuntimeEventMetadata,
@@ -70,11 +73,22 @@ from nnrp.runtime.types import _FixedRuntimeMetadata
 _NATIVE_RUNTIME_SHUTDOWN_LOCK = threading.Lock()
 _NATIVE_RUNTIME_SHUTDOWNS: dict[str, tuple[Any, Any]] = {}
 _NATIVE_RUNTIME_ATEXIT_REGISTERED = False
+_NATIVE_HANDLE_ID_LOCK = threading.Lock()
+_NATIVE_NEXT_HANDLE_ID = 1
+
+
+def _allocate_native_handle_id() -> int:
+    global _NATIVE_NEXT_HANDLE_ID
+    with _NATIVE_HANDLE_ID_LOCK:
+        handle_id = _NATIVE_NEXT_HANDLE_ID
+        _NATIVE_NEXT_HANDLE_ID = 1 if handle_id == 0xFFFFFFFFFFFFFFFF else handle_id + 1
+    return handle_id
+
 
 EXPECTED_PROTOCOL_MAJOR = 1
 EXPECTED_PROTOCOL_WIRE_FORMAT = 0
 EXPECTED_ABI_MAJOR = 4
-EXPECTED_ABI_MINOR = 3
+EXPECTED_ABI_MINOR = 4
 EXPECTED_ABI_PATCH = 0
 TRANSPORT_SLOT_QUIC = 0x00000001
 TRANSPORT_SLOT_TCP = 0x00000002
@@ -1126,6 +1140,44 @@ class _NnrpBufferViewMut(ctypes.Structure):
     ]
 
 
+class _NnrpU16Slice(ctypes.Structure):
+    _fields_ = [
+        ("ptr", ctypes.POINTER(ctypes.c_uint16)),
+        ("len", ctypes.c_size_t),
+    ]
+
+
+class _NnrpU32Slice(ctypes.Structure):
+    _fields_ = [
+        ("ptr", ctypes.POINTER(ctypes.c_uint32)),
+        ("len", ctypes.c_size_t),
+    ]
+
+
+class _NnrpServerPolicyDecision(ctypes.Structure):
+    _fields_ = [
+        ("accepted", ctypes.c_uint8),
+        ("reserved0", ctypes.c_uint8 * 3),
+        ("session_error_code", ctypes.c_uint32),
+        ("diagnostic", _NnrpBufferView),
+    ]
+
+
+_NnrpServerPolicyCallback = ctypes.CFUNCTYPE(
+    ctypes.c_uint32,
+    ctypes.c_void_p,
+    _NnrpBufferView,
+    ctypes.POINTER(_NnrpServerPolicyDecision),
+)
+
+
+class _NnrpServerPolicySink(ctypes.Structure):
+    _fields_ = [
+        ("user_data", ctypes.c_void_p),
+        ("evaluate", _NnrpServerPolicyCallback),
+    ]
+
+
 class _NnrpRuntimeCapabilities(ctypes.Structure):
     _fields_ = [
         ("abi_major", ctypes.c_uint16),
@@ -1215,6 +1267,17 @@ class _NnrpServerBindRequest(ctypes.Structure):
         ("generation", ctypes.c_uint32),
         ("reserved0", ctypes.c_uint32),
         ("transport_listener", _NnrpHandle),
+        ("supported_profiles", _NnrpU16Slice),
+        ("supported_cache_objects", _NnrpU32Slice),
+        ("max_cache_objects", ctypes.c_uint64),
+        ("max_cache_object_bytes", ctypes.c_uint32),
+        ("resume_token_bytes", ctypes.c_uint32),
+        ("max_in_flight_operations", ctypes.c_uint16),
+        ("granted_operation_credit", ctypes.c_uint16),
+        ("lease_ttl_ms", ctypes.c_uint32),
+        ("resume_window_ms", ctypes.c_uint32),
+        ("schema_registry", _NnrpHandle),
+        ("application_policy", _NnrpServerPolicySink),
     ]
 
 
@@ -1222,10 +1285,19 @@ class _NnrpSessionOpenRequest(ctypes.Structure):
     _fields_ = [
         ("connection", _NnrpHandle),
         ("requested_session_id", ctypes.c_uint32),
+        ("session_handle_id", ctypes.c_uint64),
         ("generation", ctypes.c_uint32),
         ("profile_id", ctypes.c_uint16),
+        ("priority_class", ctypes.c_uint8),
+        ("allow_resume", ctypes.c_uint8),
         ("schema_id", ctypes.c_uint32),
         ("schema_version", ctypes.c_uint32),
+        ("default_deadline_ms", ctypes.c_uint32),
+        ("max_in_flight_operations", ctypes.c_uint16),
+        ("reserved0", ctypes.c_uint16),
+        ("lease_ttl_hint_ms", ctypes.c_uint32),
+        ("resume_token_bytes", ctypes.c_uint32),
+        ("cache_hints", _NnrpU32Slice),
     ]
 
 
@@ -1397,13 +1469,8 @@ class _NnrpCacheLeaseResult(ctypes.Structure):
 
 class _NnrpSessionResumeRequest(ctypes.Structure):
     _fields_ = [
-        ("connection", _NnrpHandle),
-        ("requested_session_id", ctypes.c_uint32),
-        ("generation", ctypes.c_uint32),
-        ("profile_id", ctypes.c_uint16),
-        ("schema_id", ctypes.c_uint32),
-        ("schema_version", ctypes.c_uint32),
-        ("resume_token_bytes", ctypes.c_uint32),
+        ("open", _NnrpSessionOpenRequest),
+        ("recovery_ticket", _NnrpBufferView),
     ]
 
 
@@ -1528,6 +1595,12 @@ class NativeRuntimeEntrypoints:
             "nnrp_client_resume_session",
             _NnrpFfiStatus,
             [_NnrpSessionResumeRequest, ctypes.POINTER(_NnrpHandle), ctypes.POINTER(_NnrpSessionRecoveryOutcome)],
+        )
+        self.client_session_recovery_ticket = _bind_native_function(
+            library,
+            "nnrp_client_session_recovery_ticket",
+            _NnrpFfiStatus,
+            [_NnrpHandle, ctypes.POINTER(_NnrpHandle), ctypes.POINTER(_NnrpBufferView)],
         )
         self.submit = _bind_native_function(
             library,
@@ -2062,19 +2135,78 @@ class NativeTransportListener:
         *,
         server_id: int,
         generation: int,
+        supported_profiles: Iterable[int],
+        supported_cache_objects: Iterable[int],
+        max_cache_objects: int,
+        max_cache_object_bytes: int,
+        resume_token_bytes: int,
+        max_in_flight_operations: int,
+        granted_operation_credit: int,
+        lease_ttl_ms: int,
+        resume_window_ms: int,
+        schema_descriptors: Iterable[Any],
+        application_policy: Callable[[SessionOpenMetadata], tuple[bool, int, str | None]] | None,
     ) -> NativeRuntimeServer:
         _validate_u64("server_id", server_id)
         _validate_u32("generation", generation)
         with self._lock:
             self._require_open()
-            request = _NnrpServerBindRequest(
-                server_id,
-                generation,
-                0,
-                self._handle.to_ffi(),
-            )
-            output = _NnrpHandle()
-            status = entrypoints.server_bind(request, ctypes.byref(output))
+            profile_slice, profile_owner = _u16_slice_from_values(supported_profiles)
+            cache_slice, cache_owner = _u32_slice_from_values(supported_cache_objects)
+            schema_registry = NativeSchemaRegistry.create(entrypoints)
+            policy_callback: Any | None = None
+            diagnostic_owner_box: list[object | None] = [None]
+            try:
+                for descriptor in schema_descriptors:
+                    schema_registry.install(descriptor)
+                if application_policy is None:
+                    policy_sink = _NnrpServerPolicySink(None, _NnrpServerPolicyCallback())
+                else:
+
+                    @_NnrpServerPolicyCallback
+                    def policy_callback(
+                        _user_data: int,
+                        metadata_view: _NnrpBufferView,
+                        out_decision: ctypes.POINTER(_NnrpServerPolicyDecision),
+                    ) -> int:
+                        try:
+                            open_metadata = SessionOpenMetadata.unpack(_copy_buffer_view(metadata_view))
+                            accepted, session_error_code, diagnostic = application_policy(open_metadata)
+                            diagnostic_view, diagnostic_owner = _buffer_view_from_payload(
+                                b"" if diagnostic is None else diagnostic.encode("utf-8")
+                            )
+                            diagnostic_owner_box[0] = diagnostic_owner
+                            out_decision.contents.accepted = int(accepted)
+                            out_decision.contents.reserved0[:] = (0, 0, 0)
+                            out_decision.contents.session_error_code = session_error_code
+                            out_decision.contents.diagnostic = diagnostic_view
+                            return FFI_STATUS_OK
+                        except BaseException:
+                            return FFI_STATUS_CALLBACK_REJECTED
+
+                    policy_sink = _NnrpServerPolicySink(None, policy_callback)
+                request = _NnrpServerBindRequest(
+                    server_id,
+                    generation,
+                    0,
+                    self._handle.to_ffi(),
+                    profile_slice,
+                    cache_slice,
+                    max_cache_objects,
+                    max_cache_object_bytes,
+                    resume_token_bytes,
+                    max_in_flight_operations,
+                    granted_operation_credit,
+                    lease_ttl_ms,
+                    resume_window_ms,
+                    schema_registry.handle.to_ffi(),
+                    policy_sink,
+                )
+                output = _NnrpHandle()
+                status = entrypoints.server_bind(request, ctypes.byref(output))
+            finally:
+                schema_registry.close()
+                del profile_owner, cache_owner
             raise_for_native_status(status)
             self._closed = True
             self._handle = NativeHandle.invalid()
@@ -2082,6 +2214,7 @@ class NativeTransportListener:
                 entrypoints,
                 NativeConnectionHandle.from_ffi(output),
                 self._provider.name,
+                policy_callback,
             )
 
     def _require_open(self) -> None:
@@ -2149,6 +2282,17 @@ class NativeTransportBinding:
         *,
         server_id: int,
         generation: int,
+        supported_profiles: Iterable[int],
+        supported_cache_objects: Iterable[int],
+        max_cache_objects: int,
+        max_cache_object_bytes: int,
+        resume_token_bytes: int,
+        max_in_flight_operations: int,
+        granted_operation_credit: int,
+        lease_ttl_ms: int,
+        resume_window_ms: int,
+        schema_descriptors: Iterable[Any],
+        application_policy: Callable[[SessionOpenMetadata], tuple[bool, int, str | None]] | None,
     ) -> NativeRuntimeServer:
         self._require_available()
         if listener._entrypoints is not self.entrypoints:
@@ -2159,6 +2303,17 @@ class NativeTransportBinding:
             self._role_entrypoints,
             server_id=server_id,
             generation=generation,
+            supported_profiles=supported_profiles,
+            supported_cache_objects=supported_cache_objects,
+            max_cache_objects=max_cache_objects,
+            max_cache_object_bytes=max_cache_object_bytes,
+            resume_token_bytes=resume_token_bytes,
+            max_in_flight_operations=max_in_flight_operations,
+            granted_operation_credit=granted_operation_credit,
+            lease_ttl_ms=lease_ttl_ms,
+            resume_window_ms=resume_window_ms,
+            schema_descriptors=schema_descriptors,
+            application_policy=application_policy,
         )
 
     @property
@@ -2909,7 +3064,6 @@ _NATIVE_RUNTIME_DIAGNOSTIC_OK = NativeRuntimeDiagnostic(
     related_operation_id=0,
     related_frame_id=0,
 )
-_NATIVE_STRUCTURED_DIAGNOSTIC_OK = NativeStructuredDiagnostic(status=_NATIVE_STATUS_OK)
 
 
 @dataclass(frozen=True, slots=True)
@@ -3262,18 +3416,6 @@ def _unpack_runtime_event_prefix(metadata_type: type[Any], payload: bytes) -> tu
     return metadata_type.unpack(payload[:metadata_length]), payload[metadata_length:]
 
 
-def _runtime_event_payload(event: NativeRuntimeEvent) -> bytes:
-    metadata_value = event.metadata.value
-    metadata_bytes = b"" if metadata_value is None else bytes(metadata_value.pack())
-    if event.tail.kind is RuntimeEventTailKind.BODY:
-        return metadata_bytes + event.tail.body
-    if event.tail.kind is RuntimeEventTailKind.DIAGNOSTIC:
-        return metadata_bytes + event.tail.diagnostic
-    if event.tail.kind is RuntimeEventTailKind.METADATA_BODY_AND_DELTA:
-        return metadata_bytes + event.tail.metadata_body + event.tail.delta
-    return metadata_bytes
-
-
 def _runtime_event_context(event: NativeRuntimeEvent) -> _NativeRuntimeEventContext:
     context = event._native_context
     if not isinstance(context, _NativeRuntimeEventContext):
@@ -3287,18 +3429,6 @@ def _native_event_kind(event: NativePolledEvent) -> int:
     return event.kind
 
 
-def _event_payload(event: NativePolledEvent) -> bytes:
-    if isinstance(event, NativeRuntimeEvent):
-        return _runtime_event_payload(event)
-    return event.payload
-
-
-def _event_frame_id(event: NativePolledEvent) -> int:
-    if isinstance(event, NativeRuntimeEvent):
-        return event.header.frame_id
-    return event.diagnostic.related_frame_id
-
-
 def _event_operation_id(event: NativePolledEvent) -> int:
     if isinstance(event, NativeRuntimeEvent):
         context = _runtime_event_context(event)
@@ -3307,21 +3437,6 @@ def _event_operation_id(event: NativePolledEvent) -> int:
         value = event.metadata.value
         return int(getattr(value, "operation_id", 0))
     return event.diagnostic.related_operation_id
-
-
-def _event_native_diagnostic(event: NativePolledEvent) -> NativeRuntimeDiagnostic:
-    if isinstance(event, NativeRuntimeEvent):
-        return _runtime_event_context(event).diagnostic
-    return event.diagnostic
-
-
-class NativeOperationLifecycle(StrEnum):
-    COMPLETED = "completed"
-    PARTIAL = "partial"
-    DEGRADED = "degraded"
-    STALE_REUSE = "stale_reuse"
-    CANCELLED = "cancelled"
-    FAILED = "failed"
 
 
 class NativeSessionPriorityClass(StrEnum):
@@ -3361,167 +3476,98 @@ class NativeOperationSchedulingHint:
         return self.parent_operation_id is not None or self.operation_group_id is not None
 
 
+@dataclass(frozen=True, slots=True)
 class NativeRuntimeResult:
-    __slots__ = (
-        "diagnostic",
-        "event",
-        "frame_id",
-        "metadata",
-        "operation_id",
-        "body",
-        "state",
-    )
+    operation_id: int
+    terminal_state: ResultTerminalState
+    event: NativeTerminalEvent
 
-    def __init__(
-        self,
-        state: NativeOperationLifecycle,
-        operation_id: int,
-        frame_id: int,
-        payload: bytes,
-        event: NativePolledEvent,
-        diagnostic: NativeStructuredDiagnostic,
-    ) -> None:
-        self.state = state
-        self.operation_id = operation_id
-        self.frame_id = frame_id
-        self.diagnostic = diagnostic
-        self.event = event
-        if _native_event_kind(event) == EVENT_KIND_RESULT_PUSHED:
-            if len(payload) < RESULT_PUSH_METADATA_LENGTH:
-                raise ValueError(
-                    "native RESULT_PUSH payload is shorter than the fixed result metadata prefix: "
-                    f"expected at least {RESULT_PUSH_METADATA_LENGTH} bytes, got {len(payload)}"
-                )
-            self.metadata = ResultPushMetadata.unpack(payload[:RESULT_PUSH_METADATA_LENGTH])
-            self.body = payload[RESULT_PUSH_METADATA_LENGTH:]
-        else:
-            self.metadata = None
-            self.body = payload
+    def __post_init__(self) -> None:
+        if type(self.operation_id) is not int or not 1 <= self.operation_id <= 0xFFFFFFFFFFFFFFFF:
+            raise ValueError("operation_id must be a non-zero unsigned 64-bit integer")
+        object.__setattr__(self, "terminal_state", ResultTerminalState(self.terminal_state))
+        if not isinstance(self.event, NativeTerminalEvent):
+            raise TypeError("event must be a NativeTerminalEvent")
+        lifecycle = self.event.as_lifecycle()
+        if lifecycle is not None and lifecycle.operation_id != self.operation_id:
+            raise ValueError("lifecycle event operation_id must match result operation_id")
+        expected_terminal_state = _terminal_state_from_terminal_event(self.event)
+        if self.terminal_state is not expected_terminal_state:
+            raise ValueError(
+                f"terminal_state {self.terminal_state.name} does not match "
+                f"{self.event.kind.value} terminal evidence ({expected_terminal_state.name})"
+            )
 
     @classmethod
-    def from_event(
+    def _from_polled_event(
         cls,
         event: NativePolledEvent,
         *,
-        state: NativeOperationLifecycle | str | None = None,
         operation_id: int | None = None,
     ) -> NativeRuntimeResult:
-        selected_state = NativeOperationLifecycle(state) if state is not None else _infer_lifecycle_from_event(event)
-        selected_operation_id = operation_id
-        if selected_operation_id is None:
-            selected_operation_id = _event_operation_id(event)
-        return cls(
-            state=selected_state,
-            operation_id=selected_operation_id,
-            frame_id=_event_frame_id(event),
-            payload=_event_payload(event),
-            event=event,
-            diagnostic=NativeStructuredDiagnostic.from_runtime_diagnostic(_event_native_diagnostic(event)),
-        )
+        selected_operation_id = _event_operation_id(event) if operation_id is None else operation_id
+        if isinstance(event, NativeRuntimeEvent):
+            message_type = event.header.message_type
+            if message_type is MessageType.RESULT_PUSH:
+                if event.metadata.kind is not RuntimeEventMetadataKind.RESULT_PUSH:
+                    raise NativeHandleError("RESULT_PUSH terminal event requires ResultPushMetadata")
+                terminal_state = ResultTerminalState.SUCCESS
+            elif message_type in {MessageType.RESULT_DROP, MessageType.RESULT_DROP_REASON}:
+                terminal_state = ResultTerminalState.DROPPED
+            else:
+                raise NativeHandleError(f"{message_type.name} is not a terminal result event")
+            terminal_event = NativeTerminalEvent.runtime(event)
+        else:
+            lifecycle = OperationLifecycleEvent(
+                selected_operation_id,
+                _operation_state_from_lifecycle_event(event),
+            )
+            terminal_state = _terminal_state_from_operation_state(lifecycle.state)
+            terminal_event = NativeTerminalEvent.lifecycle(lifecycle)
+        return cls(selected_operation_id, terminal_state, terminal_event)
 
 
-def _submit_result_from_ffi_event(
-    event: _NnrpEvent,
-    *,
-    connection: NativeHandle,
-    session: NativeHandle,
-    state: NativeOperationLifecycle | str | None,
-    operation_id: int,
-) -> NativeRuntimeResult:
-    kind = int(event.kind)
-    payload = _copy_buffer_view(event.payload)
-    raw_diagnostic = event.diagnostic
-    status = NativeStatus.from_ffi(raw_diagnostic.status)
-    if (
-        status is _NATIVE_STATUS_OK
-        and raw_diagnostic.related_connection_id == 0
-        and raw_diagnostic.related_session_id == 0
-        and raw_diagnostic.related_operation_id == 0
-        and raw_diagnostic.related_frame_id == 0
-    ):
-        diagnostic = _NATIVE_RUNTIME_DIAGNOSTIC_OK
-        structured_diagnostic = _NATIVE_STRUCTURED_DIAGNOSTIC_OK
-    else:
-        diagnostic = NativeRuntimeDiagnostic(
-            status=status,
-            related_connection_id=int(raw_diagnostic.related_connection_id),
-            related_session_id=int(raw_diagnostic.related_session_id),
-            related_operation_id=int(raw_diagnostic.related_operation_id),
-            related_frame_id=int(raw_diagnostic.related_frame_id),
-        )
-        structured_diagnostic = NativeStructuredDiagnostic(
-            status=status,
-            related_connection_id=diagnostic.related_connection_id,
-            related_session_id=diagnostic.related_session_id,
-            related_operation_id=diagnostic.related_operation_id,
-            related_frame_id=diagnostic.related_frame_id,
-        )
-    raw_operation = event.operation
-    operation = object.__new__(NativeHandle)
-    object.__setattr__(operation, "kind", int(raw_operation.kind))
-    object.__setattr__(operation, "id", int(raw_operation.id))
-    object.__setattr__(operation, "generation", int(raw_operation.generation))
-    object.__setattr__(operation, "flags", int(raw_operation.flags))
-    frame_id = int(event.header.frame_id) or diagnostic.related_frame_id
-    lifecycle_event = NativeLifecycleEvent(
-        kind,
-        connection,
-        session,
-        operation,
-        payload,
-        diagnostic,
-    )
-    if state is not None:
-        selected_state = NativeOperationLifecycle(state)
-    elif status.status_code == FFI_STATUS_OK and kind != EVENT_KIND_ERROR:
-        selected_state = (
-            NativeOperationLifecycle.CANCELLED
-            if kind == EVENT_KIND_RESULT_DROPPED
-            else NativeOperationLifecycle.COMPLETED
-        )
-    else:
-        selected_state = NativeOperationLifecycle.FAILED
-    return NativeRuntimeResult(
-        selected_state,
-        operation_id,
-        frame_id,
-        payload,
-        lifecycle_event,
-        structured_diagnostic,
-    )
+def _operation_state_from_lifecycle_event(event: NativeLifecycleEvent) -> OperationState:
+    if not event.diagnostic.status.succeeded or event.kind == EVENT_KIND_ERROR:
+        return OperationState.FAILED
+    if event.kind == EVENT_KIND_RESULT_DROPPED:
+        return OperationState.CANCELLED
+    if event.kind == EVENT_KIND_RESULT_PUSHED:
+        return OperationState.COMPLETED
+    raise NativeHandleError(f"{event.kind_name} is not a terminal operation lifecycle event")
 
 
-def _submit_result_from_ok_result_pushed_ffi_event(
-    event: _NnrpEvent,
-    *,
-    connection: NativeHandle,
-    session: NativeHandle,
-    operation_id: int,
-) -> NativeRuntimeResult:
-    payload = _copy_buffer_view(event.payload)
-    raw_operation = event.operation
-    operation = object.__new__(NativeHandle)
-    object.__setattr__(operation, "kind", int(raw_operation.kind))
-    object.__setattr__(operation, "id", int(raw_operation.id))
-    object.__setattr__(operation, "generation", int(raw_operation.generation))
-    object.__setattr__(operation, "flags", int(raw_operation.flags))
-    frame_id = int(event.header.frame_id)
-    lifecycle_event = NativeLifecycleEvent(
-        EVENT_KIND_RESULT_PUSHED,
-        connection,
-        session,
-        operation,
-        payload,
-        _NATIVE_RUNTIME_DIAGNOSTIC_OK,
-    )
-    return NativeRuntimeResult(
-        NativeOperationLifecycle.COMPLETED,
-        operation_id,
-        frame_id,
-        payload,
-        lifecycle_event,
-        _NATIVE_STRUCTURED_DIAGNOSTIC_OK,
-    )
+def _terminal_state_from_operation_state(state: OperationState) -> ResultTerminalState:
+    try:
+        return {
+            OperationState.COMPLETED: ResultTerminalState.SUCCESS,
+            OperationState.CANCELLED: ResultTerminalState.CANCELLED,
+            OperationState.SUPERSEDED: ResultTerminalState.DROPPED,
+            OperationState.FAILED: ResultTerminalState.ERROR,
+        }[OperationState(state)]
+    except KeyError as error:
+        raise NativeHandleError(f"{OperationState(state).name} is not a terminal operation state") from error
+
+
+def _terminal_state_from_terminal_event(event: NativeTerminalEvent) -> ResultTerminalState:
+    runtime_event = event.as_runtime()
+    if runtime_event is not None:
+        message_type = runtime_event.header.message_type
+        if message_type is MessageType.RESULT_PUSH:
+            if runtime_event.metadata.kind is not RuntimeEventMetadataKind.RESULT_PUSH:
+                raise ValueError("RESULT_PUSH terminal event requires ResultPushMetadata")
+            return ResultTerminalState.SUCCESS
+        if message_type in {MessageType.RESULT_DROP, MessageType.RESULT_DROP_REASON}:
+            return ResultTerminalState.DROPPED
+        raise ValueError(f"{message_type.name} is not terminal result evidence")
+
+    lifecycle = event.as_lifecycle()
+    if lifecycle is None:
+        raise TypeError("event must contain runtime or lifecycle terminal evidence")
+    try:
+        return _terminal_state_from_operation_state(lifecycle.state)
+    except NativeHandleError as error:
+        raise ValueError(str(error)) from error
 
 
 @dataclass(frozen=True)
@@ -3677,10 +3723,24 @@ class NativeRuntimeClient:
         generation: int,
         transport_listener: NativeTransportListener,
     ) -> NativeRuntimeServer:
+        from nnrp.schema import token_delta_schema_descriptor
+
+        descriptor = token_delta_schema_descriptor()
         return transport_listener._adopt_server_role(
             self.entrypoints,
             server_id=server_id,
             generation=generation,
+            supported_profiles=(int(descriptor.profile_id),),
+            supported_cache_objects=(),
+            max_cache_objects=0,
+            max_cache_object_bytes=0,
+            resume_token_bytes=24,
+            max_in_flight_operations=4,
+            granted_operation_credit=2,
+            lease_ttl_ms=30_000,
+            resume_window_ms=120_000,
+            schema_descriptors=(descriptor,),
+            application_policy=None,
         )
 
 
@@ -3689,8 +3749,11 @@ class NativeRuntimeServer:
     entrypoints: NativeRuntimeEntrypoints
     handle: NativeConnectionHandle
     transport_name: str
+    _policy_callback: Any | None = field(default=None, repr=False, compare=False)
     _closed: bool = field(default=False, init=False, repr=False, compare=False)
     _accept_ticket: NativeHandle | None = field(default=None, init=False, repr=False, compare=False)
+    _accept_session_handle_id: int | None = field(default=None, init=False, repr=False, compare=False)
+    _accept_generation: int | None = field(default=None, init=False, repr=False, compare=False)
 
     def accept_session(
         self,
@@ -3717,6 +3780,13 @@ class NativeRuntimeServer:
             accept_ticket = NativeHandle.from_ffi(out_accept)
             accept_ticket.require_kind(HANDLE_KIND_SERVER_ACCEPT)
             object.__setattr__(self, "_accept_ticket", accept_ticket)
+            object.__setattr__(self, "_accept_session_handle_id", session_handle_id)
+            object.__setattr__(self, "_accept_generation", generation)
+        elif session_handle_id != self._accept_session_handle_id or generation != self._accept_generation:
+            raise NativeInvalidStateError(
+                NativeStatus(FFI_STATUS_INVALID_STATE),
+                "pending native server accept ticket requires the original session handle id and generation",
+            )
 
         wait_request = _NnrpServerAcceptWaitRequest(accept_ticket.to_ffi(), timeout_ms, 0)
         status = self.entrypoints.server_accept_wait(wait_request)
@@ -3732,6 +3802,8 @@ class NativeRuntimeServer:
         status = self.entrypoints.server_accept_claim(claim_request, ctypes.byref(result))
         raise_for_native_status(status)
         object.__setattr__(self, "_accept_ticket", None)
+        object.__setattr__(self, "_accept_session_handle_id", None)
+        object.__setattr__(self, "_accept_generation", None)
         try:
             active_transport_id = TransportId(int(result.active_transport_id))
         except ValueError as error:
@@ -3749,14 +3821,10 @@ class NativeRuntimeServer:
     def close(self) -> None:
         self._ensure_open()
         first_error: BaseException | None = None
-        accept_ticket = self._accept_ticket
-        if accept_ticket is not None:
-            try:
-                raise_for_native_status(self.entrypoints.server_accept_release(accept_ticket.to_ffi()))
-            except BaseException as error:
-                first_error = error
-            finally:
-                object.__setattr__(self, "_accept_ticket", None)
+        try:
+            self._release_pending_accept_ticket()
+        except BaseException as error:
+            first_error = error
         try:
             raise_for_native_status(self.entrypoints.client_close_connection(self.handle.to_ffi()))
         except BaseException as error:
@@ -3764,6 +3832,17 @@ class NativeRuntimeServer:
         object.__setattr__(self, "_closed", True)
         if first_error is not None:
             raise first_error
+
+    def _release_pending_accept_ticket(self) -> None:
+        accept_ticket = self._accept_ticket
+        if accept_ticket is None:
+            return
+        try:
+            raise_for_native_status(self.entrypoints.server_accept_release(accept_ticket.to_ffi()))
+        finally:
+            object.__setattr__(self, "_accept_ticket", None)
+            object.__setattr__(self, "_accept_session_handle_id", None)
+            object.__setattr__(self, "_accept_generation", None)
 
     def _ensure_open(self) -> None:
         if self._closed:
@@ -3780,24 +3859,40 @@ class NativeRuntimeConnection:
         self,
         *,
         requested_session_id: int,
-        generation: int,
         profile_id: int,
         schema_id: int,
         schema_version: int,
         priority_class: NativeSessionPriorityClass | str = NativeSessionPriorityClass.BALANCED,
+        default_deadline_ms: int = 500,
+        max_in_flight_operations: int = 4,
+        lease_ttl_hint_ms: int = 30_000,
+        allow_resume: bool = False,
+        resume_token_bytes: int = 0,
+        cache_hints: Iterable[int] = (),
     ) -> NativeRuntimeSession:
         self._ensure_open()
         selected_priority_class = NativeSessionPriorityClass(priority_class)
+        cache_hint_slice, cache_hint_owner = _u32_slice_from_values(cache_hints)
         request = _NnrpSessionOpenRequest(
-            self.handle.to_ffi(),
-            requested_session_id,
-            generation,
-            profile_id,
-            schema_id,
-            schema_version,
+            connection=self.handle.to_ffi(),
+            requested_session_id=requested_session_id,
+            session_handle_id=_allocate_native_handle_id(),
+            generation=1,
+            profile_id=profile_id,
+            priority_class=selected_priority_class.code,
+            allow_resume=int(allow_resume),
+            schema_id=schema_id,
+            schema_version=schema_version,
+            default_deadline_ms=default_deadline_ms,
+            max_in_flight_operations=max_in_flight_operations,
+            reserved0=0,
+            lease_ttl_hint_ms=lease_ttl_hint_ms,
+            resume_token_bytes=resume_token_bytes,
+            cache_hints=cache_hint_slice,
         )
         out_session = _NnrpHandle()
         status = self.entrypoints.client_open_session(request, ctypes.byref(out_session))
+        del cache_hint_owner
         raise_for_native_status(status)
         return NativeRuntimeSession(
             self.entrypoints,
@@ -3809,28 +3904,46 @@ class NativeRuntimeConnection:
     def resume_session(
         self,
         *,
+        recovery_ticket: bytes | bytearray | memoryview,
         requested_session_id: int,
-        generation: int,
         profile_id: int,
         schema_id: int,
         schema_version: int,
         resume_token_bytes: int,
         priority_class: NativeSessionPriorityClass | str = NativeSessionPriorityClass.BALANCED,
+        default_deadline_ms: int = 500,
+        max_in_flight_operations: int = 4,
+        lease_ttl_hint_ms: int = 30_000,
+        cache_hints: Iterable[int] = (),
     ) -> tuple[NativeRuntimeSession, NativeSessionRecoveryOutcome]:
         self._ensure_open()
         selected_priority_class = NativeSessionPriorityClass(priority_class)
+        cache_hint_slice, cache_hint_owner = _u32_slice_from_values(cache_hints)
+        ticket_view, ticket_owner = _buffer_view_from_payload(recovery_ticket)
         request = _NnrpSessionResumeRequest(
-            self.handle.to_ffi(),
-            requested_session_id,
-            generation,
-            profile_id,
-            schema_id,
-            schema_version,
-            resume_token_bytes,
+            _NnrpSessionOpenRequest(
+                connection=self.handle.to_ffi(),
+                requested_session_id=requested_session_id,
+                session_handle_id=_allocate_native_handle_id(),
+                generation=1,
+                profile_id=profile_id,
+                priority_class=selected_priority_class.code,
+                allow_resume=1,
+                schema_id=schema_id,
+                schema_version=schema_version,
+                default_deadline_ms=default_deadline_ms,
+                max_in_flight_operations=max_in_flight_operations,
+                reserved0=0,
+                lease_ttl_hint_ms=lease_ttl_hint_ms,
+                resume_token_bytes=resume_token_bytes,
+                cache_hints=cache_hint_slice,
+            ),
+            ticket_view,
         )
         out_session = _NnrpHandle()
         out_outcome = _NnrpSessionRecoveryOutcome()
         status = self.entrypoints.client_resume_session(request, ctypes.byref(out_session), ctypes.byref(out_outcome))
+        del cache_hint_owner, ticket_owner
         raise_for_native_status(status)
         return (
             NativeRuntimeSession(
@@ -3978,6 +4091,29 @@ class NativeRuntimeSession:
     _pending_events: list[NativePolledEvent] = field(default_factory=list, init=False, repr=False, compare=False)
     _poll_lock: threading.Lock = field(default_factory=threading.Lock, init=False, repr=False, compare=False)
     _next_runtime_frame_id: int = field(default=1, init=False, repr=False, compare=False)
+
+    def recovery_ticket(self) -> NativeSessionRecoveryTicket | None:
+        self._ensure_open()
+        out_buffer = _NnrpHandle()
+        out_ticket = _NnrpBufferView()
+        status = self.entrypoints.client_session_recovery_ticket(
+            self.handle.to_ffi(),
+            ctypes.byref(out_buffer),
+            ctypes.byref(out_ticket),
+        )
+        native_status = NativeStatus.from_ffi(status)
+        if native_status.status_code == FFI_STATUS_INVALID_ARGUMENT and native_status.detail_code == 104:
+            return None
+        raise_for_native_status(native_status)
+        owner = NativeHandle.from_ffi(out_buffer)
+        owner.require_kind(HANDLE_KIND_BUFFER)
+        try:
+            encoded = _copy_buffer_view(out_ticket)
+        finally:
+            raise_for_native_status(self.entrypoints.buffer_release(owner.to_ffi()))
+        from nnrp.client.native import NativeSessionRecoveryTicket
+
+        return NativeSessionRecoveryTicket.from_bytes(encoded)
 
     def await_event(self) -> NativeRuntimePollResult:
         self._ensure_open()
@@ -4511,7 +4647,6 @@ class NativeRuntimeSession:
         self,
         operation: NativeRuntimeOperation,
         *,
-        state: NativeOperationLifecycle | str | None = None,
         max_events: int | None = None,
         timeout_ms: int = 0,
     ) -> NativeRuntimeResult:
@@ -4521,7 +4656,6 @@ class NativeRuntimeSession:
         _require_bounded_integer("timeout_ms", timeout_ms, 0xFFFFFFFF)
         result = self._poll_result_batch(
             operation,
-            state=state,
             max_events=1 if max_events is None else max_events,
             timeout_ms=timeout_ms,
         )
@@ -4533,12 +4667,11 @@ class NativeRuntimeSession:
         self,
         operation: NativeRuntimeOperation,
         *,
-        state: NativeOperationLifecycle | str | None,
         max_events: int,
         timeout_ms: int,
     ) -> NativeRuntimeResult | None:
         with self._poll_lock:
-            matched_result = self._take_pending_result(operation, state=state)
+            matched_result = self._take_pending_result(operation)
             if matched_result is not None or max_events == 0:
                 return matched_result
 
@@ -4567,9 +4700,8 @@ class NativeRuntimeSession:
                     and _event_is_result_event(event)
                     and _event_matches_operation(event, operation)
                 ):
-                    matched_result = NativeRuntimeResult.from_event(
+                    matched_result = NativeRuntimeResult._from_polled_event(
                         event,
-                        state=state,
                         operation_id=operation.operation_id,
                     )
                 else:
@@ -4579,15 +4711,12 @@ class NativeRuntimeSession:
     def _take_pending_result(
         self,
         operation: NativeRuntimeOperation,
-        *,
-        state: NativeOperationLifecycle | str | None,
     ) -> NativeRuntimeResult | None:
         for index, event in enumerate(self._pending_events):
             if _event_is_result_event(event) and _event_matches_operation(event, operation):
                 del self._pending_events[index]
-                return NativeRuntimeResult.from_event(
+                return NativeRuntimeResult._from_polled_event(
                     event,
-                    state=state,
                     operation_id=operation.operation_id,
                 )
         return None
@@ -4613,7 +4742,6 @@ class NativeRuntimeSession:
         parent_operation_id: int | None = None,
         operation_group_id: int | None = None,
         scheduling_hint: NativeOperationSchedulingHint | None = None,
-        state: NativeOperationLifecycle | str | None = None,
         max_events: int | None = None,
         timeout_ms: int = 0,
     ) -> NativeRuntimeResult:
@@ -4623,7 +4751,7 @@ class NativeRuntimeSession:
             operation_group_id=operation_group_id,
             scheduling_hint=scheduling_hint,
         )
-        return self.poll_result(operation, state=state, max_events=max_events, timeout_ms=timeout_ms)
+        return self.poll_result(operation, max_events=max_events, timeout_ms=timeout_ms)
 
     async def async_submit_and_poll_result(
         self,
@@ -4632,7 +4760,6 @@ class NativeRuntimeSession:
         parent_operation_id: int | None = None,
         operation_group_id: int | None = None,
         scheduling_hint: NativeOperationSchedulingHint | None = None,
-        state: NativeOperationLifecycle | str | None = None,
         max_events: int | None = None,
         timeout_ms: int = 0,
     ) -> NativeRuntimeResult:
@@ -4642,7 +4769,6 @@ class NativeRuntimeSession:
             parent_operation_id=parent_operation_id,
             operation_group_id=operation_group_id,
             scheduling_hint=scheduling_hint,
-            state=state,
             max_events=max_events,
             timeout_ms=timeout_ms,
         )
@@ -6435,6 +6561,26 @@ def _buffer_view_from_payload(payload: bytes | bytearray | memoryview) -> tuple[
     return _NnrpBufferView(ctypes.cast(buffer, ctypes.c_void_p), view.nbytes), buffer
 
 
+def _u16_slice_from_values(values: Iterable[int]) -> tuple[_NnrpU16Slice, object | None]:
+    normalized = tuple(int(value) for value in values)
+    if any(not 0 <= value <= 0xFFFF for value in normalized):
+        raise ValueError("u16 slice values must fit in u16")
+    if not normalized:
+        return _NnrpU16Slice(ctypes.POINTER(ctypes.c_uint16)(), 0), None
+    owner = (ctypes.c_uint16 * len(normalized))(*normalized)
+    return _NnrpU16Slice(ctypes.cast(owner, ctypes.POINTER(ctypes.c_uint16)), len(normalized)), owner
+
+
+def _u32_slice_from_values(values: Iterable[int]) -> tuple[_NnrpU32Slice, object | None]:
+    normalized = tuple(int(value) for value in values)
+    if any(not 0 <= value <= 0xFFFFFFFF for value in normalized):
+        raise ValueError("u32 slice values must fit in u32")
+    if not normalized:
+        return _NnrpU32Slice(ctypes.POINTER(ctypes.c_uint32)(), 0), None
+    owner = (ctypes.c_uint32 * len(normalized))(*normalized)
+    return _NnrpU32Slice(ctypes.cast(owner, ctypes.POINTER(ctypes.c_uint32)), len(normalized)), owner
+
+
 def _normalize_transport_packets(
     packets: bytes | bytearray | memoryview | Iterable[bytes | bytearray | memoryview],
 ) -> tuple[bytes | bytearray | memoryview, ...]:
@@ -6671,14 +6817,6 @@ def _coerce_operation_scheduling_hint(
     if operation_group_id is not None and scheduling_hint.operation_group_id != operation_group_id:
         raise NativeHandleError("operation_group_id conflicts with scheduling_hint")
     return scheduling_hint
-
-
-def _infer_lifecycle_from_event(event: NativePolledEvent) -> NativeOperationLifecycle:
-    if not _event_native_diagnostic(event).status.succeeded or _native_event_kind(event) == EVENT_KIND_ERROR:
-        return NativeOperationLifecycle.FAILED
-    if _native_event_kind(event) == EVENT_KIND_RESULT_DROPPED:
-        return NativeOperationLifecycle.CANCELLED
-    return NativeOperationLifecycle.COMPLETED
 
 
 def _format_status_message(status: NativeStatus) -> str:

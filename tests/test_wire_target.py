@@ -176,9 +176,11 @@ def test_run_server_scenario_dispatches_typed_handlers(
 
     @contextmanager
     def listen(*args, **kwargs):
-        route = kwargs["provider_routes"]["tcp"]
+        assert not kwargs
+        options = args[0]
+        route = options.provider_routes["tcp"]
         assert route.provider_endpoint == "tcp://127.0.0.1:19091"
-        assert kwargs["transport_policy"] == "force_tcp"
+        assert options.transport_policy.name == "FORCE_TCP"
         yield server
 
     monkeypatch.setattr(wire_target, "listen_native_server", listen)
@@ -246,7 +248,11 @@ def test_server_handlers_exchange_typed_control_frames(monkeypatch: pytest.Monke
 
 def test_progress_client_validates_frames_and_terminal_result(monkeypatch: pytest.MonkeyPatch) -> None:
     session = _FakeSession()
-    connection = SimpleNamespace(open_session=lambda: session, close=lambda: None)
+
+    async def open_session():
+        return session
+
+    connection = SimpleNamespace(open_session=open_session, close=lambda: None)
 
     @contextmanager
     def open_connection(*args, **kwargs):
@@ -276,14 +282,32 @@ def test_progress_client_validates_frames_and_terminal_result(monkeypatch: pytes
     monkeypatch.setattr(
         wire_target,
         "_poll_result",
-        lambda *args, **kwargs: SimpleNamespace(body=wire_target._RESPONSE_BODY),
+        lambda *args, **kwargs: SimpleNamespace(
+            event=SimpleNamespace(
+                as_runtime=lambda: SimpleNamespace(tail=SimpleNamespace(body=wire_target._RESPONSE_BODY))
+            )
+        ),
     )
 
     wire_target._run_progress_client(_scenario("progress", "suite_as_server"), timeout_seconds=1.0)
     assert any(name == "submit" for name, _ in session.calls)
 
-    monkeypatch.setattr(wire_target, "_poll_result", lambda *args, **kwargs: SimpleNamespace(body=b"wrong"))
+    monkeypatch.setattr(
+        wire_target,
+        "_poll_result",
+        lambda *args, **kwargs: SimpleNamespace(
+            event=SimpleNamespace(as_runtime=lambda: SimpleNamespace(tail=SimpleNamespace(body=b"wrong")))
+        ),
+    )
     with pytest.raises(RuntimeError, match="expected canonical result body"):
+        wire_target._run_progress_client(_scenario("progress", "suite_as_server"), timeout_seconds=1.0)
+
+    monkeypatch.setattr(
+        wire_target,
+        "_poll_result",
+        lambda *args, **kwargs: SimpleNamespace(event=SimpleNamespace(as_runtime=lambda: None)),
+    )
+    with pytest.raises(RuntimeError, match="expected a wire RESULT_PUSH terminal event"):
         wire_target._run_progress_client(_scenario("progress", "suite_as_server"), timeout_seconds=1.0)
 
 

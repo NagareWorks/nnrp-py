@@ -328,7 +328,11 @@ def test_run_client_case_reports_selection_and_rejection(
         selected_provider=SimpleNamespace(metadata=SimpleNamespace(id="nnrp.transport.tcp.native")),
     )
     session = SimpleNamespace(close=lambda: None)
-    connection = SimpleNamespace(transport_selection=selection, open_session=lambda: session)
+
+    async def open_session() -> object:
+        return session
+
+    connection = SimpleNamespace(transport_selection=selection, open_session=open_session)
 
     class Scope:
         def __enter__(self) -> Any:

@@ -199,6 +199,7 @@ class NativeServer:
     _servers: tuple[tuple[str, NativeRuntimeServer], ...]
     bound_provider_endpoints: Mapping[str, NativeTransportEndpoint]
     _sessions: list[NativeRuntimeServerSession] = field(default_factory=list, init=False, repr=False)
+    _accept_session_handle_ids: list[int | None] = field(default_factory=list, init=False, repr=False)
     _closed: bool = field(default=False, init=False, repr=False)
 
     def accept(self, options: NativeServerAcceptOptions | None = None) -> NativeRuntimeServerSession:
@@ -206,11 +207,17 @@ class NativeServer:
         resolved = options or NativeServerAcceptOptions()
         timeout_ms = resolved.timeout_ms or _DEFAULT_ACCEPT_TIMEOUT_MS
         deadline = time.monotonic() + timeout_ms / 1_000
+        if not self._accept_session_handle_ids:
+            self._accept_session_handle_ids.extend(None for _server in self._servers)
         while True:
-            for _transport_name, server in self._servers:
+            for index, (_transport_name, server) in enumerate(self._servers):
+                session_handle_id = self._accept_session_handle_ids[index]
+                if session_handle_id is None:
+                    session_handle_id = _allocate_native_handle_id()
+                    self._accept_session_handle_ids[index] = session_handle_id
                 try:
                     session = server.accept_session(
-                        session_handle_id=_allocate_native_handle_id(),
+                        session_handle_id=session_handle_id,
                         generation=1,
                         timeout_ms=_ACCEPT_POLL_SLICE_MS,
                     )
@@ -222,10 +229,31 @@ class NativeServer:
                     except BaseException:
                         pass
                     raise
+                self._accept_session_handle_ids[index] = None
                 self._sessions.append(session)
                 return session
             if time.monotonic() >= deadline:
+                try:
+                    self._release_pending_accept_tickets()
+                except BaseException:
+                    try:
+                        self.close()
+                    except BaseException:
+                        pass
+                    raise
                 raise NativeWouldBlockError(NativeStatus(FFI_STATUS_WOULD_BLOCK))
+
+    def _release_pending_accept_tickets(self) -> None:
+        first_error: BaseException | None = None
+        for index, (_transport_name, server) in enumerate(self._servers):
+            try:
+                server._release_pending_accept_ticket()
+            except BaseException as error:
+                first_error = first_error or error
+            finally:
+                self._accept_session_handle_ids[index] = None
+        if first_error is not None:
+            raise first_error
 
     def close(self) -> None:
         if self._closed:

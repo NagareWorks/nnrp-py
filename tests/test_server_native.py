@@ -46,9 +46,13 @@ class FakeRuntimeServer:
         self.transport_name = transport_name
         self._closed = False
         self.close_calls = 0
+        self.release_pending_accept_calls = 0
         self.accept_calls: list[tuple[int, int, int]] = []
         self.sessions: list[FakeRuntimeServerSession] = []
         self.accept_error: Exception | None = None
+        self.accept_outcomes: list[Exception | None] = []
+        self.release_error: Exception | None = None
+        self.close_error: Exception | None = None
 
     def accept_session(
         self,
@@ -58,15 +62,23 @@ class FakeRuntimeServer:
         timeout_ms: int,
     ) -> FakeRuntimeServerSession:
         self.accept_calls.append((session_handle_id, generation, timeout_ms))
-        if self.accept_error is not None:
-            raise self.accept_error
+        outcome = self.accept_outcomes.pop(0) if self.accept_outcomes else self.accept_error
+        if outcome is not None:
+            raise outcome
         session = FakeRuntimeServerSession(self.transport_name)
         self.sessions.append(session)
         return session
 
+    def _release_pending_accept_ticket(self) -> None:
+        self.release_pending_accept_calls += 1
+        if self.release_error is not None:
+            raise self.release_error
+
     def close(self) -> None:
         self.close_calls += 1
         self._closed = True
+        if self.close_error is not None:
+            raise self.close_error
 
 
 class FakeListener:
@@ -185,6 +197,74 @@ def test_listen_native_server_owns_multi_listener_role_lifecycle(monkeypatch: py
     assert session.close_calls == 1
     assert all(binding.runtime_server._closed for binding in bindings.values())
     assert all(binding.runtime_server.close_calls == 1 for binding in bindings.values())
+
+
+def test_native_server_reuses_accept_handle_across_poll_slices_and_releases_on_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    bindings = install_bindings(monkeypatch, "tcp")
+    runtime_server = bindings["tcp"].runtime_server
+    runtime_server.accept_error = NativeWouldBlockError(NativeStatus(FFI_STATUS_WOULD_BLOCK))
+    monotonic_values = iter((0.0, 0.0, 0.006))
+    monkeypatch.setattr(server_native_module.time, "monotonic", lambda: next(monotonic_values))
+
+    with listen_native_server(NativeServerBootstrapOptions("nnrp://localhost")) as server:
+        with pytest.raises(NativeWouldBlockError):
+            server.accept(NativeServerAcceptOptions(timeout_ms=5))
+
+        assert len(runtime_server.accept_calls) >= 2
+        assert len({session_handle_id for session_handle_id, _generation, _timeout in runtime_server.accept_calls}) == 1
+        assert runtime_server.release_pending_accept_calls == 1
+
+
+def test_native_server_preserves_losing_accept_ticket_identity_across_accept_calls(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    bindings = install_bindings(monkeypatch, "ipc", "tcp")
+    ipc_server = bindings["ipc"].runtime_server
+    tcp_server = bindings["tcp"].runtime_server
+    ipc_server.accept_outcomes = [NativeWouldBlockError(NativeStatus(FFI_STATUS_WOULD_BLOCK)), None]
+
+    with listen_native_server(
+        NativeServerBootstrapOptions(
+            "nnrp://localhost",
+            provider_routes={"ipc": NativeServerProviderRoute(provider_endpoint="unix:///tmp/nnrp.sock")},
+        )
+    ) as server:
+        tcp_session = server.accept(NativeServerAcceptOptions(timeout_ms=20))
+        ipc_session = server.accept(NativeServerAcceptOptions(timeout_ms=20))
+
+        assert tcp_session.active_transport_name == "tcp"
+        assert ipc_session.active_transport_name == "ipc"
+        assert ipc_server.accept_calls[0][0] == ipc_server.accept_calls[1][0]
+        assert tcp_server.release_pending_accept_calls == 0
+        assert ipc_server.release_pending_accept_calls == 0
+
+
+def test_native_server_releases_all_pending_tickets_before_propagating_timeout_cleanup_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    bindings = install_bindings(monkeypatch, "ipc", "tcp")
+    ipc_server = bindings["ipc"].runtime_server
+    tcp_server = bindings["tcp"].runtime_server
+    for runtime_server in (ipc_server, tcp_server):
+        runtime_server.accept_error = NativeWouldBlockError(NativeStatus(FFI_STATUS_WOULD_BLOCK))
+    ipc_server.release_error = NativeArtifactError("first accept ticket release failed")
+    tcp_server.release_error = NativeArtifactError("second accept ticket release failed")
+    tcp_server.close_error = NativeArtifactError("server close failed")
+
+    with listen_native_server(
+        NativeServerBootstrapOptions(
+            "nnrp://localhost",
+            provider_routes={"ipc": NativeServerProviderRoute(provider_endpoint="unix:///tmp/nnrp.sock")},
+        )
+    ) as server:
+        with pytest.raises(NativeArtifactError, match="first accept ticket release failed"):
+            server.accept(NativeServerAcceptOptions(timeout_ms=5))
+
+        assert ipc_server.release_pending_accept_calls == 1
+        assert tcp_server.release_pending_accept_calls == 1
+        assert server._closed is True
 
 
 def test_explicit_server_transport_bindings_are_authoritative(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -3767,15 +3767,36 @@ def test_native_runtime_server_retains_accept_ticket_across_would_block() -> Non
     with pytest.raises(NativeWouldBlockError):
         server.accept_session(session_handle_id=41, generation=3, timeout_ms=1)
 
-    session = server.accept_session(session_handle_id=42, generation=4, timeout_ms=25)
+    session = server.accept_session(session_handle_id=41, generation=3, timeout_ms=25)
 
-    assert session.handle.handle.id == 42
+    assert session.handle.handle.id == 41
     assert session.active_transport_name == "ipc"
     assert len(library.nnrp_server_accept_begin.calls) == 1
     assert len(library.nnrp_server_accept_wait.calls) == 2
     assert len(library.nnrp_server_accept_claim.calls) == 1
     assert library.nnrp_server_accept_claim.calls[0][0].accept.id == 41
-    assert library.nnrp_server_accept_claim.calls[0][0].session_handle_id == 42
+    assert library.nnrp_server_accept_claim.calls[0][0].session_handle_id == 41
+
+
+def test_native_runtime_server_rejects_changed_identity_for_pending_accept_ticket() -> None:
+    library = FakeRuntimeLibrary(
+        accept_wait_statuses=[NativeStatus(FFI_STATUS_WOULD_BLOCK).to_ffi()],
+    )
+    server = NativeRuntimeServer(
+        NativeRuntimeEntrypoints(library),
+        NativeConnectionHandle.from_ffi(_NnrpHandle(HANDLE_KIND_CONNECTION, 21, 1, 0)),
+        "tcp",
+    )
+
+    with pytest.raises(NativeWouldBlockError):
+        server.accept_session(session_handle_id=41, generation=3, timeout_ms=1)
+
+    with pytest.raises(NativeInvalidStateError, match="original session handle id and generation"):
+        server.accept_session(session_handle_id=42, generation=4, timeout_ms=25)
+
+    assert len(library.nnrp_server_accept_begin.calls) == 1
+    assert len(library.nnrp_server_accept_wait.calls) == 1
+    assert len(library.nnrp_server_accept_claim.calls) == 0
 
 
 def test_native_runtime_server_releases_pending_accept_ticket_before_close() -> None:

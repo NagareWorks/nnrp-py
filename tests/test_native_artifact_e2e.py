@@ -27,6 +27,7 @@ from nnrp.core import (
     ResultClass,
     ResultFlags,
     ResultPushMetadata,
+    SessionOpenMetadata,
     TransportPolicy,
     build_ping_packet,
     build_pong_packet,
@@ -47,6 +48,7 @@ from nnrp.server import (
     NativeServerBootstrapOptions,
     NativeServerProviderRoute,
     NativeServerSessionOptions,
+    NativeServerSessionPolicyDecision,
     listen_native_server,
 )
 
@@ -118,7 +120,7 @@ def _drain_native_setup_events(session: Any) -> None:
 
 
 @contextmanager
-def _open_native_role_loopback() -> Any:
+def _open_native_role_loopback(*, application_policy: Any | None = None) -> Any:
     suffix = uuid4().hex
     provider_endpoint = (
         f"npipe://nnrp-py-abi-{suffix}"
@@ -134,6 +136,11 @@ def _open_native_role_loopback() -> Any:
                 "nnrp://abi.local",
                 provider_routes={"ipc": NativeServerProviderRoute(provider_endpoint=provider_endpoint)},
                 transport_policy=TransportPolicy.FORCE_IPC,
+                session_defaults=(
+                    NativeServerSessionOptions()
+                    if application_policy is None
+                    else NativeServerSessionOptions(application_policy=application_policy)
+                ),
             )
         ) as server:
             with ThreadPoolExecutor(max_workers=1, thread_name_prefix="nnrp-abi-accept") as executor:
@@ -256,6 +263,21 @@ async def test_foreign_artifact_cannot_take_carrier_or_listener_ownership() -> N
             await second_server.close()
     finally:
         await second_listener.close()
+
+
+def test_packaged_native_role_completes_async_application_policy() -> None:
+    class AcceptRecordingPolicy:
+        def __init__(self) -> None:
+            self.observed: list[SessionOpenMetadata] = []
+
+        async def evaluate(self, open: SessionOpenMetadata) -> NativeServerSessionPolicyDecision:
+            await asyncio.sleep(0.01)
+            self.observed.append(open)
+            return NativeServerSessionPolicyDecision.accept()
+
+    policy = AcceptRecordingPolicy()
+    with _open_native_role_loopback(application_policy=policy):
+        assert [metadata.requested_session_id for metadata in policy.observed] == [3]
 
 
 def test_packaged_native_role_batch_decodes_multiple_events_with_ffi_stride() -> None:

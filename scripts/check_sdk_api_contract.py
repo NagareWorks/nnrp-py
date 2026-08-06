@@ -6,7 +6,7 @@ import json
 from pathlib import Path
 from typing import Any
 
-EXPECTED_CONTRACT_VERSION = 9
+EXPECTED_CONTRACT_VERSION = 10
 EXPECTED_OPERATION_STATES = {
     "ACCEPTED": 0,
     "RUNNING": 1,
@@ -54,6 +54,16 @@ def enum_values(class_node: ast.ClassDef) -> dict[str, int]:
         if not isinstance(node, ast.Assign) or len(node.targets) != 1 or not isinstance(node.targets[0], ast.Name):
             continue
         if isinstance(node.value, ast.Constant) and type(node.value.value) is int:
+            values[node.targets[0].id] = node.value.value
+    return values
+
+
+def string_enum_values(class_node: ast.ClassDef) -> dict[str, str]:
+    values: dict[str, str] = {}
+    for node in class_node.body:
+        if not isinstance(node, ast.Assign) or len(node.targets) != 1 or not isinstance(node.targets[0], ast.Name):
+            continue
+        if isinstance(node.value, ast.Constant) and isinstance(node.value.value, str):
             values[node.targets[0].id] = node.value.value
     return values
 
@@ -111,6 +121,25 @@ def check_contract(contract_path: Path, source_root: Path) -> None:
         == EXPECTED_TERMINAL_STATES,
         "ResultTerminalState contract drifted",
     )
+    semantic_enums = contract["semanticEnums"]
+    expected_connection_lifecycle_states = {"OPEN": "open", "CLOSING": "closing", "CLOSED": "closed"}
+    expected_session_lifecycle_states = {
+        "OPEN": "open",
+        "RESUMED": "resumed",
+        "CLOSING": "closing",
+        "DRAINING": "draining",
+        "CLOSED": "closed",
+    }
+    require(
+        {value.upper(): value for value in semantic_enums["ConnectionLifecycleState"]}
+        == expected_connection_lifecycle_states,
+        "ConnectionLifecycleState contract drifted",
+    )
+    require(
+        {value.upper(): value for value in semantic_enums["SessionLifecycleState"]}
+        == expected_session_lifecycle_states,
+        "SessionLifecycleState contract drifted",
+    )
 
     types = contract["types"]
     lifecycle = types["OperationLifecycleEvent"]
@@ -141,6 +170,31 @@ def check_contract(contract_path: Path, source_root: Path) -> None:
             ("event", "TerminalEvent", True),
         ],
         "NnrpResult field contract drifted",
+    )
+
+    require(
+        field_shape(types["SessionLifecycleSnapshot"])
+        == [
+            ("session_id", "u32", True),
+            ("state", "SessionLifecycleState", True),
+            ("profile_id", "u16", True),
+            ("priority_class", "SessionPriorityClass", True),
+            ("schema_id", "u32", True),
+            ("schema_version", "u32", True),
+            ("max_in_flight_operations", "u16", True),
+            ("route_scope_id", "u32", True),
+            ("last_operation_id", "u64", True),
+            ("session_error_code", "u32", True),
+        ],
+        "SessionLifecycleSnapshot field contract drifted",
+    )
+    require(
+        field_shape(types["ConnectionLifecycleSnapshot"])
+        == [
+            ("state", "ConnectionLifecycleState", True),
+            ("sessions", "SessionLifecycleSnapshot[]", True),
+        ],
+        "ConnectionLifecycleSnapshot field contract drifted",
     )
 
     recovery_ticket = types["SessionRecoveryTicket"]
@@ -178,6 +232,11 @@ def check_contract(contract_path: Path, source_root: Path) -> None:
     require(
         python_projection.get("result") == "nnrp.NativeRuntimeResult",
         "Python NativeRuntimeResult projection drifted",
+    )
+    require(
+        python_projection.get("connectionLifecycle") == "nnrp.lifecycle.ConnectionLifecycleSnapshot"
+        and python_projection.get("sessionLifecycle") == "nnrp.lifecycle.SessionLifecycleSnapshot",
+        "Python lifecycle projections drifted",
     )
     expected_recovery_projections = {
         "clientBootstrapOptions": "nnrp.client.NativeClientOptions",
@@ -217,6 +276,7 @@ def check_contract(contract_path: Path, source_root: Path) -> None:
     server_module = parse_module(source_root / "src" / "nnrp" / "server" / "native.py")
     server_public_module = parse_module(source_root / "src" / "nnrp" / "server" / "__init__.py")
     root_module = parse_module(source_root / "src" / "nnrp" / "__init__.py")
+    lifecycle_module = parse_module(source_root / "src" / "nnrp" / "lifecycle.py")
     require(
         enum_values(class_definition(runtime_module, "OperationState")) == EXPECTED_OPERATION_STATES,
         "Python OperationState implementation drifted",
@@ -364,6 +424,47 @@ def check_contract(contract_path: Path, source_root: Path) -> None:
         "nnrp.server is missing frozen v9 exports",
     )
     require("NativeServerOptions" not in server_exports, "nnrp.server still exports legacy NativeServerOptions")
+
+    require(
+        string_enum_values(class_definition(lifecycle_module, "ConnectionLifecycleState"))
+        == expected_connection_lifecycle_states,
+        "Python ConnectionLifecycleState implementation drifted",
+    )
+    require(
+        string_enum_values(class_definition(lifecycle_module, "SessionLifecycleState"))
+        == expected_session_lifecycle_states,
+        "Python SessionLifecycleState implementation drifted",
+    )
+    require(
+        annotated_fields(class_definition(lifecycle_module, "SessionLifecycleSnapshot"))
+        == [
+            "session_id",
+            "state",
+            "profile_id",
+            "priority_class",
+            "schema_id",
+            "schema_version",
+            "max_in_flight_operations",
+            "route_scope_id",
+            "last_operation_id",
+            "session_error_code",
+        ],
+        "Python SessionLifecycleSnapshot implementation fields drifted",
+    )
+    require(
+        annotated_fields(class_definition(lifecycle_module, "ConnectionLifecycleSnapshot")) == ["state", "sessions"],
+        "Python ConnectionLifecycleSnapshot implementation fields drifted",
+    )
+    require(
+        {
+            "ConnectionLifecycleSnapshot",
+            "ConnectionLifecycleState",
+            "SessionLifecycleSnapshot",
+            "SessionLifecycleState",
+        }
+        == exported_names(lifecycle_module),
+        "nnrp.lifecycle exports drifted",
+    )
 
 
 def main() -> None:

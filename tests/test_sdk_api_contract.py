@@ -24,7 +24,7 @@ def load_checker():
 
 def frozen_contract() -> dict[str, object]:
     return {
-        "contractVersion": 9,
+        "contractVersion": 10,
         "enums": {
             "OperationState": {
                 "values": {
@@ -40,7 +40,31 @@ def frozen_contract() -> dict[str, object]:
             },
             "ResultTerminalState": {"values": {"success": 0, "cancelled": 1, "dropped": 2, "error": 3}},
         },
+        "semanticEnums": {
+            "ConnectionLifecycleState": ["open", "closing", "closed"],
+            "SessionLifecycleState": ["open", "resumed", "closing", "draining", "closed"],
+        },
         "types": {
+            "SessionLifecycleSnapshot": {
+                "fields": [
+                    {"name": "session_id", "type": "u32", "required": True},
+                    {"name": "state", "type": "SessionLifecycleState", "required": True},
+                    {"name": "profile_id", "type": "u16", "required": True},
+                    {"name": "priority_class", "type": "SessionPriorityClass", "required": True},
+                    {"name": "schema_id", "type": "u32", "required": True},
+                    {"name": "schema_version", "type": "u32", "required": True},
+                    {"name": "max_in_flight_operations", "type": "u16", "required": True},
+                    {"name": "route_scope_id", "type": "u32", "required": True},
+                    {"name": "last_operation_id", "type": "u64", "required": True},
+                    {"name": "session_error_code", "type": "u32", "required": True},
+                ]
+            },
+            "ConnectionLifecycleSnapshot": {
+                "fields": [
+                    {"name": "state", "type": "ConnectionLifecycleState", "required": True},
+                    {"name": "sessions", "type": "SessionLifecycleSnapshot[]", "required": True},
+                ]
+            },
             "OperationLifecycleEvent": {
                 "fields": [
                     {"name": "operation_id", "type": "u64", "required": True},
@@ -87,6 +111,8 @@ def frozen_contract() -> dict[str, object]:
                 "operationLifecycleEvent": "nnrp.runtime.OperationLifecycleEvent",
                 "terminalEvent": "nnrp.runtime.NativeTerminalEvent",
                 "result": "nnrp.NativeRuntimeResult",
+                "connectionLifecycle": "nnrp.lifecycle.ConnectionLifecycleSnapshot",
+                "sessionLifecycle": "nnrp.lifecycle.SessionLifecycleSnapshot",
                 "clientBootstrapOptions": "nnrp.client.NativeClientOptions",
                 "clientSessionOptions": "nnrp.client.NativeClientSessionOptions",
                 "sessionRecoveryTicket": "nnrp.client.NativeSessionRecoveryTicket",
@@ -161,6 +187,7 @@ def test_ast_helpers_reject_missing_contract_symbols() -> None:
     example = checker.class_definition(module, "Example")
 
     assert checker.enum_values(example) == {}
+    assert checker.string_enum_values(example) == {}
     with pytest.raises(SystemExit, match="missing Missing"):
         checker.class_definition(module, "Missing")
     with pytest.raises(SystemExit, match="missing Example.missing"):

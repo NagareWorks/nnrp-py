@@ -364,7 +364,7 @@ if ([string]::IsNullOrWhiteSpace($hostRouteTargetExecutable) -or -not (Test-Path
 $hostRouteProfiles = @(
   @{
     Name = "installed-native"
-    Expected = 9
+    Expected = 10
     Providers = @(
       @{ transport = "tcp"; provider_id = "nnrp.transport.tcp.native"; installed = $true; platforms = @("native"); security_modes = @("plain", "tls_server_auth") },
       @{ transport = "quic"; provider_id = "nnrp.transport.quic.native"; installed = $true; platforms = @("native"); security_modes = @("tls_server_auth") },
@@ -447,7 +447,7 @@ $hostRoutePassed = (
     Where-Object { $_.mode -like "host-route-*" } |
     Measure-Object -Property passed -Sum
 ).Sum
-if ($hostRoutePassed -ne 10) {
-  throw "Expected ten Preview4 host-route scenarios, got $hostRoutePassed."
+if ($hostRoutePassed -ne 11) {
+  throw "Expected eleven Preview4 host-route scenarios, got $hostRoutePassed."
 }
 $summaries | ConvertTo-Json -Depth 4

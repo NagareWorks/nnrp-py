@@ -465,7 +465,8 @@ def _open_native_role_loopback(transport: str = "ipc") -> Any:
         ) as server:
             with ThreadPoolExecutor(max_workers=1, thread_name_prefix="nnrp-benchmark-accept") as executor:
                 accepted = executor.submit(
-                    server.accept,
+                    _run_native_server_accept,
+                    server,
                     NativeServerAcceptOptions(timeout_ms=5_000),
                 )
                 with connect_native_client_connection(
@@ -490,12 +491,17 @@ def _open_native_role_loopback(transport: str = "ipc") -> Any:
             socket_path.unlink(missing_ok=True)
 
 
+def _run_native_server_accept(server: Any, options: NativeServerAcceptOptions) -> Any:
+    return asyncio.run(server.accept(options))
+
+
 def _close_native_role_sessions(client_session: Any, server_session: Any, executor: ThreadPoolExecutor) -> None:
     client_close = executor.submit(client_session.close)
     try:
         close_events = server_session.poll_events(max_events=8, timeout_ms=5_000)
         if not any(
-            isinstance(event, NativeRuntimeEvent) and event.header.message_type is MessageType.SESSION_CLOSE
+            (runtime_event := event.as_runtime()) is not None
+            and runtime_event.header.message_type is MessageType.SESSION_CLOSE
             for event in close_events
         ):
             raise RuntimeError("native role loopback server did not receive SESSION_CLOSE")
@@ -563,7 +569,7 @@ def _run_native_role_submit_result_loop(scenario_id: str, workload: dict[str, An
                 nonlocal counter
                 counter += 1
                 submitted = session.submit_operation(_native_token_submit_request(counter, counter, payload))
-                received = server_session.receive_submit(timeout_ms=5_000)
+                received = asyncio.run(server_session.receive_submit(timeout=5.0))
                 if received.frame_id != counter:
                     raise RuntimeError("native role loopback received the wrong frame")
                 received.send_result(_native_token_result_metadata(), payload)
@@ -610,7 +616,7 @@ def _run_native_submit_cancel_loop(scenario_id: str, workload: dict[str, Any]) -
                 nonlocal counter
                 counter += 1
                 submitted = session.submit_operation(_native_token_submit_request(counter, counter, payload))
-                received = server_session.receive_submit(timeout_ms=5_000)
+                received = asyncio.run(server_session.receive_submit(timeout=5.0))
                 if received.frame_id != counter:
                     raise RuntimeError("native role loopback received the wrong frame")
                 submitted.cancel()
@@ -652,7 +658,7 @@ def _run_native_progress_partial_polling_loop(scenario_id: str, workload: dict[s
                 nonlocal counter
                 counter += 1
                 submitted = session.submit_operation(_native_token_submit_request(counter, counter, payload))
-                received = server_session.receive_submit(timeout_ms=5_000)
+                received = asyncio.run(server_session.receive_submit(timeout=5.0))
                 server_session.send_progress(
                     ProgressMetadata(counter, 1, 1, 5_000, payload_bytes, len(progress_body)),
                     progress_body,
@@ -702,7 +708,7 @@ def _run_native_role_submit_result_allocation_smoke(scenario_id: str, workload: 
                 nonlocal counter
                 counter += 1
                 submitted = session.submit_operation(_native_token_submit_request(counter, counter, payload))
-                received = server_session.receive_submit(timeout_ms=5_000)
+                received = asyncio.run(server_session.receive_submit(timeout=5.0))
                 received.send_result(_native_token_result_metadata(), payload)
                 session.poll_result(submitted, max_events=4, timeout_ms=5_000)
 
@@ -1020,7 +1026,7 @@ def _run_transport_loopback(scenario_id: str, workload: dict[str, Any]) -> dict[
                 nonlocal counter
                 counter += 1
                 submitted = session.submit_operation(_native_token_submit_request(counter, counter, payload))
-                received = server_session.receive_submit(timeout_ms=5_000)
+                received = asyncio.run(server_session.receive_submit(timeout=5.0))
                 if received.frame_id != counter:
                     raise RuntimeError("native transport loopback received the wrong frame")
                 received.send_result(_native_token_result_metadata(), payload)

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import atexit
+import threading
 import time
 from collections.abc import Iterator, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
@@ -201,8 +202,16 @@ class NativeServer:
     _sessions: list[NativeRuntimeServerSession] = field(default_factory=list, init=False, repr=False)
     _accept_session_handle_ids: list[int | None] = field(default_factory=list, init=False, repr=False)
     _closed: bool = field(default=False, init=False, repr=False)
+    _accept_lock: threading.Lock = field(default_factory=threading.Lock, init=False, repr=False)
 
-    def accept(self, options: NativeServerAcceptOptions | None = None) -> NativeRuntimeServerSession:
+    async def accept(self, options: NativeServerAcceptOptions | None = None) -> NativeRuntimeServerSession:
+        return await asyncio.to_thread(self._accept, options)
+
+    def _accept(self, options: NativeServerAcceptOptions | None = None) -> NativeRuntimeServerSession:
+        with self._accept_lock:
+            return self._accept_serialized(options)
+
+    def _accept_serialized(self, options: NativeServerAcceptOptions | None = None) -> NativeRuntimeServerSession:
         self._ensure_open()
         resolved = options or NativeServerAcceptOptions()
         timeout_ms = resolved.timeout_ms or _DEFAULT_ACCEPT_TIMEOUT_MS

@@ -1,5 +1,6 @@
 """Server-facing NNRP helpers."""
 
+from nnrp.native import NativeServerEvent, NativeServerEventKind
 from nnrp.server.native import (
     NativeServer,
     NativeServerAcceptOptions,
@@ -28,6 +29,8 @@ __all__ = [
     "NativeServer",
     "NativeServerAcceptOptions",
     "NativeServerBootstrapOptions",
+    "NativeServerEvent",
+    "NativeServerEventKind",
     "NativeServerProviderRoute",
     "NativeServerSessionOptions",
     "NativeServerSessionPolicy",

@@ -375,7 +375,10 @@ def test_run_server_case_reports_success_terminal_failure_and_rollback(
     routes = (route("tcp"),)
     resolved_routes = (dict(route("tcp"), locator="tcp://127.0.0.1:0"),)
     session = SimpleNamespace(active_transport_name="tcp", close=lambda: None)
-    server = SimpleNamespace(bound_provider_endpoints={"tcp": "tcp://127.0.0.1:43210"}, accept=lambda _opts: session)
+    async def accept(_opts: object) -> object:
+        return session
+
+    server = SimpleNamespace(bound_provider_endpoints={"tcp": "tcp://127.0.0.1:43210"}, accept=accept)
 
     @contextmanager
     def listen(*_args: Any, **_kwargs: Any):
@@ -397,9 +400,12 @@ def test_run_server_case_reports_success_terminal_failure_and_rollback(
     terminal_case = scenario("server", list(terminal_routes))
     terminal_fixture = terminal_case["host_route"]
     assert isinstance(terminal_fixture, dict)
+    async def terminal_accept(_opts: object) -> object:
+        raise NativeArtifactError("terminal closed")
+
     terminal_server = SimpleNamespace(
         bound_provider_endpoints={"tcp": "tcp://127.0.0.1:43211"},
-        accept=lambda _opts: (_ for _ in ()).throw(NativeArtifactError("terminal closed")),
+        accept=terminal_accept,
     )
 
     @contextmanager

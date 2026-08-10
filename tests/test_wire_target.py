@@ -56,15 +56,12 @@ class _FakeSession:
         self.poll_frames_batches: list[list[SimpleNamespace]] = []
         self.poll_results: list[object] = []
 
-    async def receive_submit(self, timeout: float | None) -> SimpleNamespace:
+    async def receive_submit(self, timeout: float | None) -> _FakeServerOperation:
         self.calls.append(("receive_submit", timeout))
-        return SimpleNamespace(operation_id=401, send_result=lambda metadata, body: self.calls.append(("result", body)))
+        return _FakeServerOperation(self.calls)
 
     def send_trace_context(self, metadata, body=b"") -> None:
         self.calls.append(("trace", (metadata, body)))
-
-    def send_result_drop_reason(self, metadata) -> None:
-        self.calls.append(("drop", metadata))
 
     def report_cache_miss(self, metadata) -> None:
         self.calls.append(("cache_miss", metadata))
@@ -87,6 +84,21 @@ class _FakeSession:
     def poll_events(self, *, max_events: int, timeout_ms: int):
         self.calls.append(("poll_events", (max_events, timeout_ms)))
         return self.poll_events_batches.pop(0) if self.poll_events_batches else []
+
+
+class _FakeServerOperation:
+    operation_id = 401
+
+    def __init__(self, calls: list[tuple[str, object]]) -> None:
+        self._calls = calls
+
+    async def send_result(self, metadata, body: bytes = b"") -> None:
+        del metadata
+        self._calls.append(("result", body))
+
+    async def send_result_drop(self, metadata, diagnostic: bytes = b"") -> None:
+        del diagnostic
+        self._calls.append(("drop", metadata))
 
 
 def _scenario(scenario_id: str, mode: str = "suite_as_client") -> wire_target.LiveWireScenario:

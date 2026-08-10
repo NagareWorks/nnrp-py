@@ -24,7 +24,7 @@ def load_checker():
 
 def frozen_contract() -> dict[str, object]:
     return {
-        "contractVersion": 13,
+        "contractVersion": 14,
         "enums": {
             "OperationState": {
                 "values": {
@@ -157,6 +157,19 @@ def frozen_contract() -> dict[str, object]:
                 "result": "nnrp.NativeRuntimeResult",
                 "serverEvent": "nnrp.server.NativeServerEvent",
                 "serverOperation": "nnrp.NativeRuntimeServerOperation",
+                "roleMethods": {
+                    "client.open_session": "open_session",
+                    "client.resume_session": "resume_session",
+                    "client_session.recovery_ticket": "recovery_ticket",
+                    "client_session.next_event": "next_event",
+                    "server.accept": "accept",
+                    "server_session.next_event": "next_event",
+                    "server_session.receive_submit": "receive_submit",
+                    "server_operation.send_result": "send_result",
+                    "server_operation.send_result_drop": "send_result_drop",
+                    "server_operation.send_progress": "send_progress",
+                    "server_operation.send_partial_result": "send_partial_result",
+                },
                 "connectionLifecycle": "nnrp.lifecycle.ConnectionLifecycleSnapshot",
                 "sessionLifecycle": "nnrp.lifecycle.SessionLifecycleSnapshot",
                 "clientBootstrapOptions": "nnrp.client.NativeClientOptions",
@@ -185,6 +198,42 @@ def frozen_contract() -> dict[str, object]:
                 "async": True,
                 "selective": True,
                 "retainsSkippedEvents": True,
+            },
+            "server_operation.send_result": {
+                "parameters": [
+                    {"name": "metadata", "type": "ResultPushMetadata", "required": True},
+                    {"name": "body", "type": "bytes", "required": False},
+                ],
+                "returns": "void",
+                "async": True,
+                "terminal": True,
+            },
+            "server_operation.send_result_drop": {
+                "parameters": [
+                    {"name": "metadata", "type": "ResultDropReasonMetadata", "required": True},
+                    {"name": "diagnostic", "type": "bytes", "required": False},
+                ],
+                "returns": "void",
+                "async": True,
+                "terminal": True,
+            },
+            "server_operation.send_progress": {
+                "parameters": [
+                    {"name": "metadata", "type": "ProgressMetadata", "required": True},
+                    {"name": "body", "type": "bytes", "required": False},
+                ],
+                "returns": "void",
+                "async": True,
+                "terminal": False,
+            },
+            "server_operation.send_partial_result": {
+                "parameters": [
+                    {"name": "metadata", "type": "PartialResultMetadata", "required": True},
+                    {"name": "body", "type": "bytes", "required": False},
+                ],
+                "returns": "void",
+                "async": True,
+                "terminal": False,
             },
         },
         "roleSurfaces": {

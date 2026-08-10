@@ -6,7 +6,7 @@ import json
 from pathlib import Path
 from typing import Any
 
-EXPECTED_CONTRACT_VERSION = 13
+EXPECTED_CONTRACT_VERSION = 14
 EXPECTED_OPERATION_STATES = {
     "ACCEPTED": 0,
     "RUNNING": 1,
@@ -299,6 +299,23 @@ def check_contract(contract_path: Path, source_root: Path) -> None:
 
     python_projection = contract["languageProjections"]["python"]
     require(
+        python_projection.get("roleMethods")
+        == {
+            "client.open_session": "open_session",
+            "client.resume_session": "resume_session",
+            "client_session.recovery_ticket": "recovery_ticket",
+            "client_session.next_event": "next_event",
+            "server.accept": "accept",
+            "server_session.next_event": "next_event",
+            "server_session.receive_submit": "receive_submit",
+            "server_operation.send_result": "send_result",
+            "server_operation.send_result_drop": "send_result_drop",
+            "server_operation.send_progress": "send_progress",
+            "server_operation.send_partial_result": "send_partial_result",
+        },
+        "Python role method projections drifted",
+    )
+    require(
         python_projection.get("operationLifecycleEvent") == "nnrp.runtime.OperationLifecycleEvent",
         "Python OperationLifecycleEvent projection drifted",
     )
@@ -373,6 +390,37 @@ def check_contract(contract_path: Path, source_root: Path) -> None:
         and receive_submit.get("retainsSkippedEvents") is True,
         "server receive_submit role operation drifted",
     )
+    expected_operation_methods = {
+        "server_operation.send_result": (
+            [("metadata", "ResultPushMetadata", True), ("body", "bytes", False)],
+            True,
+        ),
+        "server_operation.send_result_drop": (
+            [("metadata", "ResultDropReasonMetadata", True), ("diagnostic", "bytes", False)],
+            True,
+        ),
+        "server_operation.send_progress": (
+            [("metadata", "ProgressMetadata", True), ("body", "bytes", False)],
+            False,
+        ),
+        "server_operation.send_partial_result": (
+            [("metadata", "PartialResultMetadata", True), ("body", "bytes", False)],
+            False,
+        ),
+    }
+    for operation_name, (parameters, terminal) in expected_operation_methods.items():
+        operation = role_operations.get(operation_name, {})
+        require(
+            [
+                (parameter.get("name"), parameter.get("type"), parameter.get("required"))
+                for parameter in operation.get("parameters", [])
+            ]
+            == parameters
+            and operation.get("returns") == "void"
+            and operation.get("async") is True
+            and operation.get("terminal") is terminal,
+            f"{operation_name} role operation drifted",
+        )
     server_event_pump = contract.get("roleSurfaces", {}).get("serverEventPump", {})
     require(
         server_event_pump.get("canonicalOperation") == "server_session.next_event"
@@ -422,8 +470,29 @@ def check_contract(contract_path: Path, source_root: Path) -> None:
         public_annotated_fields(server_operation_class) == ["operation_id", "frame_id", "submit"],
         "Python NativeRuntimeServerOperation public fields drifted",
     )
-    for method_name in ("send_result", "send_result_drop", "send_progress", "send_partial_result"):
-        method_parameters(server_operation_class, method_name)
+    for method_name, tail_name in (
+        ("send_result", "body"),
+        ("send_result_drop", "diagnostic"),
+        ("send_progress", "body"),
+        ("send_partial_result", "body"),
+    ):
+        require(
+            method_parameters(server_operation_class, method_name) == ["self", "metadata", tail_name]
+            and method_is_async(server_operation_class, method_name)
+            and method_return_annotation(server_operation_class, method_name) == "None",
+            f"Python NativeRuntimeServerOperation.{method_name} signature drifted",
+        )
+    server_session_class = class_definition(native_module, "NativeRuntimeServerSession")
+    server_session_methods = {
+        node.name
+        for node in server_session_class.body
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+    }
+    require(
+        not {"send_result", "send_result_drop", "send_progress", "send_partial_result", "send_result_drop_reason"}
+        & server_session_methods,
+        "Python NativeRuntimeServerSession bypasses frozen operation ownership",
+    )
     server_event_class = class_definition(native_module, "NativeServerEvent")
     require(
         annotated_fields(server_event_class) == ["kind", "value"],

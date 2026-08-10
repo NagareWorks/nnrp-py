@@ -41,6 +41,7 @@ from nnrp.runtime import (
     CacheReferenceMetadata,
     CapabilityMetadata,
     ControlRequestMetadata,
+    NativeClientEvent,
     NativeRuntimeEvent,
     NativeTerminalEvent,
     ObjectDeltaMetadata,
@@ -4569,10 +4570,10 @@ class NativeRuntimeSession:
     async def async_poll_event(self, *, timeout_ms: int = 0) -> NativePolledEvent | None:
         return await asyncio.to_thread(self.poll_event, timeout_ms=timeout_ms)
 
-    async def next_event(self, timeout: float | None = None) -> NativeRuntimeEvent | OperationLifecycleEvent:
+    async def next_event(self, timeout: float | None = None) -> NativeClientEvent:
         return await asyncio.to_thread(self._next_event_blocking, timeout)
 
-    def _next_event_blocking(self, timeout: float | None = None) -> NativeRuntimeEvent | OperationLifecycleEvent:
+    def _next_event_blocking(self, timeout: float | None = None) -> NativeClientEvent:
         deadline = _event_deadline(timeout)
         while True:
             event = self.poll_event(timeout_ms=_event_poll_timeout_ms(deadline))

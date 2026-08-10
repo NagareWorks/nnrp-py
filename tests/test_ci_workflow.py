@@ -63,13 +63,15 @@ def test_ci_runs_independent_process_wire_conformance() -> None:
     workflow = _read_ci_workflow()
 
     assert "wire-conformance:" in workflow
-    assert "NNRP_RS_SOURCE_COMMIT: 09a0d92710475bc0de59227567947d9f73b781da" in workflow
+    assert "NNRP_RS_SOURCE_COMMIT: 9212d4a67b9a2da750dd4af5e26a9b10d4ec5fb0" in workflow
     assert "Checkout pinned nnrp-rs source" in workflow
     assert "ref: ${{ env.NNRP_RS_SOURCE_COMMIT }}" in workflow
     for transport in ("tcp", "quic", "ipc", "websocket"):
         assert f"--transport-scope {transport}" in workflow
     assert "python scripts/package_native_artifacts.py" in workflow
     assert "prepare_native_artifacts.py --clean nnrp-rs-source/artifacts/native" in workflow
+    assert "NNRP_NATIVE_E2E: '1'" in workflow
+    assert "-m pytest tests/test_native_artifact_e2e.py -q" in workflow
     assert "gh release download" not in workflow
     assert "./scripts/run_wire_e2e.ps1" in workflow
     assert "Run independent-process Preview4 wire E2E" in workflow

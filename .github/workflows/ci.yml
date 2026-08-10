@@ -260,7 +260,7 @@ jobs:
   wire-conformance:
     runs-on: ubuntu-latest
     env:
-      NNRP_RS_SOURCE_COMMIT: 09a0d92710475bc0de59227567947d9f73b781da
+      NNRP_RS_SOURCE_COMMIT: 9212d4a67b9a2da750dd4af5e26a9b10d4ec5fb0
 
     steps:
       - name: Checkout
@@ -318,6 +318,11 @@ jobs:
       - name: Prepare Rust native transport artifacts
         shell: bash
         run: python scripts/prepare_native_artifacts.py --clean nnrp-rs-source/artifacts/native
+
+      - name: Run packaged native role E2E
+        env:
+          NNRP_NATIVE_E2E: '1'
+        run: ${{ steps.setup-python.outputs.python-path }} -m pytest tests/test_native_artifact_e2e.py -q
 
       - name: Run independent-process Preview4 wire E2E
         shell: pwsh

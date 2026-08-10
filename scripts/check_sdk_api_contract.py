@@ -6,7 +6,7 @@ import json
 from pathlib import Path
 from typing import Any
 
-EXPECTED_CONTRACT_VERSION = 12
+EXPECTED_CONTRACT_VERSION = 13
 EXPECTED_OPERATION_STATES = {
     "ACCEPTED": 0,
     "RUNNING": 1,
@@ -108,6 +108,18 @@ def exported_names(module: ast.Module) -> set[str]:
     raise SystemExit("Python SDK module is missing a static __all__ declaration")
 
 
+def assignment_value(module: ast.Module, name: str) -> str:
+    for node in module.body:
+        if (
+            isinstance(node, ast.Assign)
+            and len(node.targets) == 1
+            and isinstance(node.targets[0], ast.Name)
+            and node.targets[0].id == name
+        ):
+            return ast.unparse(node.value)
+    raise SystemExit(f"Python SDK is missing {name}")
+
+
 def check_contract(contract_path: Path, source_root: Path) -> None:
     contract = json.loads(contract_path.read_text(encoding="utf-8"))
     require(
@@ -155,6 +167,14 @@ def check_contract(contract_path: Path, source_root: Path) -> None:
         lifecycle.get("terminalMapping")
         == {"completed": "success", "cancelled": "cancelled", "superseded": "dropped", "failed": "error"},
         "OperationLifecycleEvent terminal mapping drifted",
+    )
+
+    client_event = types["ClientEvent"]
+    require(client_event.get("representation") == "tagged-union", "ClientEvent is no longer a tagged union")
+    require(client_event.get("variants") == ["runtime", "lifecycle"], "ClientEvent variants drifted")
+    require(
+        client_event.get("variantTypes") == {"runtime": "RuntimeEvent", "lifecycle": "OperationLifecycleEvent"},
+        "ClientEvent variant types drifted",
     )
 
     terminal = types["TerminalEvent"]
@@ -283,6 +303,10 @@ def check_contract(contract_path: Path, source_root: Path) -> None:
         "Python OperationLifecycleEvent projection drifted",
     )
     require(
+        python_projection.get("clientEvent") == "nnrp.runtime.NativeClientEvent",
+        "Python NativeClientEvent projection drifted",
+    )
+    require(
         python_projection.get("terminalEvent") == "nnrp.runtime.NativeTerminalEvent",
         "Python NativeTerminalEvent projection drifted",
     )
@@ -330,8 +354,7 @@ def check_contract(contract_path: Path, source_root: Path) -> None:
         "recovery role operation async semantics drifted",
     )
     require(
-        role_operations.get("client_session.next_event", {}).get("returns")
-        == "RuntimeEvent|OperationLifecycleEvent"
+        role_operations.get("client_session.next_event", {}).get("returns") == "ClientEvent"
         and role_operations.get("client_session.next_event", {}).get("async") is True,
         "client next_event role operation drifted",
     )
@@ -381,6 +404,11 @@ def check_contract(contract_path: Path, source_root: Path) -> None:
         "Python OperationLifecycleEvent implementation fields drifted",
     )
     require(
+        assignment_value(runtime_module, "NativeClientEvent")
+        == "NativeRuntimeEvent | OperationLifecycleEvent",
+        "Python NativeClientEvent implementation drifted",
+    )
+    require(
         annotated_fields(class_definition(runtime_module, "NativeTerminalEvent")) == ["kind", "value"],
         "Python NativeTerminalEvent implementation is not a closed tagged union",
     )
@@ -408,11 +436,21 @@ def check_contract(contract_path: Path, source_root: Path) -> None:
     )
     runtime_exports = exported_names(runtime_public_module)
     require(
-        {"OperationLifecycleEvent", "NativeTerminalEvent", "OperationState", "ResultTerminalState"} <= runtime_exports,
-        "nnrp.runtime is missing frozen terminal API exports",
+        {
+            "NativeClientEvent",
+            "OperationLifecycleEvent",
+            "NativeTerminalEvent",
+            "OperationState",
+            "ResultTerminalState",
+        }
+        <= runtime_exports,
+        "nnrp.runtime is missing frozen client-event or terminal API exports",
     )
     root_exports = exported_names(root_module)
-    require("NativeRuntimeResult" in root_exports, "nnrp is missing the frozen NativeRuntimeResult export")
+    require(
+        {"NativeClientEvent", "NativeRuntimeResult"} <= root_exports,
+        "nnrp is missing frozen client event or result exports",
+    )
     require("NativeOperationLifecycle" not in root_exports, "nnrp still exports legacy NativeOperationLifecycle")
     native_class_names = {node.name for node in native_module.body if isinstance(node, ast.ClassDef)}
     native_constants = {
@@ -433,8 +471,7 @@ def check_contract(contract_path: Path, source_root: Path) -> None:
     require(
         method_parameters(session, "next_event") == ["self", "timeout"]
         and method_is_async(session, "next_event")
-        and method_return_annotation(session, "next_event")
-        == "NativeRuntimeEvent | OperationLifecycleEvent",
+        and method_return_annotation(session, "next_event") == "NativeClientEvent",
         "NativeRuntimeSession.next_event drifted",
     )
     for method_name in ("poll_result", "submit_and_poll_result", "async_submit_and_poll_result"):

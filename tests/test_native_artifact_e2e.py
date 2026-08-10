@@ -42,6 +42,7 @@ from nnrp.native import (
     load_native_transport_binding,
 )
 from nnrp.runtime import (
+    NativeClientEvent,
     NativeRuntimeEvent,
     OperationLifecycleEvent,
     OperationState,
@@ -331,6 +332,39 @@ def test_packaged_native_role_batch_decodes_multiple_events_with_ffi_stride() ->
         runtime_event = result.event.as_runtime()
         assert runtime_event is not None
         assert runtime_event.tail.body == b"result"
+
+
+def test_packaged_native_client_next_event_projects_runtime_and_lifecycle() -> None:
+    with _open_native_role_loopback() as (_client, client_session, server_session):
+        _drain_native_setup_events(client_session)
+        submitted = client_session.submit_operation(
+            SubmitRequest.token(
+                TokenSubmitInput(
+                    identity=SubmitIdentity(operation_id=102, frame_id=202),
+                    policy=SubmitPolicy(),
+                    chunks=(TokenChunk(b"request"),),
+                )
+            )
+        )
+        asyncio.run(server_session.receive_submit(timeout=5.0))
+        server_session.send_progress(ProgressMetadata(102, 1, 2, 2_500, 7, 8), b"progress")
+
+        runtime: NativeClientEvent = asyncio.run(client_session.next_event(timeout=5.0))
+        assert isinstance(runtime, NativeRuntimeEvent)
+        assert runtime.header.message_type is MessageType.PROGRESS
+        assert runtime.tail.body == b"progress"
+
+        submitted.cancel()
+        lifecycle: NativeClientEvent = asyncio.run(client_session.next_event(timeout=5.0))
+        assert lifecycle == OperationLifecycleEvent(102, OperationState.CANCELLED)
+        assert submitted.operation_id == 102
+
+        server_cancel = asyncio.run(server_session.next_event(timeout=5.0))
+        server_cancel_runtime = server_cancel.as_runtime()
+        assert server_cancel_runtime is not None
+        assert server_cancel_runtime.header.message_type is MessageType.FRAME_CANCEL
+        server_lifecycle = asyncio.run(server_session.next_event(timeout=5.0))
+        assert server_lifecycle.as_lifecycle() == OperationLifecycleEvent(102, OperationState.CANCELLED)
 
 
 @pytest.mark.asyncio

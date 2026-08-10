@@ -251,6 +251,9 @@ class OperationLifecycleEvent:
         object.__setattr__(self, "state", OperationState(self.state))
 
 
+NativeClientEvent = NativeRuntimeEvent | OperationLifecycleEvent
+
+
 class NativeTerminalEventKind(StrEnum):
     RUNTIME = "runtime"
     LIFECYCLE = "lifecycle"
@@ -259,7 +262,7 @@ class NativeTerminalEventKind(StrEnum):
 @dataclass(frozen=True, slots=True)
 class NativeTerminalEvent:
     kind: NativeTerminalEventKind
-    value: NativeRuntimeEvent | OperationLifecycleEvent
+    value: NativeClientEvent
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "kind", NativeTerminalEventKind(self.kind))

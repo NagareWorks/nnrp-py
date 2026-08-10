@@ -24,7 +24,7 @@ def load_checker():
 
 def frozen_contract() -> dict[str, object]:
     return {
-        "contractVersion": 12,
+        "contractVersion": 13,
         "enums": {
             "OperationState": {
                 "values": {
@@ -97,6 +97,11 @@ def frozen_contract() -> dict[str, object]:
                     ),
                 },
             },
+            "ClientEvent": {
+                "representation": "tagged-union",
+                "variants": ["runtime", "lifecycle"],
+                "variantTypes": {"runtime": "RuntimeEvent", "lifecycle": "OperationLifecycleEvent"},
+            },
             "TerminalEvent": {
                 "representation": "tagged-union",
                 "variants": ["runtime", "lifecycle"],
@@ -147,6 +152,7 @@ def frozen_contract() -> dict[str, object]:
         "languageProjections": {
             "python": {
                 "operationLifecycleEvent": "nnrp.runtime.OperationLifecycleEvent",
+                "clientEvent": "nnrp.runtime.NativeClientEvent",
                 "terminalEvent": "nnrp.runtime.NativeTerminalEvent",
                 "result": "nnrp.NativeRuntimeResult",
                 "serverEvent": "nnrp.server.NativeServerEvent",
@@ -169,7 +175,7 @@ def frozen_contract() -> dict[str, object]:
             "client.resume_session": {"returns": "ClientSession", "async": True},
             "client_session.recovery_ticket": {"returns": "SessionRecoveryTicket?", "async": False},
             "client_session.next_event": {
-                "returns": "RuntimeEvent|OperationLifecycleEvent",
+                "returns": "ClientEvent",
                 "async": True,
             },
             "server.accept": {"returns": "ServerSession", "async": True},
@@ -226,6 +232,25 @@ def test_rejects_python_projection_drift() -> None:
         checker.check_contract(write_contract(Path(directory), contract), ROOT)
 
 
+def test_rejects_client_event_union_or_operation_drift() -> None:
+    checker = load_checker()
+    contract = frozen_contract()
+    contract["types"]["ClientEvent"]["variantTypes"]["lifecycle"] = "RuntimeEvent"
+    with (
+        tempfile.TemporaryDirectory() as directory,
+        pytest.raises(SystemExit, match="ClientEvent variant types drifted"),
+    ):
+        checker.check_contract(write_contract(Path(directory), contract), ROOT)
+
+    contract = frozen_contract()
+    contract["roleOperations"]["client_session.next_event"]["returns"] = "RuntimeEvent"
+    with (
+        tempfile.TemporaryDirectory() as directory,
+        pytest.raises(SystemExit, match="client next_event role operation drifted"),
+    ):
+        checker.check_contract(write_contract(Path(directory), contract), ROOT)
+
+
 def test_rejects_server_event_union_drift() -> None:
     checker = load_checker()
     contract = frozen_contract()
@@ -270,18 +295,19 @@ def test_rejects_synchronous_server_accept_drift() -> None:
         checker.check_contract(write_contract(Path(directory), contract), ROOT)
 
 
-def test_current_modules_export_the_frozen_terminal_surface() -> None:
+def test_current_modules_export_the_frozen_client_event_and_terminal_surface() -> None:
     checker = load_checker()
     runtime_module = checker.parse_module(ROOT / "src" / "nnrp" / "runtime" / "__init__.py")
     root_module = checker.parse_module(ROOT / "src" / "nnrp" / "__init__.py")
 
     assert {
+        "NativeClientEvent",
         "OperationLifecycleEvent",
         "NativeTerminalEvent",
         "OperationState",
         "ResultTerminalState",
     } <= checker.exported_names(runtime_module)
-    assert "NativeRuntimeResult" in checker.exported_names(root_module)
+    assert {"NativeClientEvent", "NativeRuntimeResult"} <= checker.exported_names(root_module)
     assert "NativeOperationLifecycle" not in checker.exported_names(root_module)
 
 
@@ -302,6 +328,8 @@ def test_ast_helpers_reject_missing_contract_symbols() -> None:
         checker.method_is_async(example, "missing")
     with pytest.raises(SystemExit, match="static __all__"):
         checker.exported_names(module)
+    with pytest.raises(SystemExit, match="missing MissingAlias"):
+        checker.assignment_value(module, "MissingAlias")
 
 
 def test_cli_entrypoint_checks_the_frozen_contract(monkeypatch: pytest.MonkeyPatch) -> None:

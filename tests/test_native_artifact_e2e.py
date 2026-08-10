@@ -306,15 +306,9 @@ def test_packaged_native_role_batch_decodes_multiple_events_with_ffi_stride() ->
         )
         received = asyncio.run(server_session.receive_submit(timeout=5.0))
 
-        server_session.send_progress(
-            ProgressMetadata(101, 1, 2, 2_500, 7, 8),
-            b"progress",
-        )
-        server_session.send_partial_result(
-            PartialResultMetadata(101, 2, 301, 1, 7, 0),
-            b"partial",
-        )
-        received.send_result(_native_token_result_metadata(), b"result")
+        asyncio.run(received.send_progress(ProgressMetadata(101, 1, 2, 2_500, 7, 8), b"progress"))
+        asyncio.run(received.send_partial_result(PartialResultMetadata(101, 2, 301, 1, 7, 0), b"partial"))
+        asyncio.run(received.send_result(_native_token_result_metadata(), b"result"))
 
         lifecycle = asyncio.run(server_session.next_event(timeout=5.0))
         assert lifecycle.as_lifecycle() == OperationLifecycleEvent(101, OperationState.COMPLETED)
@@ -346,8 +340,8 @@ def test_packaged_native_client_next_event_projects_runtime_and_lifecycle() -> N
                 )
             )
         )
-        asyncio.run(server_session.receive_submit(timeout=5.0))
-        server_session.send_progress(ProgressMetadata(102, 1, 2, 2_500, 7, 8), b"progress")
+        received = asyncio.run(server_session.receive_submit(timeout=5.0))
+        asyncio.run(received.send_progress(ProgressMetadata(102, 1, 2, 2_500, 7, 8), b"progress"))
 
         runtime: NativeClientEvent = asyncio.run(client_session.next_event(timeout=5.0))
         assert isinstance(runtime, NativeRuntimeEvent)

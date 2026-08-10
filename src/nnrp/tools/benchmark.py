@@ -564,15 +564,16 @@ def _run_native_role_submit_result_loop(scenario_id: str, workload: dict[str, An
         with _open_native_role_loopback() as (client, session, server_session):
             _drain_native_setup_events(session)
             counters = _install_native_role_counters(session, server_session)
+            runner = asyncio.Runner()
 
             def operation() -> None:
                 nonlocal counter
                 counter += 1
                 submitted = session.submit_operation(_native_token_submit_request(counter, counter, payload))
-                received = asyncio.run(server_session.receive_submit(timeout=5.0))
+                received = runner.run(server_session.receive_submit(timeout=5.0))
                 if received.frame_id != counter:
                     raise RuntimeError("native role loopback received the wrong frame")
-                received.send_result(_native_token_result_metadata(), payload)
+                runner.run(received.send_result(_native_token_result_metadata(), payload))
                 result = session.poll_result(submitted, max_events=4, timeout_ms=5_000)
                 runtime_event = result.event.as_runtime()
                 if (
@@ -595,6 +596,7 @@ def _run_native_role_submit_result_loop(scenario_id: str, workload: dict[str, An
                 _add_native_role_counter_metrics(counters, metrics, int(metrics["completed_operations"]))
                 return _measured_throughput_result(scenario_id, metrics)
             finally:
+                runner.close()
                 _restore_native_role_counters(counters)
     except NativeArtifactError as error:
         return _skip_result(scenario_id, f"native IPC role loopback unavailable: {error}")
@@ -611,12 +613,13 @@ def _run_native_submit_cancel_loop(scenario_id: str, workload: dict[str, Any]) -
         with _open_native_role_loopback() as (client, session, server_session):
             _drain_native_setup_events(session)
             counters = _install_native_role_counters(session, server_session)
+            runner = asyncio.Runner()
 
             def operation() -> None:
                 nonlocal counter
                 counter += 1
                 submitted = session.submit_operation(_native_token_submit_request(counter, counter, payload))
-                received = asyncio.run(server_session.receive_submit(timeout=5.0))
+                received = runner.run(server_session.receive_submit(timeout=5.0))
                 if received.frame_id != counter:
                     raise RuntimeError("native role loopback received the wrong frame")
                 submitted.cancel()
@@ -635,6 +638,7 @@ def _run_native_submit_cancel_loop(scenario_id: str, workload: dict[str, Any]) -
                 _add_native_role_counter_metrics(counters, metrics, int(metrics["completed_operations"]))
                 return _measured_throughput_result(scenario_id, metrics)
             finally:
+                runner.close()
                 _restore_native_role_counters(counters)
     except NativeArtifactError as error:
         return _skip_result(scenario_id, f"native IPC role loopback unavailable: {error}")
@@ -653,25 +657,30 @@ def _run_native_progress_partial_polling_loop(scenario_id: str, workload: dict[s
         with _open_native_role_loopback() as (client, session, server_session):
             _drain_native_setup_events(session)
             counters = _install_native_role_counters(session, server_session)
+            runner = asyncio.Runner()
 
             def operation() -> None:
                 nonlocal counter
                 counter += 1
                 submitted = session.submit_operation(_native_token_submit_request(counter, counter, payload))
-                received = asyncio.run(server_session.receive_submit(timeout=5.0))
-                server_session.send_progress(
-                    ProgressMetadata(counter, 1, 1, 5_000, payload_bytes, len(progress_body)),
-                    progress_body,
+                received = runner.run(server_session.receive_submit(timeout=5.0))
+                runner.run(
+                    received.send_progress(
+                        ProgressMetadata(counter, 1, 1, 5_000, payload_bytes, len(progress_body)),
+                        progress_body,
+                    )
                 )
-                server_session.send_partial_result(
-                    PartialResultMetadata(counter, 2, payload_bytes, 1, payload_bytes, 0),
-                    payload,
+                runner.run(
+                    received.send_partial_result(
+                        PartialResultMetadata(counter, 2, payload_bytes, 1, payload_bytes, 0),
+                        payload,
+                    )
                 )
                 events = session.poll_events_batch(max_events=max_events)
                 message_types = {event.header.message_type for event in events if isinstance(event, NativeRuntimeEvent)}
                 if MessageType.PROGRESS not in message_types or MessageType.PARTIAL_RESULT not in message_types:
                     raise RuntimeError("native role loopback did not deliver progress and partial-result events")
-                received.send_result(_native_token_result_metadata(), payload)
+                runner.run(received.send_result(_native_token_result_metadata(), payload))
                 result = session.poll_result(submitted, max_events=max_events, timeout_ms=5_000)
                 runtime_event = result.event.as_runtime()
                 if runtime_event is None or runtime_event.tail.body != payload:
@@ -690,6 +699,7 @@ def _run_native_progress_partial_polling_loop(scenario_id: str, workload: dict[s
                 _add_native_role_counter_metrics(counters, metrics, int(metrics["completed_operations"]))
                 return _measured_throughput_result(scenario_id, metrics)
             finally:
+                runner.close()
                 _restore_native_role_counters(counters)
     except NativeArtifactError as error:
         return _skip_result(scenario_id, f"native IPC role loopback unavailable: {error}")
@@ -703,22 +713,26 @@ def _run_native_role_submit_result_allocation_smoke(scenario_id: str, workload: 
     counter = 0
     try:
         with _open_native_role_loopback() as (_client, session, server_session):
+            runner = asyncio.Runner()
 
             def operation() -> None:
                 nonlocal counter
                 counter += 1
                 submitted = session.submit_operation(_native_token_submit_request(counter, counter, payload))
-                received = asyncio.run(server_session.receive_submit(timeout=5.0))
-                received.send_result(_native_token_result_metadata(), payload)
+                received = runner.run(server_session.receive_submit(timeout=5.0))
+                runner.run(received.send_result(_native_token_result_metadata(), payload))
                 session.poll_result(submitted, max_events=4, timeout_ms=5_000)
 
-            for _ in range(warmup_iterations):
-                operation()
-            return {
-                "id": scenario_id,
-                "outcome": "measured",
-                "metrics": _measure_allocation_smoke(operation, iterations),
-            }
+            try:
+                for _ in range(warmup_iterations):
+                    operation()
+                return {
+                    "id": scenario_id,
+                    "outcome": "measured",
+                    "metrics": _measure_allocation_smoke(operation, iterations),
+                }
+            finally:
+                runner.close()
     except NativeArtifactError as error:
         return _skip_result(scenario_id, f"native IPC role loopback unavailable: {error}")
 
@@ -1021,15 +1035,16 @@ def _run_transport_loopback(scenario_id: str, workload: dict[str, Any]) -> dict[
         with _open_native_role_loopback(transport) as (client, session, server_session):
             _drain_native_setup_events(session)
             counters = _install_native_role_counters(session, server_session)
+            runner = asyncio.Runner()
 
             def operation() -> None:
                 nonlocal counter
                 counter += 1
                 submitted = session.submit_operation(_native_token_submit_request(counter, counter, payload))
-                received = asyncio.run(server_session.receive_submit(timeout=5.0))
+                received = runner.run(server_session.receive_submit(timeout=5.0))
                 if received.frame_id != counter:
                     raise RuntimeError("native transport loopback received the wrong frame")
-                received.send_result(_native_token_result_metadata(), payload)
+                runner.run(received.send_result(_native_token_result_metadata(), payload))
                 result = session.poll_result(submitted, max_events=4, timeout_ms=5_000)
                 runtime_event = result.event.as_runtime()
                 if (
@@ -1052,6 +1067,7 @@ def _run_transport_loopback(scenario_id: str, workload: dict[str, Any]) -> dict[
                 _add_native_role_counter_metrics(counters, metrics, int(metrics["completed_operations"]))
                 return _measured_throughput_result(scenario_id, metrics)
             finally:
+                runner.close()
                 _restore_native_role_counters(counters)
     except NativeArtifactError as error:
         return _skip_result(scenario_id, f"native {transport} role loopback unavailable: {error}")

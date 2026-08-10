@@ -5085,7 +5085,7 @@ class NativeRuntimeServerOperation:
         if self.submit.header.frame_id != self.frame_id:
             raise ValueError("frame_id must match submit header")
 
-    def send_result(
+    async def send_result(
         self,
         metadata: ResultPushMetadata,
         body: bytes | bytearray | memoryview = b"",
@@ -5093,34 +5093,69 @@ class NativeRuntimeServerOperation:
         if not isinstance(metadata, ResultPushMetadata):
             raise TypeError("metadata must be ResultPushMetadata")
         payload = metadata.pack() + bytes(body)
-        payload_view, _payload_owner = _buffer_view_from_payload(payload)
+        payload_view, payload_owner = _buffer_view_from_payload(payload)
         request = _NnrpServerSendResultRequest(self._handle.to_ffi(), payload_view)
-        status = self._entrypoints.server_send_result(request)
-        raise_for_native_status(status)
+        await asyncio.to_thread(self._send_result_blocking, request, payload_owner)
 
-    def send_result_drop(
+    async def send_result_drop(
         self,
         metadata: ResultDropReasonMetadata,
         diagnostic: bytes | bytearray | memoryview = b"",
     ) -> None:
         self._require_operation_metadata(metadata)
-        self._owner.send_result_drop_reason(metadata, diagnostic)
+        diagnostic_snapshot = bytes(diagnostic)
+        await asyncio.to_thread(
+            self._owner._send_operation_runtime_frame,
+            self._handle,
+            self.frame_id,
+            MessageType.RESULT_DROP_REASON,
+            metadata,
+            diagnostic_snapshot,
+        )
 
-    def send_progress(
+    async def send_progress(
         self,
         metadata: ProgressMetadata,
         body: bytes | bytearray | memoryview = b"",
     ) -> None:
         self._require_operation_metadata(metadata)
-        self._owner.send_progress(metadata, body)
+        body_snapshot = bytes(body)
+        await asyncio.to_thread(
+            self._owner._send_operation_runtime_frame,
+            self._handle,
+            self.frame_id,
+            MessageType.PROGRESS,
+            metadata,
+            body_snapshot,
+        )
 
-    def send_partial_result(
+    async def send_partial_result(
         self,
         metadata: PartialResultMetadata,
         body: bytes | bytearray | memoryview = b"",
     ) -> None:
         self._require_operation_metadata(metadata)
-        self._owner.send_partial_result(metadata, body)
+        body_snapshot = bytes(body)
+        await asyncio.to_thread(
+            self._owner._send_operation_runtime_frame,
+            self._handle,
+            self.frame_id,
+            MessageType.PARTIAL_RESULT,
+            metadata,
+            body_snapshot,
+        )
+
+    def _send_result_blocking(
+        self,
+        request: _NnrpServerSendResultRequest,
+        payload_owner: ctypes.Array[ctypes.c_char] | None,
+    ) -> None:
+        self._owner._ensure_open()
+        try:
+            status = self._entrypoints.server_send_result(request)
+            raise_for_native_status(status)
+        finally:
+            del payload_owner
 
     def _require_operation_metadata(self, metadata: object) -> None:
         if int(getattr(metadata, "operation_id", 0)) != self.operation_id:
@@ -5353,32 +5388,11 @@ class NativeRuntimeServerSession:
                     self._pending_events.append(event)
             return tuple(frames)
 
-    def send_progress(
-        self,
-        metadata: ProgressMetadata,
-        body: bytes | bytearray | memoryview = b"",
-    ) -> None:
-        self._send_runtime_frame(MessageType.PROGRESS, metadata, body)
-
-    def send_partial_result(
-        self,
-        metadata: PartialResultMetadata,
-        body: bytes | bytearray | memoryview = b"",
-    ) -> None:
-        self._send_runtime_frame(MessageType.PARTIAL_RESULT, metadata, body)
-
     def send_backpressure(self, metadata: PressureMetadata) -> None:
         self._send_runtime_frame(MessageType.BACKPRESSURE, metadata)
 
     def send_credit_update(self, metadata: PressureMetadata) -> None:
         self._send_runtime_frame(MessageType.CREDIT_UPDATE, metadata)
-
-    def send_result_drop_reason(
-        self,
-        metadata: ResultDropReasonMetadata,
-        diagnostic: bytes | bytearray | memoryview = b"",
-    ) -> None:
-        self._send_runtime_frame(MessageType.RESULT_DROP_REASON, metadata, diagnostic)
 
     def send_trace_context(
         self,
@@ -5469,6 +5483,21 @@ class NativeRuntimeServerSession:
         status = self.entrypoints.runtime_frame_send(request)
         raise_for_native_status(status)
         object.__setattr__(self, "_next_runtime_frame_id", 1 if frame_id == 0xFFFFFFFF else frame_id + 1)
+
+    def _send_operation_runtime_frame(
+        self,
+        operation: NativeOperationHandle,
+        frame_id: int,
+        message_type: MessageType,
+        metadata: _FixedRuntimeMetadata,
+        tail: bytes | bytearray | memoryview = b"",
+    ) -> None:
+        self._ensure_open()
+        payload = _encode_native_runtime_frame(message_type, metadata, tail)
+        payload_view, _payload_owner = _buffer_view_from_payload(payload)
+        request = _NnrpRuntimeFrameSendRequest(operation.to_ffi(), int(message_type), frame_id, payload_view)
+        status = self.entrypoints.runtime_frame_send(request)
+        raise_for_native_status(status)
 
     def close(self) -> None:
         self._ensure_open()

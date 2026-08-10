@@ -637,6 +637,11 @@ def test_build_benchmark_results_report_measures_native_scenarios_when_artifacts
     monkeypatch.setattr(benchmark, "load_native_schema_codec", lambda: schema_codec)
     monkeypatch.setattr(benchmark, "_open_native_role_loopback", role_loopbacks.open)
     monkeypatch.setattr(benchmark, "probe_native_artifact", native_probe)
+    monkeypatch.setattr(
+        benchmark.asyncio,
+        "run",
+        lambda _awaitable: pytest.fail("native benchmark hot paths must reuse an asyncio.Runner"),
+    )
 
     report = build_benchmark_results_report(_plan_document())
 
@@ -1053,7 +1058,7 @@ class FakeNativeServerOperation:
         self.operation_id = operation.operation_id
         self.frame_id = operation.frame_id
 
-    def send_result(self, metadata, body: bytes | bytearray | memoryview = b"") -> None:
+    async def send_result(self, metadata, body: bytes | bytearray | memoryview = b"") -> None:
         del metadata
         self.server_session.entrypoints.server_send_result(self.operation_id, body)
         self.server_session.connection.results.append(
@@ -1065,6 +1070,28 @@ class FakeNativeServerOperation:
                         tail=SimpleNamespace(body=bytes(body)),
                     )
                 ),
+            )
+        )
+
+    async def send_progress(self, metadata, body=b"") -> None:
+        self.server_session.entrypoints.runtime_frame_send(MessageType.PROGRESS, metadata, body)
+        self.server_session.connection.runtime_events.append(
+            _runtime_event(
+                MessageType.PROGRESS,
+                RuntimeEventMetadataKind.PROGRESS,
+                metadata,
+                body=bytes(body),
+            )
+        )
+
+    async def send_partial_result(self, metadata, body=b"") -> None:
+        self.server_session.entrypoints.runtime_frame_send(MessageType.PARTIAL_RESULT, metadata, body)
+        self.server_session.connection.runtime_events.append(
+            _runtime_event(
+                MessageType.PARTIAL_RESULT,
+                RuntimeEventMetadataKind.PARTIAL_RESULT,
+                metadata,
+                body=bytes(body),
             )
         )
 
@@ -1088,29 +1115,6 @@ class FakeNativeServerSession:
         events = tuple(self.control_events[:max_events])
         del self.control_events[:max_events]
         return events
-
-    def send_progress(self, metadata, body=b"") -> None:
-        self.entrypoints.runtime_frame_send(MessageType.PROGRESS, metadata, body)
-        self.connection.runtime_events.append(
-            _runtime_event(
-                MessageType.PROGRESS,
-                RuntimeEventMetadataKind.PROGRESS,
-                metadata,
-                body=bytes(body),
-            )
-        )
-
-    def send_partial_result(self, metadata, body=b"") -> None:
-        self.entrypoints.runtime_frame_send(MessageType.PARTIAL_RESULT, metadata, body)
-        self.connection.runtime_events.append(
-            _runtime_event(
-                MessageType.PARTIAL_RESULT,
-                RuntimeEventMetadataKind.PARTIAL_RESULT,
-                metadata,
-                body=bytes(body),
-            )
-        )
-
 
 class FakeNativeObjectMetadataBuffer:
     def __init__(self, payload: bytes) -> None:

@@ -202,7 +202,7 @@ def _handle_cancel_server(session: Any, *, timeout_seconds: float) -> None:
         ),
         _TRACE_BODY,
     )
-    session.send_result_drop_reason(_drop_reason(operation.operation_id))
+    asyncio.run(operation.send_result_drop(_drop_reason(operation.operation_id)))
     _await_peer_close(session, timeout_seconds=timeout_seconds)
 
 
@@ -213,7 +213,7 @@ def _handle_priority_server(session: Any, *, timeout_seconds: float) -> None:
         [MessageType.PRIORITY_UPDATE, MessageType.EXPIRE_AT],
         timeout_seconds=timeout_seconds,
     )
-    session.send_result_drop_reason(_drop_reason(operation.operation_id))
+    asyncio.run(operation.send_result_drop(_drop_reason(operation.operation_id)))
     _await_peer_close(session, timeout_seconds=timeout_seconds)
 
 
@@ -237,7 +237,7 @@ def _handle_cache_server(session: Any, *, timeout_seconds: float) -> None:
             diagnostic_bytes=0,
         )
     )
-    operation.send_result(_canonical_result(), _RESPONSE_BODY)
+    asyncio.run(operation.send_result(_canonical_result(), _RESPONSE_BODY))
     _await_peer_close(session, timeout_seconds=timeout_seconds)
 
 

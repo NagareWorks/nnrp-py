@@ -569,7 +569,17 @@ class FakeRuntimeLibrary(FakeEntrypointLibrary):
         return self.status
 
     def _runtime_frame_send(self, request: _NnrpRuntimeFrameSendRequest) -> _NnrpFfiStatus:
-        if request.handle.kind not in {HANDLE_KIND_SESSION, HANDLE_KIND_CONNECTION}:
+        operation_message_types = {
+            int(MessageType.RESULT_DROP_REASON),
+            int(MessageType.PROGRESS),
+            int(MessageType.PARTIAL_RESULT),
+        }
+        expected_handle_kinds = (
+            {HANDLE_KIND_OPERATION}
+            if int(request.message_type) in operation_message_types
+            else {HANDLE_KIND_SESSION, HANDLE_KIND_CONNECTION}
+        )
+        if request.handle.kind not in expected_handle_kinds:
             return _NnrpFfiStatus(FFI_STATUS_INVALID_HANDLE, 0, 0, 0)
         self.runtime_frames.append(
             (int(request.message_type), int(request.frame_id), _read_buffer_view(request.payload))
@@ -4010,7 +4020,7 @@ def test_native_runtime_client_binds_native_ipc_and_websocket_servers(tmp_path: 
         payload_kind_bitmap=PayloadKind.TOKEN_CHUNK,
         payload_frame_count=1,
     )
-    operation.send_result(result_metadata, b"server-result")
+    asyncio.run(operation.send_result(result_metadata, b"server-result"))
     session.send_trace_context(TraceContextMetadata(1, 2, 0, 3, 0, 0))
     event = session.poll_event(timeout_ms=1)
     session.close()
@@ -5032,7 +5042,9 @@ def test_native_runtime_server_receive_submit_retains_prior_event_from_same_ffi_
     assert library.nnrp_server_await_events.calls[0][0].max_events == 64
 
 
-def test_native_runtime_server_operation_enforces_submit_identity_and_routes_named_events() -> None:
+def test_native_runtime_server_operation_enforces_submit_identity_and_routes_named_events(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     submit_metadata = FrameSubmitMetadata(
         src_width=1,
         src_height=1,
@@ -5090,20 +5102,37 @@ def test_native_runtime_server_operation_enforces_submit_identity_and_routes_nam
     with pytest.raises(ValueError, match="frame_id"):
         replace(operation, frame_id=10)
 
-    operation.send_result_drop(
-        ResultDropReasonMetadata(42, 1, ResultDropReasonCode.PEER_CANCELLED, RuntimeRole.RUNTIME, 0, 4),
-        b"drop",
+    mutable_tails = [bytearray(b"drop"), bytearray(b"progress"), bytearray(b"partial")]
+    pending_mutations = list(mutable_tails)
+
+    async def mutate_original_before_worker_call(function: Callable[..., object], *args: object) -> object:
+        original = pending_mutations.pop(0)
+        original[:] = b"x" * len(original)
+        return function(*args)
+
+    monkeypatch.setattr(asyncio, "to_thread", mutate_original_before_worker_call)
+
+    asyncio.run(
+        operation.send_result_drop(
+            ResultDropReasonMetadata(42, 1, ResultDropReasonCode.PEER_CANCELLED, RuntimeRole.RUNTIME, 0, 4),
+            mutable_tails[0],
+        )
     )
-    operation.send_progress(ProgressMetadata(42, 2, 3, 2500, 4, 8), b"progress")
-    operation.send_partial_result(PartialResultMetadata(42, 3, 4, 1, 7, 0), b"partial")
+    asyncio.run(operation.send_progress(ProgressMetadata(42, 2, 3, 2500, 4, 8), mutable_tails[1]))
+    asyncio.run(operation.send_partial_result(PartialResultMetadata(42, 3, 4, 1, 7, 0), mutable_tails[2]))
 
     assert [message_type for message_type, _frame_id, _payload in library.runtime_frames] == [
         int(MessageType.RESULT_DROP_REASON),
         int(MessageType.PROGRESS),
         int(MessageType.PARTIAL_RESULT),
     ]
+    assert [payload[-tail_length:] for (_message_type, _frame_id, payload), tail_length in zip(
+        library.runtime_frames,
+        (4, 8, 7),
+        strict=True,
+    )] == [b"drop", b"progress", b"partial"]
     with pytest.raises(ValueError, match="operation_id"):
-        operation.send_progress(ProgressMetadata(43, 4, 5, 2500, 6, 0))
+        asyncio.run(operation.send_progress(ProgressMetadata(43, 4, 5, 2500, 6, 0)))
 
 
 def test_native_runtime_server_event_stream_polls_retains_and_times_out() -> None:
@@ -5196,11 +5225,8 @@ def test_native_runtime_sessions_expose_named_preview4_methods_without_raw_frame
         "invalidate_cache",
     }
     server_methods = {
-        "send_progress",
-        "send_partial_result",
         "send_backpressure",
         "send_credit_update",
-        "send_result_drop_reason",
         "send_trace_context",
         "send_recoverable_error",
         "send_retry_after",
@@ -5216,6 +5242,18 @@ def test_native_runtime_sessions_expose_named_preview4_methods_without_raw_frame
 
     assert all(callable(getattr(NativeRuntimeSession, name, None)) for name in client_methods)
     assert all(callable(getattr(NativeRuntimeServerSession, name, None)) for name in server_methods)
+    operation_methods = {
+        "send_result",
+        "send_result_drop",
+        "send_progress",
+        "send_partial_result",
+    }
+    assert all(
+        asyncio.iscoroutinefunction(getattr(NativeRuntimeServerOperation, name, None))
+        for name in operation_methods
+    )
+    assert all(not hasattr(NativeRuntimeServerSession, name) for name in operation_methods)
+    assert not hasattr(NativeRuntimeServerSession, "send_result_drop_reason")
     assert not hasattr(NativeRuntimeSession, "control")
     assert not hasattr(NativeRuntimeSession, "send_runtime_frame")
     assert not hasattr(NativeRuntimeServerSession, "control")
@@ -5334,10 +5372,7 @@ def test_native_runtime_server_named_methods_share_one_coarse_frame_abi(tmp_path
             generation=3,
         )
     )
-    progress = ProgressMetadata(10, 1, 2, 2500, 20, 4)
-    partial = PartialResultMetadata(10, 2, 20, 1, 4, 0)
     pressure = PressureMetadata(10, 4, 2, 1, 5, 0)
-    drop = ResultDropReasonMetadata(10, 1, ResultDropReasonCode.PEER_CANCELLED, RuntimeRole.RUNTIME, 0, 2)
     trace = TraceContextMetadata(1, 2, 0, 3, 0, 2)
     recoverable = RecoverableErrorMetadata(20, 21, 22, RuntimeRole.RUNTIME, 0, 23, 24, 25, 26, 2)
     retry = RetryAfterMetadata(10, 1, 100, 10, 2, RuntimeRole.RUNTIME, 0, 2)
@@ -5361,11 +5396,8 @@ def test_native_runtime_server_named_methods_share_one_coarse_frame_abi(tmp_path
     cache_miss = CacheMissMetadata(7, 1, 2, CacheMissReason.UNKNOWN, 3, 2)
     invalidate = CacheInvalidateMetadata(CacheInvalidateScope.OBJECT_KEY, 3, 4, 5, 6)
 
-    session.send_progress(progress, b"step")
-    session.send_partial_result(partial, b"part")
     session.send_backpressure(pressure)
     session.send_credit_update(pressure)
-    session.send_result_drop_reason(drop, b"no")
     session.send_trace_context(trace, b"tr")
     session.send_recoverable_error(recoverable, b"er")
     session.send_retry_after(retry, b"ra")
@@ -5379,11 +5411,8 @@ def test_native_runtime_server_named_methods_share_one_coarse_frame_abi(tmp_path
     session.invalidate_cache(invalidate)
 
     expected_types = [
-        MessageType.PROGRESS,
-        MessageType.PARTIAL_RESULT,
         MessageType.BACKPRESSURE,
         MessageType.CREDIT_UPDATE,
-        MessageType.RESULT_DROP_REASON,
         MessageType.TRACE_CONTEXT,
         MessageType.ERROR_RECOVERABLE,
         MessageType.RETRY_AFTER,
@@ -5399,9 +5428,8 @@ def test_native_runtime_server_named_methods_share_one_coarse_frame_abi(tmp_path
     assert [message_type for message_type, _frame_id, _payload in library.runtime_frames] == [
         int(message_type) for message_type in expected_types
     ]
-    assert [frame_id for _message_type, frame_id, _payload in library.runtime_frames] == list(range(1, 17))
-    assert decode_runtime_control_metadata(MessageType.PROGRESS, library.runtime_frames[0][2]).tail == b"step"
-    assert decode_runtime_object_metadata(MessageType.OBJECT_DELTA, library.runtime_frames[12][2]).tail == b"mddata"
+    assert [frame_id for _message_type, frame_id, _payload in library.runtime_frames] == list(range(1, 14))
+    assert decode_runtime_object_metadata(MessageType.OBJECT_DELTA, library.runtime_frames[9][2]).tail == b"mddata"
 
 
 def test_native_submit_payload_boundary_snapshots_mutable_inputs(tmp_path: Path) -> None:

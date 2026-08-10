@@ -21,11 +21,25 @@
 
 ## Server Controls
 
-- [x] Expose one wire-ordered application event at a time through `NativeRuntimeServerSession.poll_event()`.
-  - [x] Keep `poll_events()` as the coarse bounded native batch surface.
-  - [x] Return `None` when the bounded wait completes without an event.
-  - [x] Return wire events as one `NativeRuntimeEvent` envelope with `header`, typed `metadata`, and typed `tail`.
-  - [x] Return local runtime lifecycle notifications as `NativeLifecycleEvent`, never as incomplete wire events.
+- [x] Expose the contract v12 server event pump through `NativeRuntimeServerSession.next_event()`.
+  - [x] Return `nnrp.server.NativeServerEvent` with exactly `submit`, `runtime`, and `lifecycle` variants.
+  - [x] Convert every `FRAME_SUBMIT` to `NativeRuntimeServerOperation` before application delivery.
+  - [x] Preserve non-submit wire messages as complete `NativeRuntimeEvent` values.
+  - [x] Project only native event kind `14` with an absent header and one `OperationState` byte as `OperationLifecycleEvent`.
+  - [x] Reject malformed lifecycle payloads and legacy terminal event kinds instead of inferring operation state.
+  - [x] Serialize all receives through one per-session native event source.
+- [x] Make `receive_submit(timeout)` a selective asynchronous convenience.
+  - [x] Retain every skipped non-submit event in its original session order.
+  - [x] Share the same pending queue and receive lock with `next_event()` and batch dispatch.
+  - [x] Raise timeout or native errors without acknowledging or dropping retained events.
+- [x] Align `NativeRuntimeServerOperation` with the frozen ownership contract.
+  - [x] Expose only `operation_id`, `frame_id`, and the complete `submit` event as public data fields.
+  - [x] Keep FFI handles, entrypoints, and session ownership private.
+  - [x] Provide `send_result`, `send_result_drop`, `send_progress`, and `send_partial_result`.
+  - [x] Reject streaming or drop metadata whose operation identity does not match.
+- [x] Align role-level asynchronous entrypoints.
+  - [x] Make `nnrp.server.NativeServer.accept(options)` asynchronous.
+  - [x] Add client-session `next_event(timeout)` with runtime-or-lifecycle return semantics.
 - [x] Add server API for progress events.
   - [x] Progress stage.
   - [x] Optional percent.
@@ -62,3 +76,6 @@
 - [x] Bind batch event polling for progress, partial result, and drop reason events.
 - [x] Keep submit/control/result loops on coarse native calls.
 - [x] Add tests that count Python-to-native calls on representative hot paths.
+- [x] Keep the native event-batch FFI coarse while projecting one owned event at a time.
+- [x] Add a regression proving selective submit receive cannot discard an interleaved control event.
+- [x] Gate the exact contract v12 type fields, native lifecycle projection, role methods, and retention rules in CI.

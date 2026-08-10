@@ -15,6 +15,7 @@ from nnrp.core import MessageType
 from nnrp.native import (
     FFI_STATUS_WOULD_BLOCK,
     NativeRuntimeError,
+    NativeServerEvent,
     NativeStatus,
     NativeWouldBlockError,
 )
@@ -55,8 +56,8 @@ class _FakeSession:
         self.poll_frames_batches: list[list[SimpleNamespace]] = []
         self.poll_results: list[object] = []
 
-    def receive_submit(self, *, timeout_ms: int) -> SimpleNamespace:
-        self.calls.append(("receive_submit", timeout_ms))
+    async def receive_submit(self, timeout: float | None) -> SimpleNamespace:
+        self.calls.append(("receive_submit", timeout))
         return SimpleNamespace(operation_id=401, send_result=lambda metadata, body: self.calls.append(("result", body)))
 
     def send_trace_context(self, metadata, body=b"") -> None:
@@ -172,7 +173,10 @@ def test_run_server_scenario_dispatches_typed_handlers(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     session = object()
-    server = SimpleNamespace(accept=lambda options: session, close=lambda: None)
+    async def accept(options: object) -> object:
+        return session
+
+    server = SimpleNamespace(accept=accept, close=lambda: None)
 
     @contextmanager
     def listen(*args, **kwargs):
@@ -377,10 +381,12 @@ def test_poll_helpers_handle_empty_batches_mismatch_and_timeout(monkeypatch: pyt
     session.poll_events_batches = [
         [],
         [
-            _runtime_event(
-                MessageType.SESSION_CLOSE,
-                RuntimeEventMetadataKind.SESSION_CLOSE,
-                SessionCloseMetadata(SessionCloseReason.NORMAL, InFlightPolicy.DRAIN, 0, 0, 0, 0),
+            NativeServerEvent.runtime(
+                _runtime_event(
+                    MessageType.SESSION_CLOSE,
+                    RuntimeEventMetadataKind.SESSION_CLOSE,
+                    SessionCloseMetadata(SessionCloseReason.NORMAL, InFlightPolicy.DRAIN, 0, 0, 0, 0),
+                )
             )
         ],
     ]

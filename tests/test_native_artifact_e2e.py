@@ -41,7 +41,13 @@ from nnrp.native import (
     _shutdown_registered_native_runtimes,
     load_native_transport_binding,
 )
-from nnrp.runtime import NativeRuntimeEvent, PartialResultMetadata, ProgressMetadata
+from nnrp.runtime import (
+    NativeRuntimeEvent,
+    OperationLifecycleEvent,
+    OperationState,
+    PartialResultMetadata,
+    ProgressMetadata,
+)
 from nnrp.schema import StandardProfile
 from nnrp.server import (
     NativeServerAcceptOptions,
@@ -145,7 +151,8 @@ def _open_native_role_loopback(*, application_policy: Any | None = None) -> Any:
         ) as server:
             with ThreadPoolExecutor(max_workers=1, thread_name_prefix="nnrp-abi-accept") as executor:
                 accepted = executor.submit(
-                    server.accept,
+                    _run_native_server_accept,
+                    server,
                     NativeServerAcceptOptions(timeout_ms=5_000),
                 )
                 with connect_native_client_connection(
@@ -166,8 +173,8 @@ def _open_native_role_loopback(*, application_policy: Any | None = None) -> Any:
                         try:
                             close_events = server_session.poll_events(max_events=8, timeout_ms=5_000)
                             assert any(
-                                isinstance(event, NativeRuntimeEvent)
-                                and event.header.message_type is MessageType.SESSION_CLOSE
+                                (runtime_event := event.as_runtime()) is not None
+                                and runtime_event.header.message_type is MessageType.SESSION_CLOSE
                                 for event in close_events
                             )
                         finally:
@@ -176,6 +183,10 @@ def _open_native_role_loopback(*, application_policy: Any | None = None) -> Any:
     finally:
         if socket_path is not None:
             socket_path.unlink(missing_ok=True)
+
+
+def _run_native_server_accept(server: Any, options: NativeServerAcceptOptions) -> Any:
+    return asyncio.run(server.accept(options))
 
 
 @pytest.mark.asyncio
@@ -292,7 +303,7 @@ def test_packaged_native_role_batch_decodes_multiple_events_with_ffi_stride() ->
                 )
             )
         )
-        received = server_session.receive_submit(timeout_ms=5_000)
+        received = asyncio.run(server_session.receive_submit(timeout=5.0))
 
         server_session.send_progress(
             ProgressMetadata(101, 1, 2, 2_500, 7, 8),
@@ -303,6 +314,9 @@ def test_packaged_native_role_batch_decodes_multiple_events_with_ffi_stride() ->
             b"partial",
         )
         received.send_result(_native_token_result_metadata(), b"result")
+
+        lifecycle = asyncio.run(server_session.next_event(timeout=5.0))
+        assert lifecycle.as_lifecycle() == OperationLifecycleEvent(101, OperationState.COMPLETED)
 
         events = client_session.poll_events_batch(max_events=2, timeout_ms=5_000)
         assert all(isinstance(event, NativeRuntimeEvent) for event in events)

@@ -19,6 +19,7 @@ from nnrp import (
 )
 from nnrp.client import SubmitRequest
 from nnrp.core import MessageType
+from nnrp.native import NativeServerEvent
 from nnrp.runtime import (
     InFlightPolicy,
     NativeRuntimeEvent,
@@ -517,7 +518,7 @@ def test_open_native_role_loopback_yields_roles_and_coordinates_close(monkeypatc
     calls: list[tuple[object, ...]] = []
 
     class Server:
-        def accept(self, options: object) -> object:
+        async def accept(self, options: object) -> object:
             calls.append(("accept", options))
             return server_session
 
@@ -572,10 +573,12 @@ def test_close_native_role_sessions_completes_session_close_handshake() -> None:
             assert close_started.wait(timeout=1)
             calls.append("server-receive-close")
             return (
-                _runtime_event(
-                    MessageType.SESSION_CLOSE,
-                    RuntimeEventMetadataKind.SESSION_CLOSE,
-                    SessionCloseMetadata(SessionCloseReason.NORMAL, InFlightPolicy.DRAIN, 0, 0, 0, 0),
+                NativeServerEvent.runtime(
+                    _runtime_event(
+                        MessageType.SESSION_CLOSE,
+                        RuntimeEventMetadataKind.SESSION_CLOSE,
+                        SessionCloseMetadata(SessionCloseReason.NORMAL, InFlightPolicy.DRAIN, 0, 0, 0, 0),
+                    )
                 ),
             )
 
@@ -1073,8 +1076,9 @@ class FakeNativeServerSession:
         self.pending_submits: list[FakeNativeOperation] = []
         self.control_events: list[int] = []
 
-    def receive_submit(self, *, timeout_ms: int = 0, max_events: int = 1) -> FakeNativeServerOperation:
-        self.entrypoints.server_await_events(timeout_ms, max_events)
+    async def receive_submit(self, timeout: float | None = None) -> FakeNativeServerOperation:
+        timeout_ms = 0 if timeout is None else max(0, int(timeout * 1_000))
+        self.entrypoints.server_await_events(timeout_ms, 1)
         if not self.pending_submits:
             raise AssertionError("fake role loopback submit was not queued")
         return FakeNativeServerOperation(self, self.pending_submits.pop(0))

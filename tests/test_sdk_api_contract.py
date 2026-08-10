@@ -24,7 +24,7 @@ def load_checker():
 
 def frozen_contract() -> dict[str, object]:
     return {
-        "contractVersion": 10,
+        "contractVersion": 12,
         "enums": {
             "OperationState": {
                 "values": {
@@ -76,6 +76,26 @@ def frozen_contract() -> dict[str, object]:
                     "superseded": "dropped",
                     "failed": "error",
                 },
+                "nativeEventProjection": {
+                    "eventKind": "operation_lifecycle",
+                    "eventKindCode": 14,
+                    "headerPresent": 0,
+                    "payloadBytes": 1,
+                    "payloadLayout": [
+                        {
+                            "name": "state",
+                            "type": "OperationState",
+                            "wireType": "u8",
+                            "offset": 0,
+                        }
+                    ],
+                    "operationIdentity": (
+                        "diagnostic.related_operation_id and the operation handle, when the handle remains live"
+                    ),
+                    "ownership": (
+                        "the one-byte state payload follows the same payload_owner lifetime as wire-event payloads"
+                    ),
+                },
             },
             "TerminalEvent": {
                 "representation": "tagged-union",
@@ -88,6 +108,24 @@ def frozen_contract() -> dict[str, object]:
                     {"name": "terminal_state", "type": "ResultTerminalState", "required": True},
                     {"name": "event", "type": "TerminalEvent", "required": True},
                 ]
+            },
+            "ServerOperation": {
+                "fields": [
+                    {"name": "operation_id", "type": "u64", "required": True},
+                    {"name": "frame_id", "type": "u32", "required": True},
+                    {"name": "submit", "type": "RuntimeEvent", "required": True},
+                ],
+                "terminalMethods": ["send_result", "send_result_drop"],
+                "streamingMethods": ["send_progress", "send_partial_result"],
+            },
+            "ServerEvent": {
+                "representation": "tagged-union",
+                "variants": ["submit", "runtime", "lifecycle"],
+                "variantTypes": {
+                    "submit": "ServerOperation",
+                    "runtime": "RuntimeEvent",
+                    "lifecycle": "OperationLifecycleEvent",
+                },
             },
             "SessionRecoveryTicket": {
                 "fields": [
@@ -111,6 +149,8 @@ def frozen_contract() -> dict[str, object]:
                 "operationLifecycleEvent": "nnrp.runtime.OperationLifecycleEvent",
                 "terminalEvent": "nnrp.runtime.NativeTerminalEvent",
                 "result": "nnrp.NativeRuntimeResult",
+                "serverEvent": "nnrp.server.NativeServerEvent",
+                "serverOperation": "nnrp.NativeRuntimeServerOperation",
                 "connectionLifecycle": "nnrp.lifecycle.ConnectionLifecycleSnapshot",
                 "sessionLifecycle": "nnrp.lifecycle.SessionLifecycleSnapshot",
                 "clientBootstrapOptions": "nnrp.client.NativeClientOptions",
@@ -128,6 +168,26 @@ def frozen_contract() -> dict[str, object]:
             "client.open_session": {"returns": "ClientSession", "async": True},
             "client.resume_session": {"returns": "ClientSession", "async": True},
             "client_session.recovery_ticket": {"returns": "SessionRecoveryTicket?", "async": False},
+            "client_session.next_event": {
+                "returns": "RuntimeEvent|OperationLifecycleEvent",
+                "async": True,
+            },
+            "server.accept": {"returns": "ServerSession", "async": True},
+            "server_session.next_event": {"returns": "ServerEvent", "async": True},
+            "server_session.receive_submit": {
+                "returns": "ServerOperation",
+                "async": True,
+                "selective": True,
+                "retainsSkippedEvents": True,
+            },
+        },
+        "roleSurfaces": {
+            "serverEventPump": {
+                "canonicalOperation": "server_session.next_event",
+                "submitConvenience": "server_session.receive_submit",
+                "submitRule": "receive_submit may skip only by retaining them in the same session queue",
+                "concurrencyRule": "one session has one serialized receive source",
+            }
         },
     }
 
@@ -162,6 +222,50 @@ def test_rejects_python_projection_drift() -> None:
     with (
         tempfile.TemporaryDirectory() as directory,
         pytest.raises(SystemExit, match="Python NativeTerminalEvent projection drifted"),
+    ):
+        checker.check_contract(write_contract(Path(directory), contract), ROOT)
+
+
+def test_rejects_server_event_union_drift() -> None:
+    checker = load_checker()
+    contract = frozen_contract()
+    contract["types"]["ServerEvent"]["variants"] = ["runtime", "lifecycle"]
+    with (
+        tempfile.TemporaryDirectory() as directory,
+        pytest.raises(SystemExit, match="ServerEvent variants drifted"),
+    ):
+        checker.check_contract(write_contract(Path(directory), contract), ROOT)
+
+
+def test_rejects_operation_lifecycle_native_projection_drift() -> None:
+    checker = load_checker()
+    contract = frozen_contract()
+    contract["types"]["OperationLifecycleEvent"]["nativeEventProjection"]["eventKindCode"] = 6
+    with (
+        tempfile.TemporaryDirectory() as directory,
+        pytest.raises(SystemExit, match="OperationLifecycleEvent native projection drifted"),
+    ):
+        checker.check_contract(write_contract(Path(directory), contract), ROOT)
+
+
+def test_rejects_server_receive_submit_retention_drift() -> None:
+    checker = load_checker()
+    contract = frozen_contract()
+    contract["roleOperations"]["server_session.receive_submit"]["retainsSkippedEvents"] = False
+    with (
+        tempfile.TemporaryDirectory() as directory,
+        pytest.raises(SystemExit, match="server receive_submit role operation drifted"),
+    ):
+        checker.check_contract(write_contract(Path(directory), contract), ROOT)
+
+
+def test_rejects_synchronous_server_accept_drift() -> None:
+    checker = load_checker()
+    contract = frozen_contract()
+    contract["roleOperations"]["server.accept"]["async"] = False
+    with (
+        tempfile.TemporaryDirectory() as directory,
+        pytest.raises(SystemExit, match="server event role operations drifted"),
     ):
         checker.check_contract(write_contract(Path(directory), contract), ROOT)
 

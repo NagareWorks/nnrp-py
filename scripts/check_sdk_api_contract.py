@@ -6,7 +6,7 @@ import json
 from pathlib import Path
 from typing import Any
 
-EXPECTED_CONTRACT_VERSION = 10
+EXPECTED_CONTRACT_VERSION = 12
 EXPECTED_OPERATION_STATES = {
     "ACCEPTED": 0,
     "RUNNING": 1,
@@ -46,6 +46,10 @@ def annotated_fields(class_node: ast.ClassDef) -> list[str]:
         for node in class_node.body
         if isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name)
     ]
+
+
+def public_annotated_fields(class_node: ast.ClassDef) -> list[str]:
+    return [name for name in annotated_fields(class_node) if not name.startswith("_")]
 
 
 def enum_values(class_node: ast.ClassDef) -> dict[str, int]:
@@ -172,6 +176,59 @@ def check_contract(contract_path: Path, source_root: Path) -> None:
         "NnrpResult field contract drifted",
     )
 
+    server_operation = types["ServerOperation"]
+    require(
+        field_shape(server_operation)
+        == [
+            ("operation_id", "u64", True),
+            ("frame_id", "u32", True),
+            ("submit", "RuntimeEvent", True),
+        ],
+        "ServerOperation field contract drifted",
+    )
+    require(
+        server_operation.get("terminalMethods") == ["send_result", "send_result_drop"]
+        and server_operation.get("streamingMethods") == ["send_progress", "send_partial_result"],
+        "ServerOperation method contract drifted",
+    )
+
+    server_event = types["ServerEvent"]
+    require(server_event.get("representation") == "tagged-union", "ServerEvent is no longer a tagged union")
+    require(server_event.get("variants") == ["submit", "runtime", "lifecycle"], "ServerEvent variants drifted")
+    require(
+        server_event.get("variantTypes")
+        == {
+            "submit": "ServerOperation",
+            "runtime": "RuntimeEvent",
+            "lifecycle": "OperationLifecycleEvent",
+        },
+        "ServerEvent variant types drifted",
+    )
+
+    lifecycle_projection = types["OperationLifecycleEvent"].get("nativeEventProjection", {})
+    require(
+        lifecycle_projection
+        == {
+            "eventKind": "operation_lifecycle",
+            "eventKindCode": 14,
+            "headerPresent": 0,
+            "payloadBytes": 1,
+            "payloadLayout": [
+                {
+                    "name": "state",
+                    "type": "OperationState",
+                    "wireType": "u8",
+                    "offset": 0,
+                }
+            ],
+            "operationIdentity": (
+                "diagnostic.related_operation_id and the operation handle, when the handle remains live"
+            ),
+            "ownership": "the one-byte state payload follows the same payload_owner lifetime as wire-event payloads",
+        },
+        "OperationLifecycleEvent native projection drifted",
+    )
+
     require(
         field_shape(types["SessionLifecycleSnapshot"])
         == [
@@ -234,6 +291,11 @@ def check_contract(contract_path: Path, source_root: Path) -> None:
         "Python NativeRuntimeResult projection drifted",
     )
     require(
+        python_projection.get("serverEvent") == "nnrp.server.NativeServerEvent"
+        and python_projection.get("serverOperation") == "nnrp.NativeRuntimeServerOperation",
+        "Python server event ownership projections drifted",
+    )
+    require(
         python_projection.get("connectionLifecycle") == "nnrp.lifecycle.ConnectionLifecycleSnapshot"
         and python_projection.get("sessionLifecycle") == "nnrp.lifecycle.SessionLifecycleSnapshot",
         "Python lifecycle projections drifted",
@@ -267,6 +329,35 @@ def check_contract(contract_path: Path, source_root: Path) -> None:
         and role_operations.get("client_session.recovery_ticket", {}).get("async") is False,
         "recovery role operation async semantics drifted",
     )
+    require(
+        role_operations.get("client_session.next_event", {}).get("returns")
+        == "RuntimeEvent|OperationLifecycleEvent"
+        and role_operations.get("client_session.next_event", {}).get("async") is True,
+        "client next_event role operation drifted",
+    )
+    require(
+        role_operations.get("server.accept", {}).get("returns") == "ServerSession"
+        and role_operations.get("server.accept", {}).get("async") is True
+        and role_operations.get("server_session.next_event", {}).get("returns") == "ServerEvent"
+        and role_operations.get("server_session.next_event", {}).get("async") is True,
+        "server event role operations drifted",
+    )
+    receive_submit = role_operations.get("server_session.receive_submit", {})
+    require(
+        receive_submit.get("returns") == "ServerOperation"
+        and receive_submit.get("async") is True
+        and receive_submit.get("selective") is True
+        and receive_submit.get("retainsSkippedEvents") is True,
+        "server receive_submit role operation drifted",
+    )
+    server_event_pump = contract.get("roleSurfaces", {}).get("serverEventPump", {})
+    require(
+        server_event_pump.get("canonicalOperation") == "server_session.next_event"
+        and server_event_pump.get("submitConvenience") == "server_session.receive_submit"
+        and "retaining them" in server_event_pump.get("submitRule", "")
+        and "serialized receive source" in server_event_pump.get("concurrencyRule", ""),
+        "server event pump retention rules drifted",
+    )
 
     runtime_module = parse_module(source_root / "src" / "nnrp" / "runtime" / "types.py")
     runtime_public_module = parse_module(source_root / "src" / "nnrp" / "runtime" / "__init__.py")
@@ -298,6 +389,23 @@ def check_contract(contract_path: Path, source_root: Path) -> None:
         == ["operation_id", "terminal_state", "event"],
         "Python NativeRuntimeResult implementation fields drifted",
     )
+    server_operation_class = class_definition(native_module, "NativeRuntimeServerOperation")
+    require(
+        public_annotated_fields(server_operation_class) == ["operation_id", "frame_id", "submit"],
+        "Python NativeRuntimeServerOperation public fields drifted",
+    )
+    for method_name in ("send_result", "send_result_drop", "send_progress", "send_partial_result"):
+        method_parameters(server_operation_class, method_name)
+    server_event_class = class_definition(native_module, "NativeServerEvent")
+    require(
+        annotated_fields(server_event_class) == ["kind", "value"],
+        "Python NativeServerEvent implementation is not a closed tagged union",
+    )
+    require(
+        string_enum_values(class_definition(native_module, "NativeServerEventKind"))
+        == {"SUBMIT": "submit", "RUNTIME": "runtime", "LIFECYCLE": "lifecycle"},
+        "Python NativeServerEventKind drifted",
+    )
     runtime_exports = exported_names(runtime_public_module)
     require(
         {"OperationLifecycleEvent", "NativeTerminalEvent", "OperationState", "ResultTerminalState"} <= runtime_exports,
@@ -307,8 +415,28 @@ def check_contract(contract_path: Path, source_root: Path) -> None:
     require("NativeRuntimeResult" in root_exports, "nnrp is missing the frozen NativeRuntimeResult export")
     require("NativeOperationLifecycle" not in root_exports, "nnrp still exports legacy NativeOperationLifecycle")
     native_class_names = {node.name for node in native_module.body if isinstance(node, ast.ClassDef)}
+    native_constants = {
+        node.targets[0].id: node.value.value
+        for node in native_module.body
+        if isinstance(node, ast.Assign)
+        and len(node.targets) == 1
+        and isinstance(node.targets[0], ast.Name)
+        and isinstance(node.value, ast.Constant)
+        and isinstance(node.value.value, int)
+    }
+    require(
+        native_constants.get("EVENT_KIND_OPERATION_LIFECYCLE") == 14,
+        "Python operation lifecycle native event kind drifted",
+    )
     require("NativeOperationLifecycle" not in native_class_names, "legacy NativeOperationLifecycle remains public")
     session = class_definition(native_module, "NativeRuntimeSession")
+    require(
+        method_parameters(session, "next_event") == ["self", "timeout"]
+        and method_is_async(session, "next_event")
+        and method_return_annotation(session, "next_event")
+        == "NativeRuntimeEvent | OperationLifecycleEvent",
+        "NativeRuntimeSession.next_event drifted",
+    )
     for method_name in ("poll_result", "submit_and_poll_result", "async_submit_and_poll_result"):
         require(
             "state" not in method_parameters(session, method_name),
@@ -399,6 +527,26 @@ def check_contract(contract_path: Path, source_root: Path) -> None:
         == ["accepted", "session_error_code", "diagnostic"],
         "NativeServerSessionPolicyDecision fields drifted",
     )
+    native_server = class_definition(server_module, "NativeServer")
+    require(
+        method_parameters(native_server, "accept") == ["self", "options"]
+        and method_is_async(native_server, "accept")
+        and method_return_annotation(native_server, "accept") == "NativeRuntimeServerSession",
+        "NativeServer.accept drifted",
+    )
+    native_server_session = class_definition(native_module, "NativeRuntimeServerSession")
+    require(
+        method_parameters(native_server_session, "next_event") == ["self", "timeout"]
+        and method_is_async(native_server_session, "next_event")
+        and method_return_annotation(native_server_session, "next_event") == "NativeServerEvent",
+        "NativeRuntimeServerSession.next_event drifted",
+    )
+    require(
+        method_parameters(native_server_session, "receive_submit") == ["self", "timeout"]
+        and method_is_async(native_server_session, "receive_submit")
+        and method_return_annotation(native_server_session, "receive_submit") == "NativeRuntimeServerOperation",
+        "NativeRuntimeServerSession.receive_submit drifted",
+    )
 
     client_exports = exported_names(client_public_module)
     require(
@@ -419,9 +567,11 @@ def check_contract(contract_path: Path, source_root: Path) -> None:
             "NativeServerAcceptOptions",
             "NativeServerSessionPolicy",
             "NativeServerSessionPolicyDecision",
+            "NativeServerEvent",
+            "NativeServerEventKind",
         }
         <= server_exports,
-        "nnrp.server is missing frozen v9 exports",
+        "nnrp.server is missing frozen role-event exports",
     )
     require("NativeServerOptions" not in server_exports, "nnrp.server still exports legacy NativeServerOptions")
 

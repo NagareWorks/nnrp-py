@@ -63,7 +63,7 @@ def test_ci_runs_independent_process_wire_conformance() -> None:
     workflow = _read_ci_workflow()
 
     assert "wire-conformance:" in workflow
-    assert "NNRP_RS_SOURCE_COMMIT: 751440cb31d52e3dd4c8f784468efd21ef24cfa2" in workflow
+    assert "NNRP_RS_SOURCE_COMMIT: 09a0d92710475bc0de59227567947d9f73b781da" in workflow
     assert "Checkout pinned nnrp-rs source" in workflow
     assert "ref: ${{ env.NNRP_RS_SOURCE_COMMIT }}" in workflow
     for transport in ("tcp", "quic", "ipc", "websocket"):

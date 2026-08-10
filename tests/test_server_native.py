@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from types import SimpleNamespace
@@ -184,7 +186,7 @@ def test_listen_native_server_owns_multi_listener_role_lifecycle(monkeypatch: py
             "ipc": parse_native_transport_endpoint("unix:///tmp/nnrp-render.sock"),
             "tcp": parse_native_transport_endpoint("tcp://localhost:4433"),
         }
-        session = server.accept(NativeServerAcceptOptions(timeout_ms=250))
+        session = asyncio.run(server.accept(NativeServerAcceptOptions(timeout_ms=250)))
         assert session.active_transport_name == "tcp"
 
     assert all(server_id > 0 and generation == 1 for server_id, generation in bindings["ipc"].adopt_calls)
@@ -210,7 +212,7 @@ def test_native_server_reuses_accept_handle_across_poll_slices_and_releases_on_t
 
     with listen_native_server(NativeServerBootstrapOptions("nnrp://localhost")) as server:
         with pytest.raises(NativeWouldBlockError):
-            server.accept(NativeServerAcceptOptions(timeout_ms=5))
+            server._accept(NativeServerAcceptOptions(timeout_ms=5))
 
         assert len(runtime_server.accept_calls) >= 2
         assert len({session_handle_id for session_handle_id, _generation, _timeout in runtime_server.accept_calls}) == 1
@@ -231,14 +233,53 @@ def test_native_server_preserves_losing_accept_ticket_identity_across_accept_cal
             provider_routes={"ipc": NativeServerProviderRoute(provider_endpoint="unix:///tmp/nnrp.sock")},
         )
     ) as server:
-        tcp_session = server.accept(NativeServerAcceptOptions(timeout_ms=20))
-        ipc_session = server.accept(NativeServerAcceptOptions(timeout_ms=20))
+        tcp_session = asyncio.run(server.accept(NativeServerAcceptOptions(timeout_ms=20)))
+        ipc_session = asyncio.run(server.accept(NativeServerAcceptOptions(timeout_ms=20)))
 
         assert tcp_session.active_transport_name == "tcp"
         assert ipc_session.active_transport_name == "ipc"
         assert ipc_server.accept_calls[0][0] == ipc_server.accept_calls[1][0]
         assert tcp_server.release_pending_accept_calls == 0
         assert ipc_server.release_pending_accept_calls == 0
+
+
+def test_native_server_serializes_concurrent_async_accepts(monkeypatch: pytest.MonkeyPatch) -> None:
+    bindings = install_bindings(monkeypatch, "tcp")
+    runtime_server = bindings["tcp"].runtime_server
+    entered = threading.Event()
+    release = threading.Event()
+    original_accept = runtime_server.accept_session
+    active_calls = 0
+    max_active_calls = 0
+    state_lock = threading.Lock()
+
+    def blocking_accept(**kwargs):
+        nonlocal active_calls, max_active_calls
+        with state_lock:
+            active_calls += 1
+            max_active_calls = max(max_active_calls, active_calls)
+            entered.set()
+        assert release.wait(timeout=1)
+        try:
+            return original_accept(**kwargs)
+        finally:
+            with state_lock:
+                active_calls -= 1
+
+    runtime_server.accept_session = blocking_accept
+
+    with listen_native_server(NativeServerBootstrapOptions("nnrp://localhost")) as server:
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            first = executor.submit(asyncio.run, server.accept(NativeServerAcceptOptions(timeout_ms=500)))
+            assert entered.wait(timeout=1)
+            second = executor.submit(asyncio.run, server.accept(NativeServerAcceptOptions(timeout_ms=500)))
+            time.sleep(0.05)
+            assert max_active_calls == 1
+            release.set()
+            assert first.result(timeout=1).active_transport_name == "tcp"
+            assert second.result(timeout=1).active_transport_name == "tcp"
+
+    assert max_active_calls == 1
 
 
 def test_native_server_releases_all_pending_tickets_before_propagating_timeout_cleanup_error(
@@ -260,7 +301,7 @@ def test_native_server_releases_all_pending_tickets_before_propagating_timeout_c
         )
     ) as server:
         with pytest.raises(NativeArtifactError, match="first accept ticket release failed"):
-            server.accept(NativeServerAcceptOptions(timeout_ms=5))
+            asyncio.run(server.accept(NativeServerAcceptOptions(timeout_ms=5)))
 
         assert ipc_server.release_pending_accept_calls == 1
         assert tcp_server.release_pending_accept_calls == 1
@@ -414,7 +455,7 @@ def test_native_server_closes_complete_set_after_terminal_listener_failure(
         )
     ) as server:
         with pytest.raises(NativeArtifactError, match="listener failed"):
-            server.accept(NativeServerAcceptOptions(timeout_ms=20))
+            asyncio.run(server.accept(NativeServerAcceptOptions(timeout_ms=20)))
         assert server._closed is True
         assert all(binding.runtime_server._closed for binding in bindings.values())
 
@@ -425,7 +466,7 @@ def test_native_server_rejects_accept_after_close(monkeypatch: pytest.MonkeyPatc
     with listen_native_server(NativeServerBootstrapOptions("nnrp://localhost")) as server:
         server.close()
         with pytest.raises(RuntimeError, match="native server is closed"):
-            server.accept()
+            asyncio.run(server.accept())
 
 
 def test_async_session_policy_can_run_while_application_loop_is_active() -> None:

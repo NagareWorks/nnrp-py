@@ -266,7 +266,7 @@ def _run_server_case(
             _write_ready_report(scenario, routes, server.bound_provider_endpoints, ready_output)
             if terminal_provider is not None:
                 try:
-                    server.accept(NativeServerAcceptOptions(timeout_ms=2_000))
+                    asyncio.run(_accept_server_transport_names(server, count=1, timeout_ms=2_000))
                 except NativeArtifactError as error:
                     evidence = _server_evidence(
                         fixture,
@@ -280,11 +280,7 @@ def _run_server_case(
                     return _passed_result(scenario, "error", evidence, message=str(error))
                 raise AssertionError("terminal listener injection accepted a session")
 
-            accepted = []
-            for _index in range(len(routes)):
-                session = server.accept(NativeServerAcceptOptions(timeout_ms=3_000))
-                accepted.append(session.active_transport_name)
-                session.close()
+            accepted = asyncio.run(_accept_server_transport_names(server, count=len(routes), timeout_ms=3_000))
             evidence = _server_evidence(
                 fixture,
                 routes,
@@ -302,6 +298,15 @@ def _run_server_case(
             _rollback_evidence(fixture, routes),
             message=f"listener bind failed and prior listeners rolled back: {error}",
         )
+
+
+async def _accept_server_transport_names(server: Any, *, count: int, timeout_ms: int) -> list[str]:
+    accepted = []
+    for _index in range(count):
+        session = await server.accept(NativeServerAcceptOptions(timeout_ms=timeout_ms))
+        accepted.append(session.active_transport_name)
+        session.close()
+    return accepted
 
 
 def _binding_for_route(route: Mapping[str, Any]) -> NativeTransportBinding:

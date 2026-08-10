@@ -171,7 +171,9 @@ def _run_server_scenario(
         )
     ) as server:
         ready_event.set()
-        session = server.accept(NativeServerAcceptOptions(timeout_ms=max(1, int(timeout_seconds * 1000))))
+        session = asyncio.run(
+            server.accept(NativeServerAcceptOptions(timeout_ms=max(1, int(timeout_seconds * 1000))))
+        )
         if scenario.id in {
             "wire.control.cancel-abort.client",
             "wire.control.cancel-abort.ipc-client",
@@ -187,7 +189,7 @@ def _run_server_scenario(
 
 
 def _handle_cancel_server(session: Any, *, timeout_seconds: float) -> None:
-    operation = session.receive_submit(timeout_ms=max(1, int(timeout_seconds * 1000)))
+    operation = asyncio.run(session.receive_submit(timeout=timeout_seconds))
     _await_runtime_frames(session, [MessageType.CANCEL], timeout_seconds=timeout_seconds)
     session.send_trace_context(
         TraceContextMetadata(
@@ -205,7 +207,7 @@ def _handle_cancel_server(session: Any, *, timeout_seconds: float) -> None:
 
 
 def _handle_priority_server(session: Any, *, timeout_seconds: float) -> None:
-    operation = session.receive_submit(timeout_ms=max(1, int(timeout_seconds * 1000)))
+    operation = asyncio.run(session.receive_submit(timeout=timeout_seconds))
     _await_runtime_frames(
         session,
         [MessageType.PRIORITY_UPDATE, MessageType.EXPIRE_AT],
@@ -216,7 +218,7 @@ def _handle_priority_server(session: Any, *, timeout_seconds: float) -> None:
 
 
 def _handle_cache_server(session: Any, *, timeout_seconds: float) -> None:
-    operation = session.receive_submit(timeout_ms=max(1, int(timeout_seconds * 1000)))
+    operation = asyncio.run(session.receive_submit(timeout=timeout_seconds))
     frames = _await_runtime_frames(
         session,
         [MessageType.CAPABILITY_NEGOTIATION, MessageType.ROUTE_HINT, MessageType.CACHE_REFERENCE],
@@ -330,7 +332,8 @@ def _await_peer_close(session: NativeRuntimeServerSession, *, timeout_seconds: f
     while time.monotonic() < deadline:
         events = session.poll_events(max_events=16, timeout_ms=25)
         if any(
-            isinstance(event, NativeRuntimeEvent) and event.header.message_type is MessageType.SESSION_CLOSE
+            event.as_runtime() is not None
+            and event.as_runtime().header.message_type is MessageType.SESSION_CLOSE
             for event in events
         ):
             return

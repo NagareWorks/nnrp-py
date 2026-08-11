@@ -24,7 +24,7 @@ def load_checker():
 
 def frozen_contract() -> dict[str, object]:
     return {
-        "contractVersion": 14,
+        "contractVersion": 15,
         "enums": {
             "OperationState": {
                 "values": {
@@ -237,12 +237,47 @@ def frozen_contract() -> dict[str, object]:
             },
         },
         "roleSurfaces": {
+            "clientSubmitWait": {
+                "scopeRule": (
+                    "These rules apply when an SDK exposes a cancellable or time-bounded "
+                    "submit-and-wait convenience."
+                ),
+                "preDispatchCancellationRule": (
+                    "Cancellation before FRAME_SUBMIT dispatch fails the local wait and emits no submit "
+                    "or cancellation frame."
+                ),
+                "postDispatchCancellationRule": (
+                    "Cancellation after FRAME_SUBMIT dispatch fails the local wait with the language-native "
+                    "cancellation error and sends CANCEL for the submitted operation."
+                ),
+                "timeoutRule": (
+                    "A time-bounded submit wait sends DEADLINE before dispatch; expiry fails the local wait "
+                    "with the language-native timeout error and sends CANCEL for the submitted operation."
+                ),
+                "lifecycleRule": (
+                    "The local lifecycle event produced by caller cancellation or wait expiry remains "
+                    "observable through the client event pump and must not race the same submit wait into a "
+                    "successful NnrpResult return. A terminal lifecycle initiated independently by the peer "
+                    "may complete the submit wait as NnrpResult evidence."
+                ),
+            },
             "serverEventPump": {
                 "canonicalOperation": "server_session.next_event",
                 "submitConvenience": "server_session.receive_submit",
-                "submitRule": "receive_submit may skip only by retaining them in the same session queue",
-                "concurrencyRule": "one session has one serialized receive source",
-            }
+                "orderingRule": "next_event delivers every server event in per-session wire order without filtering",
+                "submitRule": (
+                    "receive_submit is a selective convenience that may skip non-submit events only by retaining "
+                    "them in the same session queue; it must never discard, decode-and-forget, or acknowledge them"
+                ),
+                "ownershipRule": (
+                    "a FRAME_SUBMIT event becomes one ServerOperation before it is exposed to the application, "
+                    "so consuming the canonical event pump never loses the reply capability"
+                ),
+                "concurrencyRule": (
+                    "one session has one serialized receive source; concurrent receive calls are rejected or "
+                    "serialized and never race the native event queue"
+                ),
+            },
         },
     }
 
@@ -257,6 +292,55 @@ def test_accepts_frozen_contract_and_current_python_surface() -> None:
     checker = load_checker()
     with tempfile.TemporaryDirectory() as directory:
         checker.check_contract(write_contract(Path(directory), frozen_contract()), ROOT)
+
+
+def test_rejects_contract_version_and_role_surface_drift() -> None:
+    checker = load_checker()
+    contract = frozen_contract()
+    contract["contractVersion"] = 14
+    with (
+        tempfile.TemporaryDirectory() as directory,
+        pytest.raises(SystemExit, match="expected SDK contract version 15"),
+    ):
+        checker.check_contract(write_contract(Path(directory), contract), ROOT)
+
+    contract = frozen_contract()
+    contract["roleSurfaces"] = None
+    with (
+        tempfile.TemporaryDirectory() as directory,
+        pytest.raises(SystemExit, match="SDK role surfaces must be an object"),
+    ):
+        checker.check_contract(write_contract(Path(directory), contract), ROOT)
+
+    for surface, diagnostic in (
+        ("clientSubmitWait", "client submit-wait contract must be an object"),
+        ("serverEventPump", "server event-pump contract must be an object"),
+    ):
+        contract = frozen_contract()
+        contract["roleSurfaces"][surface] = None
+        with (
+            tempfile.TemporaryDirectory() as directory,
+            pytest.raises(SystemExit, match=diagnostic),
+        ):
+            checker.check_contract(write_contract(Path(directory), contract), ROOT)
+
+    contract = frozen_contract()
+    contract["roleSurfaces"]["clientSubmitWait"]["postDispatchCancellationRule"] = (
+        "cancel only the local task"
+    )
+    with (
+        tempfile.TemporaryDirectory() as directory,
+        pytest.raises(SystemExit, match="client submit-wait semantics drifted"),
+    ):
+        checker.check_contract(write_contract(Path(directory), contract), ROOT)
+
+    contract = frozen_contract()
+    contract["roleSurfaces"]["serverEventPump"]["orderingRule"] = "may reorder events"
+    with (
+        tempfile.TemporaryDirectory() as directory,
+        pytest.raises(SystemExit, match="server event-pump semantics drifted"),
+    ):
+        checker.check_contract(write_contract(Path(directory), contract), ROOT)
 
 
 def test_rejects_result_contract_drift() -> None:

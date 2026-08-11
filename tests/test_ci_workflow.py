@@ -63,7 +63,7 @@ def test_ci_runs_independent_process_wire_conformance() -> None:
     workflow = _read_ci_workflow()
 
     assert "wire-conformance:" in workflow
-    assert "NNRP_RS_SOURCE_COMMIT: 11f3afcb12a71cde39a02fd918a51a542ae0c7fb" in workflow
+    assert "NNRP_RS_SOURCE_COMMIT: 8dfbb3d96247dbc8b48fe99fb3288dd7f4dffaa8" in workflow
     assert "Checkout pinned nnrp-rs source" in workflow
     assert "ref: ${{ env.NNRP_RS_SOURCE_COMMIT }}" in workflow
     for transport in ("tcp", "quic", "ipc", "websocket"):
@@ -127,7 +127,7 @@ def test_ci_wire_conformance_declares_preview4_modes_transports_and_capabilities
     assert '"wire-run"' in script
     assert '"validate-wire-results"' in script
     assert 'outcome -ne "passed"' in script
-    assert "Expected six Preview4 wire scenarios" in script
+    assert "Expected seven Preview4 wire scenarios" in script
     assert "nnrp-wire-host-route-target" in script
     assert 'Get-Command "nnrp-wire-host-route-target" -CommandType Application' in script
     assert "Split-Path -Parent $resolvedPythonExecutable" not in script

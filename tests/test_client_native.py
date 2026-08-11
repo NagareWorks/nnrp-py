@@ -299,6 +299,27 @@ class FakeSession:
             timeout_ms=timeout_ms,
         )
 
+    def submit_and_poll_result(
+        self,
+        request: SubmitRequest,
+        *,
+        parent_operation_id: int | None = None,
+        operation_group_id: int | None = None,
+        max_events: int | None = None,
+        timeout_ms: int = 0,
+    ) -> FakeResult:
+        self.submit_result_calls += 1
+        operation = self.submit_operation(
+            request,
+            parent_operation_id=parent_operation_id,
+            operation_group_id=operation_group_id,
+        )
+        return self.poll_result(
+            operation,
+            max_events=max_events,
+            timeout_ms=timeout_ms,
+        )
+
     def cancel(self, *, frame_id: int) -> None:
         self.cancelled_frames.append(frame_id)
 
@@ -542,9 +563,7 @@ def test_recovery_ticket_rejects_invalid_runtime_fields(overrides: dict[str, obj
         ({"cache_hints": (-1,)}, "cache_hints"),
     ],
 )
-def test_native_client_session_options_reject_invalid_wire_values(
-    overrides: dict[str, object], message: str
-) -> None:
+def test_native_client_session_options_reject_invalid_wire_values(overrides: dict[str, object], message: str) -> None:
     with pytest.raises(ValueError, match=message):
         NativeClientSessionOptions(**overrides)
 
@@ -662,9 +681,7 @@ async def test_native_client_connection_serializes_open_and_close() -> None:
             return original_open(**options)
 
         connection.connection.open_session = blocking_open
-        open_task = asyncio.create_task(
-            connection.open_session(NativeClientSessionOptions(requested_session_id=23))
-        )
+        open_task = asyncio.create_task(connection.open_session(NativeClientSessionOptions(requested_session_id=23)))
         assert await asyncio.to_thread(started.wait, 2)
         close_task = asyncio.create_task(asyncio.to_thread(connection.close))
         await asyncio.sleep(0.01)

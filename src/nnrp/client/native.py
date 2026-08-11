@@ -367,12 +367,18 @@ class NativeClientConnection:
         timeout_ms: int = 0,
     ) -> NativeRuntimeResult:
         self._ensure_open()
-        operation = session.submit_operation(
+        result = session.submit_and_poll_result(
             request,
             parent_operation_id=parent_operation_id,
             operation_group_id=operation_group_id,
+            max_events=max_events,
+            timeout_ms=timeout_ms,
         )
-        return self.poll_result(session, operation, max_events=max_events, timeout_ms=timeout_ms)
+        runtime_event = result.event.as_runtime()
+        result_frame_id = request.frame_id if runtime_event is None else runtime_event.header.frame_id
+        if self._is_cancelled_result(session, operation_id=result.operation_id, frame_id=result_frame_id):
+            raise NativeWouldBlockError(NativeStatus(FFI_STATUS_WOULD_BLOCK))
+        return result
 
     def cancel_operation(self, operation: NativeRuntimeOperation) -> None:
         self._ensure_open()

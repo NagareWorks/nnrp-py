@@ -871,6 +871,10 @@ class NativeInternalError(NativeRuntimeError):
     """Raised when Rust FFI reports an internal failure."""
 
 
+class _NativeSubmitWaitCancelled(RuntimeError):
+    """Stop a worker-thread submit wait after caller cancellation."""
+
+
 @dataclass(frozen=True, slots=True)
 class NativeHandle:
     kind: int
@@ -2149,9 +2153,7 @@ class _NativeServerPolicyDispatcher:
             session_error_code,
             diagnostic_view,
         )
-        status = self._entrypoints.server_policy_complete(
-            _NnrpServerPolicyCompleteRequest(request_id, decision)
-        )
+        status = self._entrypoints.server_policy_complete(_NnrpServerPolicyCompleteRequest(request_id, decision))
         del diagnostic_owner
         raise_for_native_status(status)
 
@@ -3523,10 +3525,12 @@ def _native_event_kind(event: NativePolledEvent) -> int:
 
 def _event_operation_id(event: NativePolledEvent) -> int:
     if isinstance(event, NativeRuntimeEvent):
+        value = event.metadata.value
+        if event.header.message_type is MessageType.SUPERSEDE and isinstance(value, SupersedeMetadata):
+            return value.old_operation_id
         context = _runtime_event_context(event)
         if context.diagnostic.related_operation_id:
             return context.diagnostic.related_operation_id
-        value = event.metadata.value
         return int(getattr(value, "operation_id", 0))
     return event.diagnostic.related_operation_id
 
@@ -3610,10 +3614,15 @@ class NativeRuntimeResult:
                 raise NativeHandleError(f"{message_type.name} is not a terminal result event")
             terminal_event = NativeTerminalEvent.runtime(event)
         else:
-            lifecycle = OperationLifecycleEvent(
-                selected_operation_id,
-                _operation_state_from_lifecycle_event(event),
-            )
+            if event.kind == EVENT_KIND_OPERATION_LIFECYCLE:
+                lifecycle = _operation_lifecycle_from_native_event(event)
+                if lifecycle.operation_id != selected_operation_id:
+                    raise NativeHandleError("operation lifecycle identity does not match the requested operation")
+            else:
+                lifecycle = OperationLifecycleEvent(
+                    selected_operation_id,
+                    _operation_state_from_lifecycle_event(event),
+                )
             terminal_state = _terminal_state_from_operation_state(lifecycle.state)
             terminal_event = NativeTerminalEvent.lifecycle(lifecycle)
         return cls(selected_operation_id, terminal_state, terminal_event)
@@ -3699,8 +3708,12 @@ class NativeRuntimeOperation:
     scheduling_hint: NativeOperationSchedulingHint = field(default_factory=NativeOperationSchedulingHint)
     parent_operation_id: int | None = None
     operation_group_id: int | None = None
+    _owner: NativeRuntimeSession | None = field(default=None, repr=False, compare=False)
 
     def cancel(self) -> None:
+        if self._owner is not None:
+            self._owner.cancel(frame_id=self.frame_id)
+            return
         request = _NnrpClientCancelRequest(self.session.to_ffi(), self.frame_id)
         status = self.entrypoints.client_cancel(request)
         raise_for_native_status(status)
@@ -4215,6 +4228,9 @@ class NativeRuntimeSession:
     _pending_events: list[NativePolledEvent] = field(default_factory=list, init=False, repr=False, compare=False)
     _poll_lock: threading.Lock = field(default_factory=threading.Lock, init=False, repr=False, compare=False)
     _next_runtime_frame_id: int = field(default=1, init=False, repr=False, compare=False)
+    _next_control_sequence: int = field(default=1, init=False, repr=False, compare=False)
+    _operation_frames: dict[int, int] = field(default_factory=dict, init=False, repr=False, compare=False)
+    _operation_lock: threading.Lock = field(default_factory=threading.Lock, init=False, repr=False, compare=False)
 
     def recovery_ticket(self) -> NativeSessionRecoveryTicket | None:
         self._ensure_open()
@@ -4248,7 +4264,10 @@ class NativeRuntimeSession:
             status = self.entrypoints.client_await_event(self.handle.to_ffi(), ctypes.byref(result))
             raise_for_native_status(status)
             raise_for_native_status(result.status)
-            return NativeRuntimePollResult.from_ffi(result, self.entrypoints)
+            decoded = NativeRuntimePollResult.from_ffi(result, self.entrypoints)
+            if decoded.event is not None:
+                self._observe_polled_event(decoded.event)
+            return decoded
 
     def poll_event(self, *, timeout_ms: int = 0) -> NativePolledEvent | None:
         events = self.poll_events_batch(max_events=1, timeout_ms=timeout_ms)
@@ -4332,9 +4351,12 @@ class NativeRuntimeSession:
         if native_status.status_code == FFI_STATUS_WOULD_BLOCK:
             return ()
         raise_for_native_status(native_status)
-        return tuple(
+        events = tuple(
             _native_event_from_ffi(event_buffer[index], self.entrypoints) for index in range(int(event_count.value))
         )
+        for event in events:
+            self._observe_polled_event(event)
+        return events
 
     def _take_pending_events(
         self,
@@ -4714,16 +4736,12 @@ class NativeRuntimeSession:
         scheduling_hint: NativeOperationSchedulingHint | None = None,
     ) -> NativeRuntimeOperation:
         self._ensure_open()
+        self._validate_submit_request_identity(request)
         selected_scheduling_hint = _coerce_operation_scheduling_hint(
             scheduling_hint,
             parent_operation_id=parent_operation_id,
             operation_group_id=operation_group_id,
         )
-        if request.metadata.operation_id != request.operation_id:
-            raise ValueError(
-                "metadata.operation_id must equal the submit operation_id: "
-                f"expected {request.operation_id}, got {request.metadata.operation_id}"
-            )
         encoded_submit = request.metadata.pack() + request.body
         payload_view, _payload_owner = _buffer_view_from_payload(encoded_submit)
         ffi_request = _NnrpSubmitRequest(
@@ -4739,7 +4757,7 @@ class NativeRuntimeSession:
         out_operation = _NnrpHandle()
         status = self.entrypoints.client_submit(ffi_request, ctypes.byref(out_operation))
         raise_for_native_status(status)
-        return NativeRuntimeOperation(
+        operation = NativeRuntimeOperation(
             entrypoints=self.entrypoints,
             session=self.handle,
             handle=NativeOperationHandle.from_ffi(out_operation),
@@ -4748,7 +4766,10 @@ class NativeRuntimeSession:
             scheduling_hint=selected_scheduling_hint,
             parent_operation_id=selected_scheduling_hint.parent_operation_id,
             operation_group_id=selected_scheduling_hint.operation_group_id,
+            _owner=self,
         )
+        self._remember_operation_frame(operation.operation_id, operation.frame_id)
+        return operation
 
     def cache_backend(self, *, now_ms: int = 0, ttl_ms: int = 0, expected_version: int = 0) -> NativeCacheLeaseBackend:
         self._ensure_open()
@@ -4768,16 +4789,43 @@ class NativeRuntimeSession:
         operation_group_id: int | None = None,
         scheduling_hint: NativeOperationSchedulingHint | None = None,
     ) -> NativeRuntimeOperation:
-        try:
-            return await asyncio.to_thread(
-                self.submit_operation,
+        dispatch_lock = threading.Lock()
+        dispatch_allowed = True
+        dispatch_started = False
+
+        def dispatch() -> NativeRuntimeOperation | None:
+            nonlocal dispatch_started
+            with dispatch_lock:
+                if not dispatch_allowed:
+                    return None
+                dispatch_started = True
+            return self.submit_operation(
                 request,
                 parent_operation_id=parent_operation_id,
                 operation_group_id=operation_group_id,
                 scheduling_hint=scheduling_hint,
             )
+
+        submit_task = asyncio.create_task(
+            asyncio.to_thread(dispatch)
+        )
+        try:
+            operation = await asyncio.shield(submit_task)
+            if operation is None:
+                raise asyncio.CancelledError
+            return operation
         except asyncio.CancelledError:
-            self.cancel(frame_id=request.frame_id)
+            with dispatch_lock:
+                cancelled_before_dispatch = not dispatch_started
+                if cancelled_before_dispatch:
+                    dispatch_allowed = False
+            if cancelled_before_dispatch:
+                submit_task.cancel()
+                raise
+            operation = await asyncio.shield(submit_task)
+            if operation is None:
+                raise
+            operation.cancel()
             raise
 
     def poll_result(
@@ -4832,6 +4880,7 @@ class NativeRuntimeSession:
 
             for index in range(int(event_count.value)):
                 event = _native_event_from_ffi(event_buffer[index], self.entrypoints)
+                self._observe_polled_event(event)
                 if (
                     matched_result is None
                     and _event_is_result_event(event)
@@ -4882,13 +4931,24 @@ class NativeRuntimeSession:
         max_events: int | None = None,
         timeout_ms: int = 0,
     ) -> NativeRuntimeResult:
-        operation = self.submit_operation(
+        wait_deadline = _submit_wait_deadline(timeout_ms)
+        selected_scheduling_hint = self._prepare_submit_wait(
             request,
             parent_operation_id=parent_operation_id,
             operation_group_id=operation_group_id,
             scheduling_hint=scheduling_hint,
+            max_events=max_events,
+            timeout_ms=timeout_ms,
         )
-        return self.poll_result(operation, max_events=max_events, timeout_ms=timeout_ms)
+        operation = self.submit_operation(
+            request,
+            scheduling_hint=selected_scheduling_hint,
+        )
+        return self._poll_submitted_result_until_deadline(
+            operation,
+            max_events=max_events,
+            wait_deadline=wait_deadline,
+        )
 
     async def async_submit_and_poll_result(
         self,
@@ -4900,8 +4960,8 @@ class NativeRuntimeSession:
         max_events: int | None = None,
         timeout_ms: int = 0,
     ) -> NativeRuntimeResult:
-        return await asyncio.to_thread(
-            self.submit_and_poll_result,
+        wait_deadline = _submit_wait_deadline(timeout_ms)
+        selected_scheduling_hint = self._prepare_submit_wait(
             request,
             parent_operation_id=parent_operation_id,
             operation_group_id=operation_group_id,
@@ -4909,6 +4969,78 @@ class NativeRuntimeSession:
             max_events=max_events,
             timeout_ms=timeout_ms,
         )
+        operation = await self.async_submit_operation(
+            request,
+            scheduling_hint=selected_scheduling_hint,
+        )
+        cancellation_requested = threading.Event()
+
+        def finish_cancellation() -> None:
+            try:
+                operation.cancel()
+            except Exception as error:
+                raise _NativeSubmitWaitCancelled from error
+            raise _NativeSubmitWaitCancelled
+
+        def poll_until_complete() -> NativeRuntimeResult:
+            try:
+                return self._poll_submitted_result_until_deadline(
+                    operation,
+                    max_events=max_events,
+                    wait_deadline=wait_deadline,
+                    cancellation_requested=cancellation_requested,
+                )
+            except _NativeSubmitWaitCancelled:
+                finish_cancellation()
+            except Exception:
+                if cancellation_requested.is_set():
+                    finish_cancellation()
+                raise
+
+        poll_task = asyncio.create_task(
+            asyncio.to_thread(poll_until_complete)
+        )
+        try:
+            return await asyncio.shield(poll_task)
+        except asyncio.CancelledError:
+            cancellation_requested.set()
+            try:
+                await asyncio.shield(poll_task)
+            except _NativeSubmitWaitCancelled:
+                pass
+            raise
+
+    def _poll_submitted_result_until_deadline(
+        self,
+        operation: NativeRuntimeOperation,
+        *,
+        max_events: int | None,
+        wait_deadline: float | None,
+        cancellation_requested: threading.Event | None = None,
+    ) -> NativeRuntimeResult:
+        while True:
+            if cancellation_requested is not None and cancellation_requested.is_set():
+                raise _NativeSubmitWaitCancelled
+            try:
+                result = self.poll_result(
+                    operation,
+                    max_events=max_events,
+                    timeout_ms=_submit_wait_poll_timeout_ms(wait_deadline),
+                )
+                if cancellation_requested is not None and cancellation_requested.is_set():
+                    raise _NativeSubmitWaitCancelled
+                return result
+            except NativeWouldBlockError as error:
+                if cancellation_requested is not None and cancellation_requested.is_set():
+                    raise _NativeSubmitWaitCancelled from None
+                if wait_deadline is None or max_events == 0:
+                    raise
+                if time.monotonic() < wait_deadline:
+                    continue
+                operation.cancel()
+                raise TimeoutError(
+                    f"NNRP operation {operation.operation_id} exceeded its submit wait deadline"
+                ) from error
 
     def cancel_operation(
         self,
@@ -5033,31 +5165,174 @@ class NativeRuntimeSession:
         self._send_runtime_frame(MessageType.CACHE_INVALIDATE, metadata)
 
     def close(self) -> None:
-        self._ensure_open()
-        status = self.entrypoints.client_close(self.handle.to_ffi())
-        raise_for_native_status(status)
-        object.__setattr__(self, "_closed", True)
+        with self._poll_lock:
+            if self._closed:
+                return
+            status = self.entrypoints.client_close(self.handle.to_ffi())
+            raise_for_native_status(status)
+            with self._operation_lock:
+                self._operation_frames.clear()
+            object.__setattr__(self, "_closed", True)
 
     def cancel(self, *, frame_id: int) -> None:
         self._ensure_open()
-        request = _NnrpClientCancelRequest(self.handle.to_ffi(), frame_id)
-        status = self.entrypoints.client_cancel(request)
-        raise_for_native_status(status)
+        with self._poll_lock:
+            request = _NnrpClientCancelRequest(self.handle.to_ffi(), frame_id)
+            status = self.entrypoints.client_cancel(request)
+            raise_for_native_status(status)
+            self._forget_operation_frame_by_frame(frame_id)
 
     def _send_runtime_frame(
         self,
         message_type: MessageType,
         metadata: _FixedRuntimeMetadata | CacheInvalidateMetadata,
         tail: bytes | bytearray | memoryview = b"",
+        *,
+        frame_id: int | None = None,
     ) -> None:
         self._ensure_open()
         payload = _encode_native_runtime_frame(message_type, metadata, tail)
         payload_view, _payload_owner = _buffer_view_from_payload(payload)
-        frame_id = self._next_runtime_frame_id
-        request = _NnrpRuntimeFrameSendRequest(self.handle.to_ffi(), int(message_type), frame_id, payload_view)
+        selected_frame_id = self._runtime_frame_id(message_type, metadata) if frame_id is None else frame_id
+        request = _NnrpRuntimeFrameSendRequest(
+            self.handle.to_ffi(),
+            int(message_type),
+            selected_frame_id,
+            payload_view,
+        )
         status = self.entrypoints.runtime_frame_send(request)
         raise_for_native_status(status)
-        object.__setattr__(self, "_next_runtime_frame_id", 1 if frame_id == 0xFFFFFFFF else frame_id + 1)
+        operation_id = _runtime_operation_id(message_type, metadata)
+        if frame_id is None and operation_id is None:
+            object.__setattr__(
+                self,
+                "_next_runtime_frame_id",
+                1 if selected_frame_id == 0xFFFFFFFF else selected_frame_id + 1,
+            )
+        if (
+            message_type in {MessageType.CANCEL, MessageType.ABORT, MessageType.SUPERSEDE}
+            and operation_id is not None
+            and operation_id != 0
+        ):
+            self._forget_operation_frame(operation_id)
+
+    def _prepare_submit_wait(
+        self,
+        request: SubmitRequest,
+        *,
+        parent_operation_id: int | None,
+        operation_group_id: int | None,
+        scheduling_hint: NativeOperationSchedulingHint | None,
+        max_events: int | None,
+        timeout_ms: int,
+    ) -> NativeOperationSchedulingHint:
+        self._ensure_open()
+        self._validate_submit_request_identity(request)
+        if max_events is not None and max_events < 0:
+            raise ValueError("max_events must be non-negative")
+        selected_scheduling_hint = _coerce_operation_scheduling_hint(
+            scheduling_hint,
+            parent_operation_id=parent_operation_id,
+            operation_group_id=operation_group_id,
+        )
+        _require_bounded_integer("timeout_ms", timeout_ms, 0xFFFFFFFF)
+        if timeout_ms == 0:
+            return selected_scheduling_hint
+        metadata = SchedulingMetadata(
+            operation_id=request.operation_id,
+            control_sequence=self._allocate_control_sequence(),
+            priority_class=0,
+            priority_delta=0,
+            deadline_unix_ms=math.ceil(time.time() * 1000) + timeout_ms,
+            flags=0,
+        )
+        self._send_runtime_frame(MessageType.DEADLINE, metadata, frame_id=request.frame_id)
+        return selected_scheduling_hint
+
+    @staticmethod
+    def _validate_submit_request_identity(request: SubmitRequest) -> None:
+        if request.metadata.operation_id != request.operation_id:
+            raise ValueError(
+                "metadata.operation_id must equal the submit operation_id: "
+                f"expected {request.operation_id}, got {request.metadata.operation_id}"
+            )
+
+    def _runtime_frame_id(
+        self,
+        message_type: MessageType,
+        metadata: _FixedRuntimeMetadata | CacheInvalidateMetadata,
+    ) -> int:
+        operation_id = _runtime_operation_id(message_type, metadata)
+        if operation_id is None:
+            return self._next_runtime_frame_id
+        if operation_id == 0:
+            if message_type not in {
+                MessageType.CANCEL,
+                MessageType.ABORT,
+                MessageType.BUDGET_UPDATE,
+                MessageType.OBJECT_REF,
+                MessageType.OBJECT_RELEASE,
+            }:
+                raise NativeInvalidStateError(
+                    NativeStatus(FFI_STATUS_INVALID_STATE),
+                    f"{message_type.name} requires an operation-scoped non-zero operation_id",
+                )
+            return 0
+        with self._operation_lock:
+            try:
+                return self._operation_frames[operation_id]
+            except KeyError as error:
+                raise NativeInvalidStateError(
+                    NativeStatus(FFI_STATUS_INVALID_STATE),
+                    f"{message_type.name} references inactive operation {operation_id}",
+                ) from error
+
+    def _allocate_control_sequence(self) -> int:
+        with self._operation_lock:
+            sequence = self._next_control_sequence
+            object.__setattr__(
+                self,
+                "_next_control_sequence",
+                1 if sequence == 0xFFFFFFFFFFFFFFFF else sequence + 1,
+            )
+            return sequence
+
+    def _remember_operation_frame(self, operation_id: int, frame_id: int) -> None:
+        with self._operation_lock:
+            self._operation_frames[operation_id] = frame_id
+
+    def _forget_operation_frame(self, operation_id: int) -> None:
+        with self._operation_lock:
+            self._operation_frames.pop(operation_id, None)
+
+    def _forget_operation_frame_by_frame(self, frame_id: int) -> None:
+        with self._operation_lock:
+            for operation_id, operation_frame_id in tuple(self._operation_frames.items()):
+                if operation_frame_id == frame_id:
+                    self._operation_frames.pop(operation_id, None)
+
+    def _observe_polled_event(self, event: NativePolledEvent) -> None:
+        event_session = (
+            _runtime_event_context(event).session if isinstance(event, NativeRuntimeEvent) else event.session
+        )
+        if event_session != self.handle.handle:
+            return
+        if isinstance(event, NativeRuntimeEvent) and event.header.message_type is MessageType.SESSION_CLOSE:
+            with self._operation_lock:
+                self._operation_frames.clear()
+            return
+        operation_id = _event_operation_id(event)
+        if operation_id == 0:
+            return
+        terminal = _event_is_result_event(event)
+        if isinstance(event, NativeRuntimeEvent):
+            terminal = terminal or event.header.message_type in {
+                MessageType.CANCEL,
+                MessageType.ABORT,
+                MessageType.SUPERSEDE,
+            }
+        if terminal:
+            self._forget_operation_frame(operation_id)
 
     def _ensure_open(self) -> None:
         if self._closed:
@@ -5215,6 +5490,8 @@ class NativeRuntimeServerSession:
     _pending_events: list[NativeServerEvent] = field(default_factory=list, init=False, repr=False, compare=False)
     _poll_lock: threading.Lock = field(default_factory=threading.Lock, init=False, repr=False, compare=False)
     _next_runtime_frame_id: int = field(default=1, init=False, repr=False, compare=False)
+    _operation_frames: dict[int, int] = field(default_factory=dict, init=False, repr=False, compare=False)
+    _operation_lock: threading.Lock = field(default_factory=threading.Lock, init=False, repr=False, compare=False)
 
     async def next_event(self, timeout: float | None = None) -> NativeServerEvent:
         return await asyncio.to_thread(self._next_event_blocking, timeout)
@@ -5331,6 +5608,10 @@ class NativeRuntimeServerSession:
     def _server_event_from_polled(self, event: NativePolledEvent) -> NativeServerEvent:
         if isinstance(event, NativeRuntimeEvent):
             if event.header.message_type is not MessageType.FRAME_SUBMIT:
+                self._observe_polled_event(event)
+                if event.header.message_type is MessageType.SESSION_CLOSE:
+                    with self._operation_lock:
+                        self._operation_frames.clear()
                 return NativeServerEvent.runtime(event)
             context = _runtime_event_context(event)
             context.operation.require_kind(HANDLE_KIND_OPERATION)
@@ -5340,17 +5621,18 @@ class NativeRuntimeServerSession:
                     NativeStatus(FFI_STATUS_PROTOCOL_ERROR),
                     "FRAME_SUBMIT event did not decode FrameSubmitMetadata",
                 )
-            return NativeServerEvent.submit(
-                NativeRuntimeServerOperation(
-                    submit_metadata.operation_id,
-                    event.header.frame_id,
-                    event,
-                    self.entrypoints,
-                    self.handle,
-                    NativeOperationHandle(context.operation),
-                    self,
-                )
+            operation = NativeRuntimeServerOperation(
+                submit_metadata.operation_id,
+                event.header.frame_id,
+                event,
+                self.entrypoints,
+                self.handle,
+                NativeOperationHandle(context.operation),
+                self,
             )
+            self._remember_operation_frame(operation.operation_id, operation.frame_id)
+            return NativeServerEvent.submit(operation)
+        self._observe_polled_event(event)
         return NativeServerEvent.lifecycle(_operation_lifecycle_from_native_event(event))
 
     def poll_runtime_frames(
@@ -5478,11 +5760,12 @@ class NativeRuntimeServerSession:
         self._ensure_open()
         payload = _encode_native_runtime_frame(message_type, metadata, tail)
         payload_view, _payload_owner = _buffer_view_from_payload(payload)
-        frame_id = self._next_runtime_frame_id
+        frame_id = self._runtime_frame_id(message_type, metadata)
         request = _NnrpRuntimeFrameSendRequest(self.handle.to_ffi(), int(message_type), frame_id, payload_view)
         status = self.entrypoints.runtime_frame_send(request)
         raise_for_native_status(status)
-        object.__setattr__(self, "_next_runtime_frame_id", 1 if frame_id == 0xFFFFFFFF else frame_id + 1)
+        if _runtime_operation_id(message_type, metadata) is None:
+            object.__setattr__(self, "_next_runtime_frame_id", 1 if frame_id == 0xFFFFFFFF else frame_id + 1)
 
     def _send_operation_runtime_frame(
         self,
@@ -5500,10 +5783,65 @@ class NativeRuntimeServerSession:
         raise_for_native_status(status)
 
     def close(self) -> None:
-        self._ensure_open()
-        status = self.entrypoints.server_close(self.handle.to_ffi())
-        raise_for_native_status(status)
-        object.__setattr__(self, "_closed", True)
+        with self._poll_lock:
+            if self._closed:
+                return
+            status = self.entrypoints.server_close(self.handle.to_ffi())
+            raise_for_native_status(status)
+            with self._operation_lock:
+                self._operation_frames.clear()
+            object.__setattr__(self, "_closed", True)
+
+    def _runtime_frame_id(
+        self,
+        message_type: MessageType,
+        metadata: _FixedRuntimeMetadata | CacheInvalidateMetadata,
+    ) -> int:
+        operation_id = _runtime_operation_id(message_type, metadata)
+        if operation_id is None:
+            return self._next_runtime_frame_id
+        if operation_id == 0:
+            if message_type not in {MessageType.OBJECT_REF, MessageType.OBJECT_RELEASE}:
+                raise NativeInvalidStateError(
+                    NativeStatus(FFI_STATUS_INVALID_STATE),
+                    f"{message_type.name} requires an operation-scoped non-zero operation_id",
+                )
+            return 0
+        with self._operation_lock:
+            try:
+                return self._operation_frames[operation_id]
+            except KeyError as error:
+                raise NativeInvalidStateError(
+                    NativeStatus(FFI_STATUS_INVALID_STATE),
+                    f"{message_type.name} references inactive operation {operation_id}",
+                ) from error
+
+    def _remember_operation_frame(self, operation_id: int, frame_id: int) -> None:
+        with self._operation_lock:
+            self._operation_frames[operation_id] = frame_id
+
+    def _forget_operation_frame(self, operation_id: int) -> None:
+        with self._operation_lock:
+            self._operation_frames.pop(operation_id, None)
+
+    def _observe_polled_event(self, event: NativePolledEvent) -> None:
+        event_session = (
+            _runtime_event_context(event).session if isinstance(event, NativeRuntimeEvent) else event.session
+        )
+        if event_session != self.handle.handle:
+            return
+        operation_id = _event_operation_id(event)
+        if operation_id == 0:
+            return
+        terminal = _event_is_result_event(event)
+        if isinstance(event, NativeRuntimeEvent):
+            terminal = terminal or event.header.message_type in {
+                MessageType.CANCEL,
+                MessageType.ABORT,
+                MessageType.SUPERSEDE,
+            }
+        if terminal:
+            self._forget_operation_frame(operation_id)
 
     def _ensure_open(self) -> None:
         if self._closed:
@@ -5511,6 +5849,33 @@ class NativeRuntimeServerSession:
                 NativeStatus(FFI_STATUS_INVALID_STATE),
                 "native runtime server session is closed",
             )
+
+
+def _runtime_operation_id(
+    message_type: MessageType,
+    metadata: _FixedRuntimeMetadata | CacheInvalidateMetadata,
+) -> int | None:
+    if message_type in {MessageType.CANCEL, MessageType.ABORT} and isinstance(metadata, ControlRequestMetadata):
+        return metadata.operation_id
+    if message_type in {MessageType.PRIORITY_UPDATE, MessageType.DEADLINE, MessageType.EXPIRE_AT} and isinstance(
+        metadata,
+        SchedulingMetadata,
+    ):
+        return metadata.operation_id
+    if message_type is MessageType.SUPERSEDE and isinstance(metadata, SupersedeMetadata):
+        return metadata.old_operation_id
+    if message_type is MessageType.BUDGET_UPDATE and isinstance(metadata, BudgetMetadata):
+        return metadata.operation_id
+    if message_type in {MessageType.ROUTE_HINT, MessageType.EXECUTION_HINT} and isinstance(
+        metadata,
+        RouteHintMetadata,
+    ):
+        return metadata.operation_id
+    if message_type is MessageType.OBJECT_REF and isinstance(metadata, ObjectReferenceMetadata):
+        return metadata.operation_id
+    if message_type is MessageType.OBJECT_RELEASE and isinstance(metadata, ObjectReleaseMetadata):
+        return metadata.operation_id
+    return None
 
 
 def _event_matches_operation(event: NativePolledEvent, operation: NativeRuntimeOperation) -> bool:
@@ -5521,11 +5886,22 @@ def _event_matches_operation(event: NativePolledEvent, operation: NativeRuntimeO
 
 
 def _event_is_result_event(event: NativePolledEvent) -> bool:
-    return _native_event_kind(event) in {
+    event_kind = _native_event_kind(event)
+    if event_kind in {
         EVENT_KIND_RESULT_PUSHED,
         EVENT_KIND_RESULT_DROPPED,
         EVENT_KIND_ERROR,
-    }
+    }:
+        return True
+    if isinstance(event, NativeLifecycleEvent) and event_kind == EVENT_KIND_OPERATION_LIFECYCLE:
+        lifecycle = _operation_lifecycle_from_native_event(event)
+        return lifecycle.state in {
+            OperationState.COMPLETED,
+            OperationState.CANCELLED,
+            OperationState.SUPERSEDED,
+            OperationState.FAILED,
+        }
+    return False
 
 
 def _dispatch_callback_batch(
@@ -6849,6 +7225,17 @@ def _raise_if_event_deadline_expired(deadline: float | None) -> None:
 
 def _ffi_role_poll_timeout_ms(timeout_ms: int) -> int:
     return 1 if timeout_ms == 0 else timeout_ms
+
+
+def _submit_wait_deadline(timeout_ms: int) -> float | None:
+    _require_bounded_integer("timeout_ms", timeout_ms, 0xFFFFFFFF)
+    return None if timeout_ms == 0 else time.monotonic() + (timeout_ms / 1_000)
+
+
+def _submit_wait_poll_timeout_ms(deadline: float | None) -> int:
+    if deadline is None:
+        return 0
+    return _event_poll_timeout_ms(deadline)
 
 
 def _validate_u64(name: str, value: int) -> None:

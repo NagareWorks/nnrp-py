@@ -353,8 +353,8 @@ foreach ($mode in $modes) {
 }
 
 $totalPassed = ($summaries | Measure-Object -Property passed -Sum).Sum
-if ($totalPassed -ne 6) {
-  throw "Expected six Preview4 wire scenarios, got $totalPassed."
+if ($totalPassed -ne 7) {
+  throw "Expected seven Preview4 wire scenarios, got $totalPassed."
 }
 
 if ([string]::IsNullOrWhiteSpace($hostRouteTargetExecutable) -or -not (Test-Path -LiteralPath $hostRouteTargetExecutable)) {

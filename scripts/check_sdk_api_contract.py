@@ -6,7 +6,48 @@ import json
 from pathlib import Path
 from typing import Any
 
-EXPECTED_CONTRACT_VERSION = 14
+EXPECTED_CONTRACT_VERSION = 15
+EXPECTED_CLIENT_SUBMIT_WAIT = {
+    "scopeRule": (
+        "These rules apply when an SDK exposes a cancellable or time-bounded "
+        "submit-and-wait convenience."
+    ),
+    "preDispatchCancellationRule": (
+        "Cancellation before FRAME_SUBMIT dispatch fails the local wait and emits no submit "
+        "or cancellation frame."
+    ),
+    "postDispatchCancellationRule": (
+        "Cancellation after FRAME_SUBMIT dispatch fails the local wait with the language-native "
+        "cancellation error and sends CANCEL for the submitted operation."
+    ),
+    "timeoutRule": (
+        "A time-bounded submit wait sends DEADLINE before dispatch; expiry fails the local wait "
+        "with the language-native timeout error and sends CANCEL for the submitted operation."
+    ),
+    "lifecycleRule": (
+        "The local lifecycle event produced by caller cancellation or wait expiry remains "
+        "observable through the client event pump and must not race the same submit wait into a "
+        "successful NnrpResult return. A terminal lifecycle initiated independently by the peer "
+        "may complete the submit wait as NnrpResult evidence."
+    ),
+}
+EXPECTED_SERVER_EVENT_PUMP = {
+    "canonicalOperation": "server_session.next_event",
+    "submitConvenience": "server_session.receive_submit",
+    "orderingRule": "next_event delivers every server event in per-session wire order without filtering",
+    "submitRule": (
+        "receive_submit is a selective convenience that may skip non-submit events only by retaining "
+        "them in the same session queue; it must never discard, decode-and-forget, or acknowledge them"
+    ),
+    "ownershipRule": (
+        "a FRAME_SUBMIT event becomes one ServerOperation before it is exposed to the application, "
+        "so consuming the canonical event pump never loses the reply capability"
+    ),
+    "concurrencyRule": (
+        "one session has one serialized receive source; concurrent receive calls are rejected or "
+        "serialized and never race the native event queue"
+    ),
+}
 EXPECTED_OPERATION_STATES = {
     "ACCEPTED": 0,
     "RUNNING": 1,
@@ -23,6 +64,11 @@ EXPECTED_TERMINAL_STATES = {"SUCCESS": 0, "CANCELLED": 1, "DROPPED": 2, "ERROR":
 def require(condition: bool, message: str) -> None:
     if not condition:
         raise SystemExit(message)
+
+
+def require_mapping(value: Any, message: str) -> dict[str, Any]:
+    require(isinstance(value, dict), message)
+    return value
 
 
 def field_shape(type_contract: dict[str, Any]) -> list[tuple[str, str, bool]]:
@@ -421,13 +467,24 @@ def check_contract(contract_path: Path, source_root: Path) -> None:
             and operation.get("terminal") is terminal,
             f"{operation_name} role operation drifted",
         )
-    server_event_pump = contract.get("roleSurfaces", {}).get("serverEventPump", {})
+    role_surfaces = require_mapping(
+        contract.get("roleSurfaces"), "SDK role surfaces must be an object"
+    )
+    client_submit_wait = require_mapping(
+        role_surfaces.get("clientSubmitWait"),
+        "client submit-wait contract must be an object",
+    )
     require(
-        server_event_pump.get("canonicalOperation") == "server_session.next_event"
-        and server_event_pump.get("submitConvenience") == "server_session.receive_submit"
-        and "retaining them" in server_event_pump.get("submitRule", "")
-        and "serialized receive source" in server_event_pump.get("concurrencyRule", ""),
-        "server event pump retention rules drifted",
+        client_submit_wait == EXPECTED_CLIENT_SUBMIT_WAIT,
+        "client submit-wait semantics drifted",
+    )
+    server_event_pump = require_mapping(
+        role_surfaces.get("serverEventPump"),
+        "server event-pump contract must be an object",
+    )
+    require(
+        server_event_pump == EXPECTED_SERVER_EVENT_PUMP,
+        "server event-pump semantics drifted",
     )
 
     runtime_module = parse_module(source_root / "src" / "nnrp" / "runtime" / "types.py")

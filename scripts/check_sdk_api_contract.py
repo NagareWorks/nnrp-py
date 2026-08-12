@@ -48,6 +48,21 @@ EXPECTED_SERVER_EVENT_PUMP = {
         "serialized and never race the native event queue"
     ),
 }
+EXPECTED_SERVER_OPERATION_INVARIANTS = [
+    "submit.header.message_type is frame_submit",
+    "submit.metadata is the frame_submit metadata variant",
+    "operation_id equals submit.metadata.operation_id",
+    "frame_id equals submit.header.frame_id",
+    "the reply capability remains valid until exactly one terminal outcome is sent or the session closes",
+]
+EXPECTED_RESULT_SUCCESS_RULE = (
+    "A successful result has terminal_state success and an event whose message type is result_push "
+    "and whose metadata variant is result_push."
+)
+EXPECTED_RESULT_NON_SUCCESS_RULE = (
+    "Cancelled, dropped, and error results preserve the terminal protocol or lifecycle event that "
+    "established the state; SDKs do not synthesize RESULT_PUSH metadata for them."
+)
 EXPECTED_OPERATION_STATES = {
     "ACCEPTED": 0,
     "RUNNING": 1,
@@ -241,6 +256,11 @@ def check_contract(contract_path: Path, source_root: Path) -> None:
         ],
         "NnrpResult field contract drifted",
     )
+    require(
+        result.get("successRule") == EXPECTED_RESULT_SUCCESS_RULE
+        and result.get("nonSuccessRule") == EXPECTED_RESULT_NON_SUCCESS_RULE,
+        "NnrpResult terminal evidence rules drifted",
+    )
 
     server_operation = types["ServerOperation"]
     require(
@@ -256,6 +276,10 @@ def check_contract(contract_path: Path, source_root: Path) -> None:
         server_operation.get("terminalMethods") == ["send_result", "send_result_drop"]
         and server_operation.get("streamingMethods") == ["send_progress", "send_partial_result"],
         "ServerOperation method contract drifted",
+    )
+    require(
+        server_operation.get("invariants") == EXPECTED_SERVER_OPERATION_INVARIANTS,
+        "ServerOperation invariants drifted",
     )
 
     server_event = types["ServerEvent"]

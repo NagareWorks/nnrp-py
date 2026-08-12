@@ -35,6 +35,7 @@ from nnrp.runtime import (
     CacheMissReason,
     CacheReferenceMetadata,
     NativeRuntimeEvent,
+    OperationState,
     PartialResultMetadata,
     PressureMetadata,
     ProgressMetadata,
@@ -244,7 +245,17 @@ def _handle_cancel_server(session: Any, *, timeout_seconds: float) -> None:
         ),
         _TRACE_BODY,
     )
-    asyncio.run(operation.send_result_drop(_drop_reason(operation.operation_id)))
+    asyncio.run(
+        operation.send_result_drop(
+            _drop_reason(operation.operation_id, ResultDropReasonCode.PEER_CANCELLED)
+        )
+    )
+    _await_server_lifecycle(
+        session,
+        operation.operation_id,
+        OperationState.CANCELLED,
+        timeout_seconds=timeout_seconds,
+    )
     _finish_peer_close(session, timeout_seconds=timeout_seconds)
 
 
@@ -267,6 +278,12 @@ def _handle_deadline_before_submit_server(
     if operation.operation_id != metadata.operation_id or operation.frame_id != deadline.header.frame_id:
         raise RuntimeError("deadline-before-submit target received mismatched submit correlation")
     asyncio.run(operation.send_result(_canonical_result(), _RESPONSE_BODY))
+    _await_server_lifecycle(
+        session,
+        operation.operation_id,
+        OperationState.COMPLETED,
+        timeout_seconds=timeout_seconds,
+    )
     _finish_peer_close(session, timeout_seconds=timeout_seconds)
 
 
@@ -277,7 +294,17 @@ def _handle_priority_server(session: Any, *, timeout_seconds: float) -> None:
         [MessageType.PRIORITY_UPDATE, MessageType.EXPIRE_AT],
         timeout_seconds=timeout_seconds,
     )
-    asyncio.run(operation.send_result_drop(_drop_reason(operation.operation_id)))
+    asyncio.run(
+        operation.send_result_drop(
+            _drop_reason(operation.operation_id, ResultDropReasonCode.SUPERSEDED)
+        )
+    )
+    _await_server_lifecycle(
+        session,
+        operation.operation_id,
+        OperationState.SUPERSEDED,
+        timeout_seconds=timeout_seconds,
+    )
     _finish_peer_close(session, timeout_seconds=timeout_seconds)
 
 
@@ -302,6 +329,12 @@ def _handle_cache_server(session: Any, *, timeout_seconds: float) -> None:
         )
     )
     asyncio.run(operation.send_result(_canonical_result(), _RESPONSE_BODY))
+    _await_server_lifecycle(
+        session,
+        operation.operation_id,
+        OperationState.COMPLETED,
+        timeout_seconds=timeout_seconds,
+    )
     _finish_peer_close(session, timeout_seconds=timeout_seconds)
 
 
@@ -404,6 +437,24 @@ def _await_server_runtime_frames(
     return observed
 
 
+def _await_server_lifecycle(
+    session: Any,
+    operation_id: int,
+    state: OperationState,
+    *,
+    timeout_seconds: float,
+) -> None:
+    event = asyncio.run(session.next_event(timeout=timeout_seconds))
+    lifecycle = event.as_lifecycle()
+    if lifecycle is None:
+        raise RuntimeError("wire target expected an operation lifecycle event")
+    if lifecycle.operation_id != operation_id or lifecycle.state is not state:
+        raise RuntimeError(
+            f"wire target expected operation {operation_id} lifecycle {state.name}, "
+            f"got operation {lifecycle.operation_id} lifecycle {lifecycle.state.name}"
+        )
+
+
 def _poll_result(session: Any, operation: Any, *, deadline: float) -> Any:
     last_error: NativeWouldBlockError | None = None
     while time.monotonic() < deadline:
@@ -446,11 +497,14 @@ def _validate_progress_frames(frames: Sequence[NativeRuntimeEvent]) -> None:
         raise RuntimeError("wire target received non-canonical PARTIAL_RESULT body")
 
 
-def _drop_reason(operation_id: int) -> ResultDropReasonMetadata:
+def _drop_reason(
+    operation_id: int,
+    reason_code: ResultDropReasonCode,
+) -> ResultDropReasonMetadata:
     return ResultDropReasonMetadata(
         operation_id=operation_id,
         result_sequence=1,
-        drop_reason_code=ResultDropReasonCode.DEADLINE_EXPIRED,
+        drop_reason_code=reason_code,
         source_role=RuntimeRole.SERVER,
         flags=0,
         diagnostic_bytes=0,

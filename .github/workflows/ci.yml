@@ -1,5 +1,9 @@
 name: CI
 
+env:
+  NNRP_CONFORMANCE_SOURCE_COMMIT: ff905fa5e47526e0e86d6b9c9db0f585a3d4dc0a
+  NNRP_RS_SOURCE_COMMIT: ed62ddd474893ec51550c5ba746b5273d837349e
+
 on:
   push:
     branches:
@@ -150,6 +154,7 @@ jobs:
         with:
           repository: ${{ github.repository_owner }}/nnrp-conformance
           path: nnrp-conformance-action
+          ref: ${{ env.NNRP_CONFORMANCE_SOURCE_COMMIT }}
           fetch-depth: 1
 
       - name: Install dependencies
@@ -212,6 +217,7 @@ jobs:
         with:
           repository: ${{ github.repository_owner }}/nnrp-conformance
           path: nnrp-conformance-action
+          ref: ${{ env.NNRP_CONFORMANCE_SOURCE_COMMIT }}
           fetch-depth: 1
 
       - name: Resolve conformance baseline
@@ -259,8 +265,6 @@ jobs:
 
   wire-conformance:
     runs-on: ubuntu-latest
-    env:
-      NNRP_RS_SOURCE_COMMIT: 8dfbb3d96247dbc8b48fe99fb3288dd7f4dffaa8
 
     steps:
       - name: Checkout
@@ -273,6 +277,7 @@ jobs:
         with:
           repository: ${{ github.repository_owner }}/nnrp-conformance
           path: nnrp-conformance-runner
+          ref: ${{ env.NNRP_CONFORMANCE_SOURCE_COMMIT }}
           fetch-depth: 1
 
       - name: Checkout pinned nnrp-rs source

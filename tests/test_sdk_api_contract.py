@@ -11,6 +11,21 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "scripts" / "check_sdk_api_contract.py"
+FROZEN_SERVER_OPERATION_INVARIANTS = [
+    "submit.header.message_type is frame_submit",
+    "submit.metadata is the frame_submit metadata variant",
+    "operation_id equals submit.metadata.operation_id",
+    "frame_id equals submit.header.frame_id",
+    "the reply capability remains valid until exactly one terminal outcome is sent or the session closes",
+]
+FROZEN_RESULT_SUCCESS_RULE = (
+    "A successful result has terminal_state success and an event whose message type is result_push "
+    "and whose metadata variant is result_push."
+)
+FROZEN_RESULT_NON_SUCCESS_RULE = (
+    "Cancelled, dropped, and error results preserve the terminal protocol or lifecycle event that "
+    "established the state; SDKs do not synthesize RESULT_PUSH metadata for them."
+)
 
 
 def load_checker():
@@ -112,7 +127,9 @@ def frozen_contract() -> dict[str, object]:
                     {"name": "operation_id", "type": "u64", "required": True},
                     {"name": "terminal_state", "type": "ResultTerminalState", "required": True},
                     {"name": "event", "type": "TerminalEvent", "required": True},
-                ]
+                ],
+                "successRule": FROZEN_RESULT_SUCCESS_RULE,
+                "nonSuccessRule": FROZEN_RESULT_NON_SUCCESS_RULE,
             },
             "ServerOperation": {
                 "fields": [
@@ -122,6 +139,7 @@ def frozen_contract() -> dict[str, object]:
                 ],
                 "terminalMethods": ["send_result", "send_result_drop"],
                 "streamingMethods": ["send_progress", "send_partial_result"],
+                "invariants": FROZEN_SERVER_OPERATION_INVARIANTS.copy(),
             },
             "ServerEvent": {
                 "representation": "tagged-union",
@@ -353,6 +371,22 @@ def test_rejects_result_contract_drift() -> None:
     ):
         checker.check_contract(write_contract(Path(directory), contract), ROOT)
 
+    contract = frozen_contract()
+    contract["types"]["NnrpResult"]["successRule"] = "accept any terminal event"
+    with (
+        tempfile.TemporaryDirectory() as directory,
+        pytest.raises(SystemExit, match="NnrpResult terminal evidence rules drifted"),
+    ):
+        checker.check_contract(write_contract(Path(directory), contract), ROOT)
+
+    contract = frozen_contract()
+    contract["types"]["NnrpResult"]["nonSuccessRule"] = "fabricate result_push metadata"
+    with (
+        tempfile.TemporaryDirectory() as directory,
+        pytest.raises(SystemExit, match="NnrpResult terminal evidence rules drifted"),
+    ):
+        checker.check_contract(write_contract(Path(directory), contract), ROOT)
+
 
 def test_rejects_python_projection_drift() -> None:
     checker = load_checker()
@@ -361,6 +395,17 @@ def test_rejects_python_projection_drift() -> None:
     with (
         tempfile.TemporaryDirectory() as directory,
         pytest.raises(SystemExit, match="Python NativeTerminalEvent projection drifted"),
+    ):
+        checker.check_contract(write_contract(Path(directory), contract), ROOT)
+
+
+def test_rejects_server_operation_invariant_drift() -> None:
+    checker = load_checker()
+    contract = frozen_contract()
+    contract["types"]["ServerOperation"]["invariants"][-1] = "peer cancellation releases the reply capability"
+    with (
+        tempfile.TemporaryDirectory() as directory,
+        pytest.raises(SystemExit, match="ServerOperation invariants drifted"),
     ):
         checker.check_contract(write_contract(Path(directory), contract), ROOT)
 

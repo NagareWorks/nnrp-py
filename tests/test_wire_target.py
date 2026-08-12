@@ -23,9 +23,12 @@ from nnrp.runtime import (
     CacheReferenceMetadata,
     InFlightPolicy,
     NativeRuntimeEvent,
+    OperationLifecycleEvent,
+    OperationState,
     PartialResultMetadata,
     PressureMetadata,
     ProgressMetadata,
+    ResultDropReasonCode,
     RuntimeEventMetadata,
     RuntimeEventMetadataKind,
     RuntimeEventTail,
@@ -301,6 +304,7 @@ def test_server_handlers_exchange_typed_control_frames(monkeypatch: pytest.Monke
     session = _FakeSession()
     awaited: list[list[MessageType]] = []
     closed: list[object] = []
+    lifecycles: list[tuple[object, int, OperationState]] = []
     cache_reference = CacheReferenceMetadata(
         cache_namespace=1,
         cache_key_hi=2,
@@ -329,6 +333,11 @@ def test_server_handlers_exchange_typed_control_frames(monkeypatch: pytest.Monke
         return []
 
     monkeypatch.setattr(wire_target, "_await_server_runtime_frames", await_frames)
+    monkeypatch.setattr(
+        wire_target,
+        "_await_server_lifecycle",
+        lambda value, operation_id, state, **kwargs: lifecycles.append((value, operation_id, state)),
+    )
     monkeypatch.setattr(wire_target, "_finish_peer_close", lambda value, **kwargs: closed.append(value))
 
     wire_target._handle_cancel_server(session, timeout_seconds=1.0)
@@ -342,8 +351,15 @@ def test_server_handlers_exchange_typed_control_frames(monkeypatch: pytest.Monke
     ]
     assert any(name == "trace" for name, _ in session.calls)
     assert sum(name == "drop" for name, _ in session.calls) == 2
+    drop_reasons = [metadata.drop_reason_code for name, metadata in session.calls if name == "drop"]
+    assert drop_reasons == [ResultDropReasonCode.PEER_CANCELLED, ResultDropReasonCode.SUPERSEDED]
     assert any(name == "cache_miss" for name, _ in session.calls)
     assert any(name == "result" for name, _ in session.calls)
+    assert lifecycles == [
+        (session, 401, OperationState.CANCELLED),
+        (session, 401, OperationState.SUPERSEDED),
+        (session, 401, OperationState.COMPLETED),
+    ]
     assert closed == [session, session, session]
 
 
@@ -351,6 +367,12 @@ def test_deadline_before_submit_handler_requires_order_and_exact_correlation(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     session = _FakeSession()
+    lifecycles: list[tuple[int, OperationState]] = []
+    monkeypatch.setattr(
+        wire_target,
+        "_await_server_lifecycle",
+        lambda _session, operation_id, state, **_kwargs: lifecycles.append((operation_id, state)),
+    )
     monkeypatch.setattr(wire_target, "_finish_peer_close", lambda *_args, **_kwargs: None)
     operation = _FakeServerOperation(session.calls)
     deadline = SchedulingMetadata(401, 1, 0, 0, 123_456, 0)
@@ -366,6 +388,7 @@ def test_deadline_before_submit_handler_requires_order_and_exact_correlation(
     wire_target._handle_deadline_before_submit_server(session, timeout_seconds=1.0)
 
     assert ("result", wire_target._RESPONSE_BODY) in session.calls
+    assert lifecycles == [(401, OperationState.COMPLETED)]
 
     session.next_events = [submit_event]
     with pytest.raises(RuntimeError, match="expected DEADLINE before FRAME_SUBMIT"):
@@ -428,6 +451,37 @@ def test_await_server_runtime_frames_ignores_lifecycle_and_checks_order(
             timeout_seconds=1.0,
         )
     assert ("next_event", 0.75) in session.calls
+
+
+def test_await_server_lifecycle_requires_exact_operation_and_terminal_state() -> None:
+    session = _FakeSession()
+    session.next_events = [NativeServerEvent.lifecycle(OperationLifecycleEvent(42, OperationState.COMPLETED))]
+    wire_target._await_server_lifecycle(
+        session,
+        42,
+        OperationState.COMPLETED,
+        timeout_seconds=1.0,
+    )
+
+    session.next_events = [NativeServerEvent.lifecycle(OperationLifecycleEvent(43, OperationState.COMPLETED))]
+    with pytest.raises(RuntimeError, match="expected operation 42 lifecycle COMPLETED"):
+        wire_target._await_server_lifecycle(
+            session,
+            42,
+            OperationState.COMPLETED,
+            timeout_seconds=1.0,
+        )
+
+    session.next_events = [
+        NativeServerEvent.runtime(_runtime_event(MessageType.SESSION_CLOSE, RuntimeEventMetadataKind.NONE, None))
+    ]
+    with pytest.raises(RuntimeError, match="expected an operation lifecycle event"):
+        wire_target._await_server_lifecycle(
+            session,
+            42,
+            OperationState.COMPLETED,
+            timeout_seconds=1.0,
+        )
 
 
 def test_progress_client_validates_frames_and_terminal_result(monkeypatch: pytest.MonkeyPatch) -> None:

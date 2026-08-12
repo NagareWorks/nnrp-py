@@ -4806,9 +4806,7 @@ class NativeRuntimeSession:
                 scheduling_hint=scheduling_hint,
             )
 
-        submit_task = asyncio.create_task(
-            asyncio.to_thread(dispatch)
-        )
+        submit_task = asyncio.create_task(asyncio.to_thread(dispatch))
         try:
             operation = await asyncio.shield(submit_task)
             if operation is None:
@@ -4997,9 +4995,7 @@ class NativeRuntimeSession:
                     finish_cancellation()
                 raise
 
-        poll_task = asyncio.create_task(
-            asyncio.to_thread(poll_until_complete)
-        )
+        poll_task = asyncio.create_task(asyncio.to_thread(poll_until_complete))
         try:
             return await asyncio.shield(poll_task)
         except asyncio.CancelledError:
@@ -5348,6 +5344,8 @@ class NativeRuntimeServerOperation:
     _session: NativeSessionHandle = field(repr=False, compare=False)
     _handle: NativeOperationHandle = field(repr=False, compare=False)
     _owner: NativeRuntimeServerSession = field(repr=False, compare=False)
+    _terminal_reply_started: bool = field(default=False, init=False, repr=False, compare=False)
+    _reply_lock: threading.Lock = field(default_factory=threading.Lock, init=False, repr=False, compare=False)
 
     def __post_init__(self) -> None:
         if self.submit.header.message_type is not MessageType.FRAME_SUBMIT:
@@ -5370,7 +5368,7 @@ class NativeRuntimeServerOperation:
         payload = metadata.pack() + bytes(body)
         payload_view, payload_owner = _buffer_view_from_payload(payload)
         request = _NnrpServerSendResultRequest(self._handle.to_ffi(), payload_view)
-        await asyncio.to_thread(self._send_result_blocking, request, payload_owner)
+        await self._send_terminal_reply(lambda: self._send_result_blocking(request, payload_owner))
 
     async def send_result_drop(
         self,
@@ -5379,14 +5377,38 @@ class NativeRuntimeServerOperation:
     ) -> None:
         self._require_operation_metadata(metadata)
         diagnostic_snapshot = bytes(diagnostic)
-        await asyncio.to_thread(
-            self._owner._send_operation_runtime_frame,
-            self._handle,
-            self.frame_id,
-            MessageType.RESULT_DROP_REASON,
-            metadata,
-            diagnostic_snapshot,
+        await self._send_terminal_reply(
+            lambda: self._owner._send_operation_runtime_frame(
+                self._handle,
+                self.frame_id,
+                MessageType.RESULT_DROP_REASON,
+                metadata,
+                diagnostic_snapshot,
+            )
         )
+
+    async def _send_terminal_reply(self, send: Callable[[], None]) -> None:
+        self._begin_reply(terminal=True)
+        worker = asyncio.create_task(asyncio.to_thread(send))
+        cancellation: asyncio.CancelledError | None = None
+        while not worker.done():
+            try:
+                await asyncio.shield(worker)
+            except asyncio.CancelledError as error:
+                cancellation = cancellation or error
+            except BaseException:
+                break
+
+        try:
+            worker.result()
+        except BaseException:
+            self._restore_terminal_reply()
+            if cancellation is not None:
+                raise cancellation from None
+            raise
+        self._complete_terminal_reply()
+        if cancellation is not None:
+            raise cancellation
 
     async def send_progress(
         self,
@@ -5395,6 +5417,7 @@ class NativeRuntimeServerOperation:
     ) -> None:
         self._require_operation_metadata(metadata)
         body_snapshot = bytes(body)
+        self._begin_reply(terminal=False)
         await asyncio.to_thread(
             self._owner._send_operation_runtime_frame,
             self._handle,
@@ -5411,6 +5434,7 @@ class NativeRuntimeServerOperation:
     ) -> None:
         self._require_operation_metadata(metadata)
         body_snapshot = bytes(body)
+        self._begin_reply(terminal=False)
         await asyncio.to_thread(
             self._owner._send_operation_runtime_frame,
             self._handle,
@@ -5435,6 +5459,25 @@ class NativeRuntimeServerOperation:
     def _require_operation_metadata(self, metadata: object) -> None:
         if int(getattr(metadata, "operation_id", 0)) != self.operation_id:
             raise ValueError("metadata operation_id must match the server operation")
+
+    def _begin_reply(self, *, terminal: bool) -> None:
+        self._owner._ensure_open()
+        with self._reply_lock:
+            if self._terminal_reply_started:
+                kind = "terminal" if terminal else "incremental"
+                raise NativeInvalidStateError(
+                    NativeStatus(FFI_STATUS_INVALID_STATE),
+                    f"{kind} reply is not allowed after a terminal server reply started",
+                )
+            if terminal:
+                object.__setattr__(self, "_terminal_reply_started", True)
+
+    def _restore_terminal_reply(self) -> None:
+        with self._reply_lock:
+            object.__setattr__(self, "_terminal_reply_started", False)
+
+    def _complete_terminal_reply(self) -> None:
+        self._owner._forget_operation_frame(self.operation_id)
 
 
 class NativeServerEventKind(StrEnum):
@@ -5830,18 +5873,11 @@ class NativeRuntimeServerSession:
         )
         if event_session != self.handle.handle:
             return
-        operation_id = _event_operation_id(event)
-        if operation_id == 0:
-            return
-        terminal = _event_is_result_event(event)
-        if isinstance(event, NativeRuntimeEvent):
-            terminal = terminal or event.header.message_type in {
-                MessageType.CANCEL,
-                MessageType.ABORT,
-                MessageType.SUPERSEDE,
-            }
-        if terminal:
-            self._forget_operation_frame(operation_id)
+        # Server operation ownership survives peer cancellation, abort,
+        # supersession, and lifecycle delivery so the application can still
+        # send exactly one terminal result or drop reply. Successful terminal
+        # reply methods release the Python correlation; session close clears
+        # every remaining operation.
 
     def _ensure_open(self) -> None:
         if self._closed:

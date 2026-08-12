@@ -10,6 +10,9 @@ native operation handle retained from `FRAME_SUBMIT`; server sessions expose onl
 - [x] Make `send_progress(...)` and `send_partial_result(...)` asynchronous and nonterminal.
 - [x] Remove progress, partial-result, and result-drop reply bypasses from `NativeRuntimeServerSession`.
 - [x] Keep selective `receive_submit(...)` ordering and retained-event behavior unchanged.
+- [x] Retain accepted-operation reply ownership after peer cancel, abort, supersede, and lifecycle delivery.
+- [x] Release Python operation correlation only after one terminal reply succeeds or the session closes.
+- [x] Reject incremental and duplicate terminal replies after terminal success, allow failed sends to retry, and settle in-flight native sends before propagating cancellation.
 
 ## Native Boundary
 
@@ -21,7 +24,7 @@ native operation handle retained from `FRAME_SUBMIT`; server sessions expose onl
 ## Validation And Public Guidance
 
 - [x] Gate contract version 14 role method names, signatures, ownership, and terminal semantics.
-- [x] Cover operation identity checks and the absence of session reply bypasses.
+- [x] Cover operation identity checks, terminal retry, lifecycle retention, and the absence of session reply bypasses.
 - [x] Exercise operation-owned replies in benchmark, wire-target, and packaged-artifact E2E paths.
 - [x] Run wire conformance against merged Rust commit `11f3afcb12a71cde39a02fd918a51a542ae0c7fb`.
 - [x] Update the README example to distinguish operation replies from session controls.

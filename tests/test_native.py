@@ -5103,7 +5103,7 @@ def test_native_runtime_server_operation_enforces_submit_identity_and_routes_nam
     with pytest.raises(ValueError, match="frame_id"):
         replace(operation, frame_id=10)
 
-    mutable_tails = [bytearray(b"drop"), bytearray(b"progress"), bytearray(b"partial")]
+    mutable_tails = [bytearray(b"progress"), bytearray(b"partial"), bytearray(b"drop")]
     pending_mutations = list(mutable_tails)
 
     async def mutate_original_before_worker_call(function: Callable[..., object], *args: object) -> object:
@@ -5113,30 +5113,40 @@ def test_native_runtime_server_operation_enforces_submit_identity_and_routes_nam
 
     monkeypatch.setattr(asyncio, "to_thread", mutate_original_before_worker_call)
 
+    with pytest.raises(ValueError, match="operation_id"):
+        asyncio.run(operation.send_progress(ProgressMetadata(43, 4, 5, 2500, 6, 0)))
+
+    asyncio.run(operation.send_progress(ProgressMetadata(42, 2, 3, 2500, 4, 8), mutable_tails[0]))
+    asyncio.run(operation.send_partial_result(PartialResultMetadata(42, 3, 4, 1, 7, 0), mutable_tails[1]))
     asyncio.run(
         operation.send_result_drop(
             ResultDropReasonMetadata(42, 1, ResultDropReasonCode.PEER_CANCELLED, RuntimeRole.RUNTIME, 0, 4),
-            mutable_tails[0],
+            mutable_tails[2],
         )
     )
-    asyncio.run(operation.send_progress(ProgressMetadata(42, 2, 3, 2500, 4, 8), mutable_tails[1]))
-    asyncio.run(operation.send_partial_result(PartialResultMetadata(42, 3, 4, 1, 7, 0), mutable_tails[2]))
 
     assert [message_type for message_type, _frame_id, _payload in library.runtime_frames] == [
-        int(MessageType.RESULT_DROP_REASON),
         int(MessageType.PROGRESS),
         int(MessageType.PARTIAL_RESULT),
+        int(MessageType.RESULT_DROP_REASON),
     ]
     assert [
         payload[-tail_length:]
         for (_message_type, _frame_id, payload), tail_length in zip(
             library.runtime_frames,
-            (4, 8, 7),
+            (8, 7, 4),
             strict=True,
         )
-    ] == [b"drop", b"progress", b"partial"]
-    with pytest.raises(ValueError, match="operation_id"):
-        asyncio.run(operation.send_progress(ProgressMetadata(43, 4, 5, 2500, 6, 0)))
+    ] == [b"progress", b"partial", b"drop"]
+    assert session._operation_frames == {}
+    with pytest.raises(NativeInvalidStateError, match="incremental reply"):
+        asyncio.run(operation.send_progress(ProgressMetadata(42, 4, 5, 2500, 6, 0)))
+    with pytest.raises(NativeInvalidStateError, match="terminal reply"):
+        asyncio.run(
+            operation.send_result_drop(
+                ResultDropReasonMetadata(42, 4, ResultDropReasonCode.PEER_CANCELLED, RuntimeRole.RUNTIME, 0, 0)
+            )
+        )
 
 
 def test_native_runtime_server_event_stream_polls_retains_and_times_out() -> None:
@@ -5593,7 +5603,7 @@ def test_native_runtime_server_correlates_operation_object_messages(tmp_path: Pa
     assert [frame_id for _message_type, frame_id, _payload in library.runtime_frames] == [9, 9]
 
 
-def test_native_runtime_server_forgets_superseded_operation_correlation(tmp_path: Path) -> None:
+def test_native_runtime_server_retains_superseded_operation_until_terminal_reply(tmp_path: Path) -> None:
     library = FakeRuntimeLibrary()
     server = NativeRuntimeServer(
         NativeRuntimeEntrypoints(library),
@@ -5601,7 +5611,14 @@ def test_native_runtime_server_forgets_superseded_operation_correlation(tmp_path
         "tcp",
     )
     session = server.accept_session(session_handle_id=41, generation=3)
-    session._remember_operation_frame(42, 9)
+    submit = _decode_test_wire_event(
+        MessageType.FRAME_SUBMIT,
+        _native_submit_request(42, 9).metadata.pack() + b"frame",
+        kind=EVENT_KIND_SUBMIT_ACCEPTED,
+        frame_id=9,
+    )
+    operation = session._server_event_from_polled(submit).as_submit()
+    assert operation is not None
     supersede = _decode_test_wire_event(
         MessageType.SUPERSEDE,
         SupersedeMetadata(42, 43, 1, ResultDropReasonCode.SUPERSEDED, 0, 0).pack(),
@@ -5615,8 +5632,105 @@ def test_native_runtime_server_forgets_superseded_operation_correlation(tmp_path
 
     session._server_event_from_polled(supersede)
 
+    session.reference_object(ObjectReferenceMetadata(8, 42, 1, 0, 16, 0, 0))
+    asyncio.run(
+        operation.send_result_drop(
+            ResultDropReasonMetadata(42, 2, ResultDropReasonCode.SUPERSEDED, RuntimeRole.RUNTIME, 0, 0)
+        )
+    )
+
     with pytest.raises(NativeInvalidStateError, match="inactive operation 42"):
         session.reference_object(ObjectReferenceMetadata(8, 42, 1, 0, 16, 0, 0))
+
+
+def test_native_runtime_server_terminal_reply_failure_remains_retryable() -> None:
+    library = FakeRuntimeLibrary()
+    original_send = library._runtime_frame_send
+    attempts = 0
+
+    def fail_first_terminal_reply(request: _NnrpRuntimeFrameSendRequest) -> _NnrpFfiStatus:
+        nonlocal attempts
+        if int(request.message_type) == int(MessageType.RESULT_DROP_REASON):
+            attempts += 1
+            if attempts == 1:
+                return _NnrpFfiStatus(FFI_STATUS_INVALID_STATE, 0, 0, 0)
+        return original_send(request)
+
+    library.nnrp_runtime_frame_send.handler = fail_first_terminal_reply
+    server = NativeRuntimeServer(
+        NativeRuntimeEntrypoints(library),
+        NativeConnectionHandle.from_ffi(_NnrpHandle(HANDLE_KIND_CONNECTION, 21, 1, 0)),
+        "tcp",
+    )
+    session = server.accept_session(session_handle_id=41, generation=3)
+    submit = _decode_test_wire_event(
+        MessageType.FRAME_SUBMIT,
+        _native_submit_request(42, 9).metadata.pack() + b"frame",
+        kind=EVENT_KIND_SUBMIT_ACCEPTED,
+        frame_id=9,
+    )
+    operation = session._server_event_from_polled(submit).as_submit()
+    assert operation is not None
+    drop = ResultDropReasonMetadata(42, 1, ResultDropReasonCode.PEER_CANCELLED, RuntimeRole.RUNTIME, 0, 0)
+
+    with pytest.raises(NativeInvalidStateError):
+        asyncio.run(operation.send_result_drop(drop))
+    assert session._operation_frames == {42: 9}
+
+    asyncio.run(operation.send_result_drop(drop))
+    assert attempts == 2
+    assert session._operation_frames == {}
+    with pytest.raises(NativeInvalidStateError, match="terminal reply"):
+        asyncio.run(operation.send_result_drop(drop))
+
+
+def test_native_runtime_server_terminal_reply_cancellation_waits_for_native_outcome() -> None:
+    library = FakeRuntimeLibrary()
+    original_send = library._runtime_frame_send
+    send_started = threading.Event()
+    release_send = threading.Event()
+
+    def block_terminal_reply(request: _NnrpRuntimeFrameSendRequest) -> _NnrpFfiStatus:
+        if int(request.message_type) == int(MessageType.RESULT_DROP_REASON):
+            send_started.set()
+            assert release_send.wait(timeout=5)
+        return original_send(request)
+
+    library.nnrp_runtime_frame_send.handler = block_terminal_reply
+    server = NativeRuntimeServer(
+        NativeRuntimeEntrypoints(library),
+        NativeConnectionHandle.from_ffi(_NnrpHandle(HANDLE_KIND_CONNECTION, 21, 1, 0)),
+        "tcp",
+    )
+    session = server.accept_session(session_handle_id=41, generation=3)
+    submit = _decode_test_wire_event(
+        MessageType.FRAME_SUBMIT,
+        _native_submit_request(42, 9).metadata.pack() + b"frame",
+        kind=EVENT_KIND_SUBMIT_ACCEPTED,
+        frame_id=9,
+    )
+    operation = session._server_event_from_polled(submit).as_submit()
+    assert operation is not None
+    drop = ResultDropReasonMetadata(42, 1, ResultDropReasonCode.PEER_CANCELLED, RuntimeRole.RUNTIME, 0, 0)
+
+    async def cancel_while_native_send_is_active() -> None:
+        send_task = asyncio.create_task(operation.send_result_drop(drop))
+        assert await asyncio.to_thread(send_started.wait, 5)
+        send_task.cancel()
+        await asyncio.sleep(0)
+        send_task.cancel()
+        await asyncio.sleep(0)
+        assert not send_task.done()
+        release_send.set()
+        with pytest.raises(asyncio.CancelledError):
+            await send_task
+
+    asyncio.run(cancel_while_native_send_is_active())
+
+    assert session._operation_frames == {}
+    assert len(library.runtime_frames) == 1
+    with pytest.raises(NativeInvalidStateError, match="terminal reply"):
+        asyncio.run(operation.send_result_drop(drop))
 
 
 def test_native_runtime_server_observes_peer_session_close_before_local_close() -> None:

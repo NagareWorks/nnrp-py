@@ -74,6 +74,66 @@ EXPECTED_OPERATION_STATES = {
     "COMPLETED": 7,
 }
 EXPECTED_TERMINAL_STATES = {"SUCCESS": 0, "CANCELLED": 1, "DROPPED": 2, "ERROR": 3}
+EXPECTED_PYTHON_PROJECTIONS = {
+    "submitRequest": "nnrp.client.SubmitRequest",
+    "submitHeaderContext": "nnrp.client.SubmitHeaderContext",
+    "submitBuilders": ["SubmitRequest.tensor", "SubmitRequest.token", "SubmitRequest.typed_payload"],
+    "runtimeFrameHeader": "nnrp.runtime.RuntimeFrameHeader",
+    "runtimeEvent": "nnrp.runtime.NativeRuntimeEvent",
+    "clientEvent": "nnrp.runtime.NativeClientEvent",
+    "serverEvent": "nnrp.server.NativeServerEvent",
+    "serverOperation": "nnrp.NativeRuntimeServerOperation",
+    "roleMethods": {
+        "client.open_session": "open_session",
+        "client.resume_session": "resume_session",
+        "client_session.recovery_ticket": "recovery_ticket",
+        "client_session.next_event": "next_event",
+        "server.accept": "accept",
+        "server_session.next_event": "next_event",
+        "server_session.receive_submit": "receive_submit",
+        "server_operation.send_result": "send_result",
+        "server_operation.send_result_drop": "send_result_drop",
+        "server_operation.send_progress": "send_progress",
+        "server_operation.send_partial_result": "send_partial_result",
+    },
+    "operationLifecycleEvent": "nnrp.runtime.OperationLifecycleEvent",
+    "terminalEvent": "nnrp.runtime.NativeTerminalEvent",
+    "result": "nnrp.NativeRuntimeResult",
+    "clientRoles": ["nnrp.client.NativeClientConnection", "nnrp.NativeRuntimeSession"],
+    "serverRoles": ["nnrp.server.NativeServer", "nnrp.NativeRuntimeServerSession"],
+    "runtimeMetadataNamespace": "nnrp.runtime",
+    "capabilityMetadata": "nnrp.runtime.CapabilityMetadata",
+    "connectionLifecycle": "nnrp.lifecycle.ConnectionLifecycleSnapshot",
+    "sessionLifecycle": "nnrp.lifecycle.SessionLifecycleSnapshot",
+    "typedPayloadDescriptor": "nnrp.core.TypedPayloadDescriptor",
+    "typedPayloadFrame": "nnrp.core.TypedPayloadFrame",
+    "cacheObjectId": "nnrp.cache.CacheObjectIdentity",
+    "cacheLease": "nnrp.cache.CacheLeaseDescriptor",
+    "cacheLeaseResult": "nnrp.cache.CacheLeaseResult",
+    "cachePolicyOptions": "nnrp.cache.CachePolicyOptions",
+    "transportProviderMetadata": "nnrp.native.NativeTransportProviderMetadata",
+    "transportProviderDescriptor": "nnrp.native.NativeTransportProvider",
+    "transportSelectionOptions": "nnrp.native.NativeTransportSelectionOptions",
+    "transportSelection": "nnrp.native.NativeTransportSelection",
+    "transportSelectionFailure": "nnrp.native.NativeTransportSelectionError",
+    "applicationEndpoint": "nnrp.native.NnrpEndpoint",
+    "providerEndpoint": "nnrp.native.NativeTransportEndpoint",
+    "clientTransportSecurity": "nnrp.native.NativeTransportClientSecurity",
+    "serverTransportSecurity": "nnrp.native.NativeTransportServerSecurity",
+    "clientProviderRoute": "nnrp.client.NativeClientProviderRoute",
+    "serverProviderRoute": "nnrp.server.NativeServerProviderRoute",
+    "schemaDescriptor": "nnrp.schema.SchemaDescriptorHeader",
+    "schemaRegistry": "nnrp.schema.SchemaRegistryCatalog",
+    "clientBootstrapOptions": "nnrp.client.NativeClientOptions",
+    "clientSessionOptions": "nnrp.client.NativeClientSessionOptions",
+    "sessionRecoveryTicket": "nnrp.client.NativeSessionRecoveryTicket",
+    "sessionRecoveryTicketEncode": "NativeSessionRecoveryTicket.to_bytes",
+    "sessionRecoveryTicketDecode": "NativeSessionRecoveryTicket.from_bytes",
+    "serverBootstrapOptions": "nnrp.server.NativeServerBootstrapOptions",
+    "serverSessionOptions": "nnrp.server.NativeServerSessionOptions",
+    "serverAcceptOptions": "nnrp.server.NativeServerAcceptOptions",
+    "serverSessionPolicy": "nnrp.server.NativeServerSessionPolicy",
+}
 
 
 def require(condition: bool, message: str) -> None:
@@ -367,64 +427,15 @@ def check_contract(contract_path: Path, source_root: Path) -> None:
         "SessionRecoveryTicket opaque encoding drifted",
     )
 
-    python_projection = contract["languageProjections"]["python"]
-    require(
-        python_projection.get("roleMethods")
-        == {
-            "client.open_session": "open_session",
-            "client.resume_session": "resume_session",
-            "client_session.recovery_ticket": "recovery_ticket",
-            "client_session.next_event": "next_event",
-            "server.accept": "accept",
-            "server_session.next_event": "next_event",
-            "server_session.receive_submit": "receive_submit",
-            "server_operation.send_result": "send_result",
-            "server_operation.send_result_drop": "send_result_drop",
-            "server_operation.send_progress": "send_progress",
-            "server_operation.send_partial_result": "send_partial_result",
-        },
-        "Python role method projections drifted",
+    python_projection = require_mapping(
+        require_mapping(
+            contract.get("languageProjections"), "SDK language projections must be an object"
+        ).get("python"),
+        "Python SDK projection must be an object",
     )
     require(
-        python_projection.get("operationLifecycleEvent") == "nnrp.runtime.OperationLifecycleEvent",
-        "Python OperationLifecycleEvent projection drifted",
-    )
-    require(
-        python_projection.get("clientEvent") == "nnrp.runtime.NativeClientEvent",
-        "Python NativeClientEvent projection drifted",
-    )
-    require(
-        python_projection.get("terminalEvent") == "nnrp.runtime.NativeTerminalEvent",
-        "Python NativeTerminalEvent projection drifted",
-    )
-    require(
-        python_projection.get("result") == "nnrp.NativeRuntimeResult",
-        "Python NativeRuntimeResult projection drifted",
-    )
-    require(
-        python_projection.get("serverEvent") == "nnrp.server.NativeServerEvent"
-        and python_projection.get("serverOperation") == "nnrp.NativeRuntimeServerOperation",
-        "Python server event ownership projections drifted",
-    )
-    require(
-        python_projection.get("connectionLifecycle") == "nnrp.lifecycle.ConnectionLifecycleSnapshot"
-        and python_projection.get("sessionLifecycle") == "nnrp.lifecycle.SessionLifecycleSnapshot",
-        "Python lifecycle projections drifted",
-    )
-    expected_recovery_projections = {
-        "clientBootstrapOptions": "nnrp.client.NativeClientOptions",
-        "clientSessionOptions": "nnrp.client.NativeClientSessionOptions",
-        "sessionRecoveryTicket": "nnrp.client.NativeSessionRecoveryTicket",
-        "sessionRecoveryTicketEncode": "NativeSessionRecoveryTicket.to_bytes",
-        "sessionRecoveryTicketDecode": "NativeSessionRecoveryTicket.from_bytes",
-        "serverBootstrapOptions": "nnrp.server.NativeServerBootstrapOptions",
-        "serverSessionOptions": "nnrp.server.NativeServerSessionOptions",
-        "serverAcceptOptions": "nnrp.server.NativeServerAcceptOptions",
-        "serverSessionPolicy": "nnrp.server.NativeServerSessionPolicy",
-    }
-    require(
-        all(python_projection.get(name) == value for name, value in expected_recovery_projections.items()),
-        "Python recovery and role option projections drifted",
+        python_projection == EXPECTED_PYTHON_PROJECTIONS,
+        "Python SDK projection map drifted; update the implementation contract test with the frozen API",
     )
 
     role_operations = contract.get("roleOperations", {})

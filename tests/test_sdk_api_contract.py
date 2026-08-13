@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import importlib.util
 import json
 import runpy
@@ -38,6 +39,7 @@ def load_checker():
 
 
 def frozen_contract() -> dict[str, object]:
+    checker = load_checker()
     return {
         "contractVersion": 15,
         "enums": {
@@ -168,38 +170,7 @@ def frozen_contract() -> dict[str, object]:
             },
         },
         "languageProjections": {
-            "python": {
-                "operationLifecycleEvent": "nnrp.runtime.OperationLifecycleEvent",
-                "clientEvent": "nnrp.runtime.NativeClientEvent",
-                "terminalEvent": "nnrp.runtime.NativeTerminalEvent",
-                "result": "nnrp.NativeRuntimeResult",
-                "serverEvent": "nnrp.server.NativeServerEvent",
-                "serverOperation": "nnrp.NativeRuntimeServerOperation",
-                "roleMethods": {
-                    "client.open_session": "open_session",
-                    "client.resume_session": "resume_session",
-                    "client_session.recovery_ticket": "recovery_ticket",
-                    "client_session.next_event": "next_event",
-                    "server.accept": "accept",
-                    "server_session.next_event": "next_event",
-                    "server_session.receive_submit": "receive_submit",
-                    "server_operation.send_result": "send_result",
-                    "server_operation.send_result_drop": "send_result_drop",
-                    "server_operation.send_progress": "send_progress",
-                    "server_operation.send_partial_result": "send_partial_result",
-                },
-                "connectionLifecycle": "nnrp.lifecycle.ConnectionLifecycleSnapshot",
-                "sessionLifecycle": "nnrp.lifecycle.SessionLifecycleSnapshot",
-                "clientBootstrapOptions": "nnrp.client.NativeClientOptions",
-                "clientSessionOptions": "nnrp.client.NativeClientSessionOptions",
-                "sessionRecoveryTicket": "nnrp.client.NativeSessionRecoveryTicket",
-                "sessionRecoveryTicketEncode": "NativeSessionRecoveryTicket.to_bytes",
-                "sessionRecoveryTicketDecode": "NativeSessionRecoveryTicket.from_bytes",
-                "serverBootstrapOptions": "nnrp.server.NativeServerBootstrapOptions",
-                "serverSessionOptions": "nnrp.server.NativeServerSessionOptions",
-                "serverAcceptOptions": "nnrp.server.NativeServerAcceptOptions",
-                "serverSessionPolicy": "nnrp.server.NativeServerSessionPolicy",
-            }
+            "python": copy.deepcopy(checker.EXPECTED_PYTHON_PROJECTIONS),
         },
         "roleOperations": {
             "client.open_session": {"returns": "ClientSession", "async": True},
@@ -394,7 +365,15 @@ def test_rejects_python_projection_drift() -> None:
     contract["languageProjections"]["python"]["terminalEvent"] = "nnrp.LegacyEvent"
     with (
         tempfile.TemporaryDirectory() as directory,
-        pytest.raises(SystemExit, match="Python NativeTerminalEvent projection drifted"),
+        pytest.raises(SystemExit, match="Python SDK projection map drifted"),
+    ):
+        checker.check_contract(write_contract(Path(directory), contract), ROOT)
+
+    contract = frozen_contract()
+    contract["languageProjections"]["python"]["transportSelectionOptions"] = "nnrp.LegacySelectionOptions"
+    with (
+        tempfile.TemporaryDirectory() as directory,
+        pytest.raises(SystemExit, match="Python SDK projection map drifted"),
     ):
         checker.check_contract(write_contract(Path(directory), contract), ROOT)
 

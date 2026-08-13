@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import struct
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -74,6 +75,10 @@ _RESULTS_SCHEMA_URL = "https://raw.githubusercontent.com/NagareWorks/nnrp-confor
 _DEFAULT_IMPLEMENTATION_NAME = "nnrp-py"
 _CASE_DISPATCH = {
     "l0.header.fixed_shape.golden": "_execute_common_header_roundtrip",
+    "l0.body_region.prelude.golden": "_execute_baseline_body_region_prelude",
+    "l0.typed_payload.descriptor.golden": "_execute_baseline_typed_payload_descriptor",
+    "l0.typed_payload.frame_regions.golden": "_execute_baseline_typed_payload_frame_regions",
+    "l1.typed_payload.region.pack": "_execute_baseline_typed_payload_region_pack",
     "l0.typed_payload.descriptor.current.golden": "_execute_typed_payload_descriptor_golden",
     "l1.handshake.basic": "_execute_handshake_basic",
     "l1.session.open_close": "_execute_session_open_close",
@@ -276,6 +281,63 @@ def _load_adapter_backend() -> NativeRuntimeBackend:
     return _AdapterSmokeBackend()
 
 
+@dataclass(frozen=True, slots=True)
+class _BaselineTypedPayloadDescriptor:
+    payload_kind: int
+    profile_id: int
+    offset: int
+    length: int
+
+    _STRUCT = struct.Struct("<BBHIII")
+    _KNOWN_PAYLOAD_KIND_MASK = 0x7F
+
+    @classmethod
+    def unpack(cls, source: bytes) -> _BaselineTypedPayloadDescriptor:
+        if len(source) != cls._STRUCT.size:
+            raise ValueError(f"NNRP/1 baseline typed-payload descriptor must be {cls._STRUCT.size} bytes")
+        payload_kind, reserved0, profile_id, offset, length, reserved1 = cls._STRUCT.unpack(source)
+        if reserved0 != 0 or reserved1 != 0:
+            raise ValueError("NNRP/1 baseline typed-payload descriptor reserved fields must be zero")
+        cls._validate_payload_kind(payload_kind)
+        return cls(payload_kind, profile_id, offset, length)
+
+    def pack(self) -> bytes:
+        self._validate_payload_kind(self.payload_kind)
+        return self._STRUCT.pack(self.payload_kind, 0, self.profile_id, self.offset, self.length, 0)
+
+    @classmethod
+    def _validate_payload_kind(cls, payload_kind: int) -> None:
+        if (
+            payload_kind == 0
+            or payload_kind & (payload_kind - 1) != 0
+            or payload_kind & ~cls._KNOWN_PAYLOAD_KIND_MASK != 0
+        ):
+            raise ValueError("NNRP/1 baseline typed-payload descriptor payload_kind is invalid")
+
+
+def _parse_baseline_typed_payload_region(
+    descriptor_region: bytes,
+    payload_region: bytes,
+) -> tuple[_BaselineTypedPayloadDescriptor, ...]:
+    descriptor_size = _BaselineTypedPayloadDescriptor._STRUCT.size
+    if len(descriptor_region) % descriptor_size != 0:
+        raise ValueError("NNRP/1 baseline descriptor region length must be a multiple of 16 bytes")
+    descriptors = tuple(
+        _BaselineTypedPayloadDescriptor.unpack(descriptor_region[offset : offset + descriptor_size])
+        for offset in range(0, len(descriptor_region), descriptor_size)
+    )
+    next_offset = 0
+    for descriptor in descriptors:
+        if descriptor.offset != next_offset:
+            raise ValueError("NNRP/1 baseline typed-payload descriptors must be contiguous")
+        next_offset = descriptor.offset + descriptor.length
+        if next_offset > len(payload_region):
+            raise ValueError("NNRP/1 baseline typed-payload range exceeds payload region")
+    if next_offset != len(payload_region):
+        raise ValueError("NNRP/1 baseline payload region must be exactly covered")
+    return descriptors
+
+
 @dataclass(frozen=True)
 class _AdapterCaseExecution:
     case: dict[str, Any]
@@ -369,6 +431,66 @@ class _AdapterCaseExecution:
             stream_semantics=int(descriptor.stream_semantics),
             offset=descriptor.offset,
             length=descriptor.length,
+        )
+
+    def _execute_baseline_body_region_prelude(self) -> dict[str, Any]:
+        golden = bytes.fromhex("1800000010000000100000000e00000010000000050000000000000000000000")
+        values = struct.unpack("<8I", golden)
+        if values != (24, 16, 16, 14, 16, 5, 0, 0):
+            raise ValueError("NNRP/1 baseline body-region prelude fields changed")
+        if struct.pack("<8I", *values) != golden:
+            raise ValueError("NNRP/1 baseline body-region prelude did not round-trip")
+        return self._evidence("baseline-body-region-prelude", prelude_hex=golden.hex())
+
+    def _execute_baseline_typed_payload_descriptor(self) -> dict[str, Any]:
+        golden = bytes.fromhex("10000300040000000700000000000000")
+        descriptor = _BaselineTypedPayloadDescriptor.unpack(golden)
+        if descriptor.pack() != golden:
+            raise ValueError("NNRP/1 baseline typed-payload descriptor did not round-trip")
+        return self._evidence(
+            "baseline-typed-payload-descriptor",
+            descriptor_hex=golden.hex(),
+            payload_kind=descriptor.payload_kind,
+            profile_id=descriptor.profile_id,
+            offset=descriptor.offset,
+            length=descriptor.length,
+        )
+
+    def _execute_baseline_typed_payload_frame_regions(self) -> dict[str, Any]:
+        descriptor_region = bytes.fromhex(
+            "02000100000000000300000000000000"
+            "04000200030000000200000000000000"
+            "08000300050000000500000000000000"
+            "100004000a0000000300000000000000"
+        )
+        payload_region = b"tokauvideoevt"
+        descriptors = _parse_baseline_typed_payload_region(descriptor_region, payload_region)
+        if tuple(descriptor.payload_kind for descriptor in descriptors) != (2, 4, 8, 16):
+            raise ValueError("NNRP/1 baseline typed-payload frame kinds changed")
+        if b"".join(descriptor.pack() for descriptor in descriptors) != descriptor_region:
+            raise ValueError("NNRP/1 baseline typed-payload descriptor region did not round-trip")
+        return self._evidence(
+            "baseline-typed-payload-frame-regions",
+            descriptor_region_hex=descriptor_region.hex(),
+            payload_region_hex=payload_region.hex(),
+            frame_count=len(descriptors),
+        )
+
+    def _execute_baseline_typed_payload_region_pack(self) -> dict[str, Any]:
+        payload_region = b"tokevent"
+        descriptors = (
+            _BaselineTypedPayloadDescriptor(2, 2, 0, 3),
+            _BaselineTypedPayloadDescriptor(16, 2, 3, 5),
+        )
+        descriptor_region = b"".join(descriptor.pack() for descriptor in descriptors)
+        decoded = _parse_baseline_typed_payload_region(descriptor_region, payload_region)
+        if decoded != descriptors:
+            raise ValueError("NNRP/1 baseline typed-payload region pack changed descriptor fields")
+        return self._evidence(
+            "baseline-typed-payload-region-pack",
+            descriptor_region_hex=descriptor_region.hex(),
+            payload_region_hex=payload_region.hex(),
+            offsets=[descriptor.offset for descriptor in decoded],
         )
 
     def _execute_handshake_basic(self) -> dict[str, Any]:

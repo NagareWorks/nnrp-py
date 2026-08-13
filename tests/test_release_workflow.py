@@ -22,8 +22,12 @@ def test_release_workflow_pins_preview4_rust_native_artifacts() -> None:
 def test_release_workflow_downloads_all_preview4_native_transport_artifacts() -> None:
     workflow = RELEASE_WORKFLOW.read_text(encoding="utf-8")
 
-    for transport in ("tcp", "quic", "ipc", "websocket"):
-        assert f'--pattern "nnrp-ffi-transport-{transport}-native-*-${{version}}.zip"' in workflow
+    assert "scripts/download_nnrp_rs_workflow_artifacts.py" in workflow
+    assert 'NNRP_RS_RELEASE_RUN_ID: "31666415612"' in workflow
+    assert "NNRP_RS_SOURCE_COMMIT: 295f5b65ac71885b5c1b54d927b2595005038481" in workflow
+    assert '--workflow-run-id "$NNRP_RS_RELEASE_RUN_ID"' in workflow
+    assert '--workflow-commit "$NNRP_RS_SOURCE_COMMIT"' in workflow
+    assert "gh release download" not in workflow
 
 
 def test_release_workflow_rejects_non_preview4_native_artifact_shape() -> None:

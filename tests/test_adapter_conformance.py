@@ -130,6 +130,66 @@ def test_build_adapter_case_results_report_executes_current_typed_payload_golden
     }
 
 
+def test_build_adapter_case_results_report_executes_all_selected_preview4_cases() -> None:
+    case_ids = [
+        "l0.header.fixed_shape.golden",
+        "l0.body_region.prelude.golden",
+        "l0.typed_payload.descriptor.golden",
+        "l0.typed_payload.frame_regions.golden",
+        "l1.typed_payload.region.pack",
+        "l0.typed_payload.descriptor.current.golden",
+        "l1.control.cancel-abort",
+        "l1.control.priority-deadline",
+        "l1.control.progress-backpressure",
+        "l1.control.capability-costs",
+        "l1.object.lifecycle",
+        "l1.object.delta",
+        "l1.control.route-execution-hint",
+        "l1.control.cache-reference",
+        "l1.control.degrade-budget",
+    ]
+    report = build_adapter_case_results_report(
+        {
+            "protocol_version": "nnrp-1-preview4",
+            "cases": [{"id": case_id} for case_id in case_ids],
+        }
+    )
+
+    assert [result["id"] for result in report["results"]] == case_ids
+    assert [result["outcome"] for result in report["results"]] == ["pass"] * len(case_ids)
+
+
+@pytest.mark.parametrize(
+    ("descriptor", "message"),
+    [
+        (b"short", "must be 16 bytes"),
+        (bytes.fromhex("10010300040000000700000000000000"), "reserved fields"),
+        (bytes.fromhex("03000300040000000700000000000000"), "payload_kind is invalid"),
+    ],
+)
+def test_baseline_descriptor_rejects_malformed_wire_values(descriptor: bytes, message: str) -> None:
+    with pytest.raises(ValueError, match=message):
+        adapter_conformance._BaselineTypedPayloadDescriptor.unpack(descriptor)
+
+
+@pytest.mark.parametrize(
+    ("descriptors", "payload", "message"),
+    [
+        (b"short", b"", "multiple of 16"),
+        (bytes.fromhex("02000100010000000100000000000000"), b"x", "contiguous"),
+        (bytes.fromhex("02000100000000000200000000000000"), b"x", "exceeds payload"),
+        (bytes.fromhex("02000100000000000100000000000000"), b"xy", "exactly covered"),
+    ],
+)
+def test_baseline_descriptor_region_rejects_invalid_coverage(
+    descriptors: bytes,
+    payload: bytes,
+    message: str,
+) -> None:
+    with pytest.raises(ValueError, match=message):
+        adapter_conformance._parse_baseline_typed_payload_region(descriptors, payload)
+
+
 def test_preview4_common_header_case_rejects_wire_reencoding_drift(monkeypatch: pytest.MonkeyPatch) -> None:
     class DriftingHeader:
         @classmethod

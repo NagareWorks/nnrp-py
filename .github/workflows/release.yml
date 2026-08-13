@@ -49,6 +49,8 @@ jobs:
       PYPI_PUBLISH_MODE: ${{ vars.PYPI_PUBLISH_MODE || 'disabled' }}
       PYPI_API_TOKEN: ${{ secrets.PYPI_API_TOKEN }}
       NNRP_RS_NATIVE_VERSION: ${{ github.event_name == 'workflow_dispatch' && inputs.rust_native_version || vars.NNRP_RS_NATIVE_VERSION || '1.0.0-preview.4.22' }}
+      NNRP_RS_RELEASE_RUN_ID: "31666415612"
+      NNRP_RS_SOURCE_COMMIT: 295f5b65ac71885b5c1b54d927b2595005038481
       NNRP_PY_RELEASE_PYTHON_VERSION: ${{ github.event_name == 'workflow_dispatch' && inputs.python_version || vars.NNRP_PY_RELEASE_PYTHON_VERSION || '3.11' }}
 
     steps:
@@ -109,16 +111,12 @@ jobs:
         run: |
           set -euo pipefail
 
-          version="${NNRP_RS_NATIVE_VERSION}"
-          tag="v${version}"
-          mkdir -p artifacts/native-downloads
-          gh release download "$tag" \
+          python scripts/download_nnrp_rs_workflow_artifacts.py \
             --repo "${{ github.repository_owner }}/nnrp-rs" \
-            --pattern "nnrp-ffi-transport-tcp-native-*-${version}.zip" \
-            --pattern "nnrp-ffi-transport-quic-native-*-${version}.zip" \
-            --pattern "nnrp-ffi-transport-ipc-native-*-${version}.zip" \
-            --pattern "nnrp-ffi-transport-websocket-native-*-${version}.zip" \
-            --dir artifacts/native-downloads
+            --version "$NNRP_RS_NATIVE_VERSION" \
+            --workflow-run-id "$NNRP_RS_RELEASE_RUN_ID" \
+            --workflow-commit "$NNRP_RS_SOURCE_COMMIT" \
+            --output artifacts/native-downloads
 
       - name: Prepare package native artifacts
         shell: bash

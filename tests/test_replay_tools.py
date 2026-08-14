@@ -255,6 +255,7 @@ def test_enhance_result_export_to_current_packet() -> None:
         frame_id=9,
         request_id="request-zeta",
         stale=True,
+        reused_frame_id=8,
         inference_ms=17,
         queue_ms=2,
         round_trip_ms=23,
@@ -280,6 +281,7 @@ def test_enhance_result_export_to_current_packet() -> None:
     assert metadata.result_flags is ResultFlags.STALE
     assert metadata.result_class is ResultClass.STALE_REUSE
     assert metadata.applied_budget_policy is BudgetPolicy.ALLOW_STALE_REUSE
+    assert metadata.reused_frame_id == 8
     assert metadata.payload_kind_bitmap is PayloadKind.TENSOR
     assert metadata.tile_count == 2
     assert metadata.section_count == 2
@@ -313,6 +315,7 @@ def test_enhance_result_export_can_emit_object_reference_packet() -> None:
         frame_id=13,
         request_id="request-ref",
         stale=True,
+        reused_frame_id=12,
         inference_ms=17,
         queue_ms=2,
         round_trip_ms=23,
@@ -339,6 +342,7 @@ def test_enhance_result_export_can_emit_object_reference_packet() -> None:
 
     assert metadata.tile_index_bytes == 0
     assert metadata.result_flags is ResultFlags.STALE
+    assert metadata.reused_frame_id == 12
     assert bytes(body_view.inline_object_region) == b""
     assert [block.object_kind for block in reference_blocks] == [
         CacheObjectKind.TILE_INDEX_BLOCK,
@@ -483,6 +487,7 @@ def test_enhance_result_wire_summary_and_comparison_are_stable() -> None:
         frame_id=9,
         request_id="request-zeta",
         stale=True,
+        reused_frame_id=8,
         inference_ms=17,
         queue_ms=2,
         round_trip_ms=23,

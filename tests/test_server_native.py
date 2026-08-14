@@ -14,6 +14,7 @@ from nnrp._native_routes import official_provider_metadata
 from nnrp.core import SessionOpenMetadata, SessionPriorityClass, TransportPolicy
 from nnrp.native import (
     FFI_STATUS_WOULD_BLOCK,
+    NATIVE_TRANSPORT_ID_BY_NAME,
     NativeArtifactError,
     NativeStatus,
     NativeTransportRejectionReason,
@@ -155,8 +156,13 @@ class FakeServerBinding:
         return self.runtime_server
 
 
-def fake_provider(name: str):
-    return SimpleNamespace(name=name, metadata=official_provider_metadata(name))
+def fake_provider(transport_name: str):
+    return SimpleNamespace(
+        name=f"nnrp-transport-{transport_name}",
+        transport_name=transport_name,
+        transport_id=NATIVE_TRANSPORT_ID_BY_NAME[transport_name],
+        metadata=official_provider_metadata(transport_name),
+    )
 
 
 def install_bindings(monkeypatch: pytest.MonkeyPatch, *names: str) -> dict[str, FakeServerBinding]:

@@ -106,7 +106,6 @@ def official_provider_metadata(transport_name: str) -> NativeTransportProviderMe
 
 def unavailable_candidate(transport_name: str) -> NativeTransportCandidateDiagnostic:
     return NativeTransportCandidateDiagnostic(
-        transport_name=transport_name,
         transport_id=NATIVE_TRANSPORT_ID_BY_NAME[transport_name],
         provider=official_provider_metadata(transport_name),
         local_available=False,

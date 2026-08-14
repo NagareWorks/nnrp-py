@@ -229,6 +229,21 @@ def _validate_non_tensor_result_fields(metadata: ResultPushMetadata) -> None:
             raise ValueError(f"{field_name} must be 0 when payload_kind_bitmap has no tensor payload")
 
 
+def _validate_result_push_contract(metadata: ResultPushMetadata) -> None:
+    stale = metadata.result_class is ResultClass.STALE_REUSE or bool(metadata.result_flags & ResultFlags.STALE)
+    if stale != (metadata.reused_frame_id != 0):
+        raise ValueError("RESULT_PUSH stale semantics and reused_frame_id must agree")
+    if not metadata.payload_kind_bitmap & PayloadKind.TENSOR:
+        return
+    partial = metadata.result_class is ResultClass.PARTIAL or bool(metadata.result_flags & ResultFlags.PARTIAL)
+    if partial and metadata.dropped_tile_count == 0:
+        raise ValueError("partial RESULT_PUSH requires dropped_tile_count > 0")
+    if metadata.covered_tile_count > metadata.tile_count or metadata.dropped_tile_count > metadata.tile_count:
+        raise ValueError("RESULT_PUSH coverage counts must not exceed tile_count")
+    if metadata.covered_tile_count + metadata.dropped_tile_count != metadata.tile_count:
+        raise ValueError("covered_tile_count + dropped_tile_count must equal tile_count")
+
+
 def _coerce_loss_tolerance_policy(value: LossTolerance | int) -> int:
     raw_value = int(value)
     if raw_value == 0xFF:
@@ -257,6 +272,8 @@ class BodyRegionPrelude(_FixedWidthMetadata):
             raise ValueError("body_flags must be 0 in current")
         if self.reserved != 0:
             raise ValueError("reserved must be 0 in current body prelude")
+        if self.object_reference_bytes % OBJECT_REFERENCE_BLOCK_LENGTH != 0:
+            raise ValueError(f"object_reference_bytes must be a multiple of {OBJECT_REFERENCE_BLOCK_LENGTH}")
         if self.typed_payload_descriptor_bytes % TYPED_PAYLOAD_DESCRIPTOR_LENGTH != 0:
             raise ValueError(f"typed_payload_descriptor_bytes must be a multiple of {TYPED_PAYLOAD_DESCRIPTOR_LENGTH}")
         if self.extension_descriptor_bytes % EXTENSION_FRAME_DESCRIPTOR_LENGTH != 0:
@@ -653,6 +670,7 @@ class ResultPushMetadata(_FixedWidthMetadata):
         self.applied_budget_policy = _coerce_budget_policy(self.applied_budget_policy)
         self.payload_kind_bitmap = _coerce_payload_kind_bitmap(self.payload_kind_bitmap)
         _validate_non_tensor_result_fields(self)
+        _validate_result_push_contract(self)
 
     def pack(self) -> bytes:
         return self.STRUCT.pack(

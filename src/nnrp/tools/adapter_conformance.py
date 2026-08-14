@@ -3,23 +3,62 @@
 from __future__ import annotations
 
 import argparse
+import asyncio
+import ipaddress
 import json
 import os
 import struct
 from collections.abc import Sequence
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 from dataclasses import dataclass, field
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
+from nnrp.client.native import (
+    NativeClientOptions,
+    NativeClientProviderRoute,
+    NativeClientSessionOptions,
+    connect_native_client_connection,
+)
 from nnrp.client.transport import SubmitIdentity, SubmitPolicy, SubmitRequest, TokenChunk, TokenSubmitInput
 from nnrp.core import (
+    BodyRegionPrelude,
+    CacheAckMetadata,
+    CacheAckStatus,
+    CacheInvalidateMetadata,
+    CacheInvalidateScope,
+    CacheObjectKind,
+    CachePutFlags,
+    CachePutMetadata,
+    ClientHelloMetadata,
+    FlowUpdateBackpressureLevel,
+    FlowUpdateFlags,
+    FlowUpdateMetadata,
+    FlowUpdateReason,
+    FlowUpdateScopeKind,
     FrameSubmitMetadata,
-    HeaderFlags,
     MessageType,
     NnrpHeader,
+    NnrpPacket,
+    ObjectReferenceBlock,
     PayloadKind,
-    WireFormat,
+    ResultHintBudgetPolicy,
+    ResultHintCongestionState,
+    ResultHintMetadata,
+    ResultHintReason,
+    ResultPushMetadata,
+    SessionPatchAckMetadata,
+    TransportId,
+    TransportPolicy,
+    TransportProbeAckMetadata,
+    TransportProbeMetadata,
+    build_token_chunk_frame,
+    pack_object_reference_blocks,
+    pack_typed_payload_frames,
     unpack_body,
+    unpack_object_reference_blocks,
     unpack_typed_payload_frames,
 )
 from nnrp.native import (
@@ -27,6 +66,14 @@ from nnrp.native import (
     NativeRuntimeError,
     NativeRuntimeServerSession,
     NativeRuntimeSession,
+    NativeTransportCandidateReadiness,
+    NativeTransportClientSecurity,
+    NativeTransportProbeMetrics,
+    NativeTransportProbeObservation,
+    NativeTransportSelectionOptions,
+    NativeTransportServerSecurity,
+    discover_native_transport_providers,
+    select_native_transport_provider,
 )
 from nnrp.runtime import (
     BudgetMetadata,
@@ -66,19 +113,56 @@ from nnrp.schema import (
     TOKEN_DELTA_SCHEMA_ID,
     TOKEN_DELTA_SCHEMA_VERSION,
     StandardProfile,
-    StreamSemantics,
     TypedPayloadDescriptor,
-    TypedPayloadDescriptorFlags,
+)
+from nnrp.server import (
+    NativeServerAcceptOptions,
+    NativeServerBootstrapOptions,
+    NativeServerProviderRoute,
+    listen_native_server,
 )
 
-_RESULTS_SCHEMA_URL = "https://raw.githubusercontent.com/NagareWorks/nnrp-conformance/main/schemas/adapter-case-results.schema.json"
+_RESULTS_SCHEMA_URL = (
+    "https://raw.githubusercontent.com/NagareWorks/nnrp-conformance/main/schemas/adapter-case-results.schema.json"
+)
 _DEFAULT_IMPLEMENTATION_NAME = "nnrp-py"
+_FROZEN_CASE_PARAMETER_KEYS = {
+    "l0.header.fixed_shape.golden": frozenset({"header_hex"}),
+    "l0.control.client_hello.golden": frozenset({"metadata_hex"}),
+    "l0.control.session_patch_ack.golden": frozenset({"metadata_hex"}),
+    "l0.flow_update.packet.golden": frozenset({"packet_hex"}),
+    "l0.result_hint.packet.golden": frozenset({"packet_hex"}),
+    "l0.frame_submit.metadata.golden": frozenset({"metadata_hex"}),
+    "l0.result_push.metadata.golden": frozenset({"metadata_hex"}),
+    "l0.body_region.prelude.golden": frozenset({"metadata_hex"}),
+    "l0.object_reference.block.golden": frozenset({"metadata_hex"}),
+    "l0.typed_payload.descriptor.golden": frozenset({"descriptor_hex"}),
+    "l0.typed_payload.frame_regions.golden": frozenset({"descriptor_region_hex", "payload_hex"}),
+    "l0.typed_payload.descriptor.current.golden": frozenset({"descriptor_hex"}),
+}
 _CASE_DISPATCH = {
     "l0.header.fixed_shape.golden": "_execute_common_header_roundtrip",
+    "l0.control.client_hello.golden": "_execute_client_hello_golden",
+    "l0.control.session_patch_ack.golden": "_execute_session_patch_ack_golden",
+    "l0.flow_update.packet.golden": "_execute_flow_update_packet_golden",
+    "l0.result_hint.packet.golden": "_execute_result_hint_packet_golden",
+    "l0.frame_submit.metadata.golden": "_execute_frame_submit_metadata_golden",
+    "l0.result_push.metadata.golden": "_execute_result_push_metadata_golden",
     "l0.body_region.prelude.golden": "_execute_baseline_body_region_prelude",
+    "l0.object_reference.block.golden": "_execute_object_reference_golden",
     "l0.typed_payload.descriptor.golden": "_execute_baseline_typed_payload_descriptor",
     "l0.typed_payload.frame_regions.golden": "_execute_baseline_typed_payload_frame_regions",
     "l1.typed_payload.region.pack": "_execute_baseline_typed_payload_region_pack",
+    "l1.flow_update.metadata.validation": "_execute_flow_update_validation",
+    "l1.result_hint.metadata.validation": "_execute_result_hint_validation",
+    "l1.cache.lifecycle.roundtrip": "_execute_cache_lifecycle_roundtrip",
+    "l1.transport_probe.metadata.roundtrip": "_execute_transport_probe_roundtrip",
+    "l1.frame_submit.message.parse_emit": "_execute_frame_submit_parse_emit",
+    "l1.result_push.message.parse_emit": "_execute_result_push_parse_emit",
+    "l1.result_push.object_reference.resolve": "_execute_result_push_object_reference_resolve",
+    "l3.transport.probe.selection": "_execute_transport_probe_selection",
+    "l3.transport.tcp.session_smoke": "_execute_tcp_session_smoke",
+    "l3.transport.quic.session_smoke": "_execute_quic_session_smoke",
     "l0.typed_payload.descriptor.current.golden": "_execute_typed_payload_descriptor_golden",
     "l1.handshake.basic": "_execute_handshake_basic",
     "l1.session.open_close": "_execute_session_open_close",
@@ -143,12 +227,13 @@ def build_adapter_case_results_report(
     cases = _require_case_list(plan_document)
     adapter_backend = backend or _load_adapter_backend()
     resolved_evidence_dir = evidence_dir or _resolve_evidence_dir(plan_document)
+    frozen_parameters = {_require_string(case, "id"): case.get("parameters", {}) for case in cases}
 
     return {
         "$schema": _RESULTS_SCHEMA_URL,
         "protocol_version": protocol_version,
         "implementation_name": implementation_name,
-        "results": [_run_case(case, adapter_backend, resolved_evidence_dir) for case in cases],
+        "results": [_run_case(case, adapter_backend, resolved_evidence_dir, frozen_parameters) for case in cases],
     }
 
 
@@ -204,11 +289,16 @@ def _require_case_list(document: dict[str, Any]) -> list[dict[str, Any]]:
     return normalized_cases
 
 
-def _run_case(case: dict[str, Any], backend: NativeRuntimeBackend, evidence_dir: Path | None) -> dict[str, Any]:
+def _run_case(
+    case: dict[str, Any],
+    backend: NativeRuntimeBackend,
+    evidence_dir: Path | None,
+    frozen_parameters: dict[str, Any],
+) -> dict[str, Any]:
     case_id = _require_string(case, "id")
     handler_name = _CASE_DISPATCH.get(case_id)
     if handler_name is not None:
-        execution = _AdapterCaseExecution(case, backend)
+        execution = _AdapterCaseExecution(case, backend, frozen_parameters)
         try:
             evidence = getattr(execution, handler_name)()
         except Exception as error:
@@ -227,11 +317,14 @@ def _run_case(case: dict[str, Any], backend: NativeRuntimeBackend, evidence_dir:
             "message": "Case covered by the SDK runtime facade execution surface.",
         }
 
-    return {
+    result = {
         "id": case_id,
-        "outcome": "skip",
-        "message": "Case is outside the SDK-local adapter smoke surface.",
+        "outcome": "fail",
+        "message": "Selected public case has no Python SDK adapter implementation.",
+        "diagnostic": {"error_type": "UnsupportedConformanceCase"},
     }
+    _write_evidence(case_id, evidence_dir, result)
+    return result
 
 
 def _resolve_evidence_dir(plan_document: dict[str, Any], *, base_dir: Path | None = None) -> Path | None:
@@ -342,6 +435,7 @@ def _parse_baseline_typed_payload_region(
 class _AdapterCaseExecution:
     case: dict[str, Any]
     backend: NativeRuntimeBackend
+    frozen_parameters: dict[str, Any]
 
     def _connect(self):
         return self.backend.connect(
@@ -369,23 +463,20 @@ class _AdapterCaseExecution:
         )
 
     def _execute_common_header_roundtrip(self) -> dict[str, Any]:
-        golden = bytes.fromhex(
-            "4e4e5250010010282100000003020100060504004433221188776655aa99ccbb0807060504030201"
-        )
+        golden = self._hex_parameter("header_hex")
         wire_header = NnrpHeader.unpack(golden)
         if wire_header.pack() != golden:
             raise ValueError("preview4 common header did not preserve the canonical wire bytes")
-
         runtime_header = RuntimeFrameHeader(
-            message_type=MessageType.FRAME_SUBMIT,
-            flags=HeaderFlags.ACK_REQUIRED | HeaderFlags.KEYFRAME,
-            session_id=0x11223344,
-            frame_id=0x55667788,
-            view_id=0x99AA,
-            route_id=0xBBCC,
-            trace_id=0x0102030405060708,
-            version_major=1,
-            wire_format=WireFormat.CURRENT,
+            message_type=wire_header.msg_type,
+            flags=wire_header.flags,
+            session_id=wire_header.session_id,
+            frame_id=wire_header.frame_id,
+            view_id=wire_header.view_id,
+            route_id=wire_header.route_id,
+            trace_id=wire_header.trace_id,
+            version_major=wire_header.version_major,
+            wire_format=wire_header.wire_format,
         )
         runtime_frame = encode_websocket_binary_frame(runtime_header, metadata=b"meta", body=b"body")
         if decode_websocket_binary_frame(runtime_frame).header != runtime_header:
@@ -403,21 +494,31 @@ class _AdapterCaseExecution:
             trace_id=wire_header.trace_id,
         )
 
+    def _execute_client_hello_golden(self) -> dict[str, Any]:
+        return self._round_trip_metadata("client-hello-golden", ClientHelloMetadata, "metadata_hex")
+
+    def _execute_session_patch_ack_golden(self) -> dict[str, Any]:
+        return self._round_trip_metadata("session-patch-ack-golden", SessionPatchAckMetadata, "metadata_hex")
+
+    def _execute_flow_update_packet_golden(self) -> dict[str, Any]:
+        return self._round_trip_packet("flow-update-packet-golden", MessageType.FLOW_UPDATE, FlowUpdateMetadata)
+
+    def _execute_result_hint_packet_golden(self) -> dict[str, Any]:
+        return self._round_trip_packet("result-hint-packet-golden", MessageType.RESULT_HINT, ResultHintMetadata)
+
+    def _execute_frame_submit_metadata_golden(self) -> dict[str, Any]:
+        return self._round_trip_metadata("frame-submit-metadata-golden", FrameSubmitMetadata, "metadata_hex")
+
+    def _execute_result_push_metadata_golden(self) -> dict[str, Any]:
+        return self._round_trip_metadata("result-push-metadata-golden", ResultPushMetadata, "metadata_hex")
+
+    def _execute_object_reference_golden(self) -> dict[str, Any]:
+        return self._round_trip_metadata("object-reference-golden", ObjectReferenceBlock, "metadata_hex")
+
     def _execute_typed_payload_descriptor_golden(self) -> dict[str, Any]:
-        golden = bytes.fromhex("020002020110000003000000020000000800000018000000")
-        descriptor = TypedPayloadDescriptor(
-            profile_id=StandardProfile.TOKEN,
-            payload_kind=PayloadKind.TOKEN_CHUNK,
-            descriptor_flags=TypedPayloadDescriptorFlags.PARTIAL,
-            schema_id=TOKEN_DELTA_SCHEMA_ID,
-            schema_version=TOKEN_DELTA_SCHEMA_VERSION,
-            stream_semantics=StreamSemantics.APPEND,
-            offset=8,
-            length=24,
-        )
+        golden = self._hex_parameter("descriptor_hex")
+        descriptor = TypedPayloadDescriptor.unpack(golden)
         if descriptor.pack() != golden:
-            raise ValueError("current typed payload descriptor did not emit the canonical wire bytes")
-        if TypedPayloadDescriptor.unpack(golden) != descriptor:
             raise ValueError("current typed payload descriptor did not preserve every canonical field")
 
         return self._evidence(
@@ -434,16 +535,14 @@ class _AdapterCaseExecution:
         )
 
     def _execute_baseline_body_region_prelude(self) -> dict[str, Any]:
-        golden = bytes.fromhex("1800000010000000100000000e00000010000000050000000000000000000000")
-        values = struct.unpack("<8I", golden)
-        if values != (24, 16, 16, 14, 16, 5, 0, 0):
-            raise ValueError("NNRP/1 baseline body-region prelude fields changed")
-        if struct.pack("<8I", *values) != golden:
+        golden = self._hex_parameter("metadata_hex")
+        prelude = BodyRegionPrelude.unpack(golden)
+        if prelude.pack() != golden:
             raise ValueError("NNRP/1 baseline body-region prelude did not round-trip")
         return self._evidence("baseline-body-region-prelude", prelude_hex=golden.hex())
 
     def _execute_baseline_typed_payload_descriptor(self) -> dict[str, Any]:
-        golden = bytes.fromhex("10000300040000000700000000000000")
+        golden = self._hex_parameter("descriptor_hex")
         descriptor = _BaselineTypedPayloadDescriptor.unpack(golden)
         if descriptor.pack() != golden:
             raise ValueError("NNRP/1 baseline typed-payload descriptor did not round-trip")
@@ -457,13 +556,8 @@ class _AdapterCaseExecution:
         )
 
     def _execute_baseline_typed_payload_frame_regions(self) -> dict[str, Any]:
-        descriptor_region = bytes.fromhex(
-            "02000100000000000300000000000000"
-            "04000200030000000200000000000000"
-            "08000300050000000500000000000000"
-            "100004000a0000000300000000000000"
-        )
-        payload_region = b"tokauvideoevt"
+        descriptor_region = self._hex_parameter("descriptor_region_hex")
+        payload_region = self._hex_parameter("payload_hex")
         descriptors = _parse_baseline_typed_payload_region(descriptor_region, payload_region)
         if tuple(descriptor.payload_kind for descriptor in descriptors) != (2, 4, 8, 16):
             raise ValueError("NNRP/1 baseline typed-payload frame kinds changed")
@@ -492,6 +586,180 @@ class _AdapterCaseExecution:
             payload_region_hex=payload_region.hex(),
             offsets=[descriptor.offset for descriptor in decoded],
         )
+
+    def _execute_flow_update_validation(self) -> dict[str, Any]:
+        metadata = FlowUpdateMetadata(
+            scope_kind=FlowUpdateScopeKind.SESSION,
+            update_reason=FlowUpdateReason.CONGESTION,
+            backpressure_level=FlowUpdateBackpressureLevel.HARD,
+            session_credit=1,
+            retry_after_ms=40,
+            credit_epoch=5,
+            flags=FlowUpdateFlags.CREDIT_VALID | FlowUpdateFlags.RETRY_AFTER_VALID,
+        )
+        if FlowUpdateMetadata.unpack(metadata.pack()) != metadata:
+            raise ValueError("FLOW_UPDATE metadata did not round-trip")
+        try:
+            FlowUpdateMetadata(
+                scope_kind=FlowUpdateScopeKind.SESSION,
+                session_credit=1,
+                retry_after_ms=1,
+                flags=FlowUpdateFlags.CREDIT_VALID,
+            ).pack()
+        except ValueError:
+            pass
+        else:
+            raise ValueError("FLOW_UPDATE accepted retry_after without RETRY_AFTER_VALID")
+        return self._evidence("flow-update-validation")
+
+    def _execute_result_hint_validation(self) -> dict[str, Any]:
+        metadata = ResultHintMetadata(
+            applied_budget_policy=ResultHintBudgetPolicy.PARTIAL,
+            congestion_state=ResultHintCongestionState.ELEVATED,
+            reason=ResultHintReason.SERVER_BUSY,
+            retry_after_ms=20,
+        )
+        if ResultHintMetadata.unpack(metadata.pack()) != metadata:
+            raise ValueError("RESULT_HINT metadata did not round-trip")
+        invalid = bytearray(metadata.pack())
+        invalid[8:12] = (99).to_bytes(4, "little")
+        try:
+            ResultHintMetadata.unpack(bytes(invalid))
+        except ValueError:
+            pass
+        else:
+            raise ValueError("RESULT_HINT accepted an unknown reason code")
+        return self._evidence("result-hint-validation")
+
+    def _execute_cache_lifecycle_roundtrip(self) -> dict[str, Any]:
+        values = (
+            CachePutMetadata(
+                1,
+                0x01020304,
+                0x05060708,
+                CacheObjectKind.CODEC_TABLE,
+                15_000,
+                2048,
+                3,
+                CachePutFlags.PINNED | CachePutFlags.REUSABLE,
+            ),
+            CacheAckMetadata(1, 0x01020304, 0x05060708, CacheAckStatus.ACCEPTED, 15_000, 8192, 0),
+            CacheInvalidateMetadata(CacheInvalidateScope.OBJECT_KEY, 1, 0x01020304, 0x05060708, 2),
+        )
+        for metadata in values:
+            if type(metadata).unpack(metadata.pack()) != metadata:
+                raise ValueError(f"{type(metadata).__name__} did not round-trip")
+        return self._evidence("cache-lifecycle-roundtrip", message_count=len(values))
+
+    def _execute_transport_probe_roundtrip(self) -> dict[str, Any]:
+        probe = TransportProbeMetadata(7, 1200, 100_000)
+        ack = TransportProbeAckMetadata(7, 0, 100_800)
+        if TransportProbeMetadata.unpack(probe.pack()) != probe:
+            raise ValueError("TRANSPORT_PROBE metadata did not round-trip")
+        if TransportProbeAckMetadata.unpack(ack.pack()) != ack:
+            raise ValueError("TRANSPORT_PROBE_ACK metadata did not round-trip")
+        return self._evidence("transport-probe-roundtrip", probe_id=probe.probe_id)
+
+    def _execute_frame_submit_parse_emit(self) -> dict[str, Any]:
+        metadata = FrameSubmitMetadata.unpack(self._frozen_case_hex("l0.frame_submit.metadata.golden", "metadata_hex"))
+        frames = (build_token_chunk_frame(b"tok"),)
+        descriptor_region, payload_region = pack_typed_payload_frames(frames)
+        decoded = unpack_typed_payload_frames(
+            descriptor_region,
+            payload_region,
+            payload_kind_bitmap=PayloadKind.TOKEN_CHUNK,
+        )
+        if tuple(frame.payload for frame in decoded) != (b"tok",):
+            raise ValueError("FRAME_SUBMIT typed payload projection changed")
+        if FrameSubmitMetadata.unpack(metadata.pack()) != metadata:
+            raise ValueError("FRAME_SUBMIT metadata did not round-trip")
+        return self._evidence("frame-submit-parse-emit", operation_id=metadata.operation_id)
+
+    def _execute_result_push_parse_emit(self) -> dict[str, Any]:
+        metadata = ResultPushMetadata.unpack(self._frozen_case_hex("l0.result_push.metadata.golden", "metadata_hex"))
+        reference = ObjectReferenceBlock(CacheObjectKind.TILE_INDEX_BLOCK, 0, 7, 0x11223344, 0x55667788)
+        region = pack_object_reference_blocks((reference,))
+        if unpack_object_reference_blocks(region) != (reference,):
+            raise ValueError("RESULT_PUSH object-reference region did not round-trip")
+        if ResultPushMetadata.unpack(metadata.pack()) != metadata:
+            raise ValueError("RESULT_PUSH metadata did not round-trip")
+        return self._evidence("result-push-parse-emit", result_class=int(metadata.result_class))
+
+    def _execute_result_push_object_reference_resolve(self) -> dict[str, Any]:
+        reference = ObjectReferenceBlock(CacheObjectKind.TILE_INDEX_BLOCK, 0, 7, 0x11223344, 0x55667788)
+        decoded = unpack_object_reference_blocks(pack_object_reference_blocks((reference,)))
+        cache = {(7, 0x11223344, 0x55667788): b"tile-index"}
+
+        def resolve(block: ObjectReferenceBlock) -> bytes | None:
+            return cache.get((block.cache_namespace, block.cache_key_hi, block.cache_key_lo))
+
+        if resolve(decoded[0]) != b"tile-index":
+            raise ValueError("resolved cache-backed object reference was rejected")
+        cache.clear()
+        if resolve(decoded[0]) is not None:
+            raise ValueError("missing cache-backed object reference did not surface as a miss")
+        return self._evidence("result-push-object-reference-resolve", cache_miss_observed=True)
+
+    def _execute_transport_probe_selection(self) -> dict[str, Any]:
+        providers = discover_native_transport_providers()
+        selected = {
+            provider.transport_name: provider
+            for provider in providers
+            if provider.transport_name in {"tcp", "quic"}
+        }
+        if set(selected) != {"tcp", "quic"}:
+            raise ValueError("transport probe selection requires installed TCP and QUIC providers")
+        readiness = [NativeTransportCandidateReadiness.ready(provider) for provider in providers]
+        observations = [
+            NativeTransportProbeObservation.succeeded(
+                selected["tcp"], NativeTransportProbeMetrics(1, 1, 10_000, 1_500)
+            ),
+            NativeTransportProbeObservation.succeeded(selected["quic"], NativeTransportProbeMetrics(1, 1, 10_000, 800)),
+        ]
+        selection = select_native_transport_provider(
+            NativeTransportSelectionOptions(
+                peer_supported_transports=(TransportId.TCP, TransportId.QUIC),
+                policy=TransportPolicy.AUTO,
+                requested_max_frame_bytes=None,
+                candidate_readiness=tuple(readiness),
+                probe_observations=tuple(observations),
+            ),
+        )
+        if selection.selected_transport_name != "quic":
+            raise ValueError("transport probe did not prefer the lower-latency QUIC provider")
+        fallback = select_native_transport_provider(
+            NativeTransportSelectionOptions(
+                peer_supported_transports=(TransportId.TCP, TransportId.QUIC),
+                policy=TransportPolicy.PREFER_QUIC,
+                requested_max_frame_bytes=None,
+                candidate_readiness=tuple(readiness),
+                probe_observations=(
+                    NativeTransportProbeObservation.succeeded(
+                        selected["tcp"], NativeTransportProbeMetrics(1, 1, 10_000, 900)
+                    ),
+                    NativeTransportProbeObservation.failed(selected["quic"], "probe failed"),
+                ),
+            ),
+        )
+        if fallback.selected_transport_name != "tcp":
+            raise ValueError("transport probe did not fall back to TCP after QUIC failure")
+        return self._evidence("transport-probe-selection", selected="quic", fallback="tcp")
+
+    def _execute_tcp_session_smoke(self) -> dict[str, Any]:
+        return self._execute_native_transport_session_smoke("tcp")
+
+    def _execute_quic_session_smoke(self) -> dict[str, Any]:
+        return self._execute_native_transport_session_smoke("quic")
+
+    def _execute_native_transport_session_smoke(self, transport: str) -> dict[str, Any]:
+        with _open_native_transport_session(transport) as (client_session, server_session):
+            if _runtime_id(client_session) == 0 or _runtime_id(server_session) == 0:
+                raise ValueError(f"{transport} native session did not expose non-zero session handles")
+            return self._evidence(
+                f"{transport}-session-smoke",
+                client_session_id=_runtime_id(client_session),
+                server_session_id=_runtime_id(server_session),
+            )
 
     def _execute_handshake_basic(self) -> dict[str, Any]:
         connection = self._connect()
@@ -699,7 +967,51 @@ class _AdapterCaseExecution:
         parameters = self.case.get("parameters", {})
         if not isinstance(parameters, dict):
             raise ValueError("adapter case parameters must be a JSON object")
+        case_id = _require_string(self.case, "id")
+        expected_keys = _FROZEN_CASE_PARAMETER_KEYS.get(case_id)
+        if expected_keys is not None and parameters.keys() != expected_keys:
+            raise ValueError(
+                f"adapter case {case_id} parameters must contain exactly: {', '.join(sorted(expected_keys))}"
+            )
         return parameters
+
+    def _round_trip_metadata(self, action: str, metadata_type: Any, parameter_name: str) -> dict[str, Any]:
+        golden = self._hex_parameter(parameter_name)
+        metadata = metadata_type.unpack(golden)
+        if metadata.pack() != golden:
+            raise ValueError(f"{metadata_type.__name__} did not preserve the frozen wire bytes")
+        return self._evidence(action, metadata_hex=golden.hex())
+
+    def _round_trip_packet(self, action: str, message_type: MessageType, metadata_type: Any) -> dict[str, Any]:
+        golden = self._hex_parameter("packet_hex")
+        packet = NnrpPacket.unpack(golden)
+        if packet.header.msg_type is not message_type:
+            raise ValueError(f"expected {message_type.name}, got {packet.header.msg_type.name}")
+        metadata = metadata_type.unpack(packet.metadata)
+        if metadata.pack() != packet.metadata or packet.pack() != golden:
+            raise ValueError(f"{message_type.name} packet did not preserve the frozen wire bytes")
+        return self._evidence(action, packet_hex=golden.hex())
+
+    def _hex_parameter(self, name: str) -> bytes:
+        value = self._parameters().get(name)
+        if not isinstance(value, str) or not value:
+            raise ValueError(f"adapter case parameter '{name}' must be a non-empty hexadecimal string")
+        try:
+            return bytes.fromhex(value)
+        except ValueError as error:
+            raise ValueError(f"adapter case parameter '{name}' must be valid hexadecimal") from error
+
+    def _frozen_case_hex(self, case_id: str, name: str) -> bytes:
+        parameters = self.frozen_parameters.get(case_id)
+        if not isinstance(parameters, dict):
+            raise ValueError(f"adapter execution plan is missing parameters for {case_id}")
+        value = parameters.get(name)
+        if not isinstance(value, str) or not value:
+            raise ValueError(f"adapter execution plan is missing frozen {name} for {case_id}")
+        try:
+            return bytes.fromhex(value)
+        except ValueError as error:
+            raise ValueError(f"adapter execution plan contains invalid frozen {name} for {case_id}") from error
 
     def _int_parameter(self, name: str, default: int) -> int:
         value = self._parameters().get(name, default)
@@ -724,6 +1036,87 @@ class _AdapterCaseExecution:
         if isinstance(value, list) and all(isinstance(item, int) and 0 <= item <= 255 for item in value):
             return bytes(value)
         raise ValueError(f"adapter case parameter '{name}' must be a string or byte list")
+
+
+def _new_loopback_tls_material() -> tuple[bytes, bytes]:
+    from cryptography import x509
+    from cryptography.hazmat.primitives import hashes, serialization
+    from cryptography.hazmat.primitives.asymmetric import rsa
+    from cryptography.x509.oid import NameOID
+
+    private_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    subject = issuer = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "localhost")])
+    now = datetime.now(UTC)
+    certificate = (
+        x509.CertificateBuilder()
+        .subject_name(subject)
+        .issuer_name(issuer)
+        .public_key(private_key.public_key())
+        .serial_number(x509.random_serial_number())
+        .not_valid_before(now - timedelta(minutes=1))
+        .not_valid_after(now + timedelta(days=1))
+        .add_extension(
+            x509.SubjectAlternativeName([x509.DNSName("localhost"), x509.IPAddress(ipaddress.ip_address("127.0.0.1"))]),
+            critical=False,
+        )
+        .sign(private_key, hashes.SHA256())
+    )
+    return (
+        certificate.public_bytes(serialization.Encoding.DER),
+        private_key.private_bytes(
+            serialization.Encoding.DER,
+            serialization.PrivateFormat.PKCS8,
+            serialization.NoEncryption(),
+        ),
+    )
+
+
+@contextmanager
+def _open_native_transport_session(transport: str) -> Any:
+    if transport not in {"tcp", "quic"}:
+        raise ValueError(f"unsupported native session-smoke transport: {transport}")
+    certificate, private_key = _new_loopback_tls_material()
+    server_security = NativeTransportServerSecurity(certificate, private_key)
+    client_security = NativeTransportClientSecurity("localhost", certificate)
+    policy = TransportPolicy[f"FORCE_{transport.upper()}"]
+    with listen_native_server(
+        NativeServerBootstrapOptions(
+            endpoint="nnrp://adapter-conformance.local",
+            provider_routes={
+                transport: NativeServerProviderRoute(
+                    provider_endpoint=f"{transport}://127.0.0.1:0",
+                    security=server_security,
+                )
+            },
+            transport_policy=policy,
+        )
+    ) as server:
+        provider_endpoint = server.bound_provider_endpoints[transport].uri
+        with ThreadPoolExecutor(max_workers=1, thread_name_prefix=f"nnrp-{transport}-conformance") as executor:
+            accepted = executor.submit(lambda: asyncio.run(server.accept(NativeServerAcceptOptions(timeout_ms=10_000))))
+            with connect_native_client_connection(
+                NativeClientOptions(
+                    endpoint="nnrp://adapter-conformance.local",
+                    provider_routes={
+                        transport: NativeClientProviderRoute(
+                            provider_endpoint=provider_endpoint,
+                            security=client_security,
+                        )
+                    },
+                    transport_policy=policy,
+                )
+            ) as client:
+                client_session = asyncio.run(client.open_session(NativeClientSessionOptions(requested_session_id=3)))
+                server_session = accepted.result(timeout=15)
+                try:
+                    yield client_session, server_session
+                finally:
+                    client_close = executor.submit(client_session.close)
+                    try:
+                        server_session.poll_events(max_events=8, timeout_ms=10_000)
+                    finally:
+                        server_session.close()
+                        client_close.result(timeout=15)
 
 
 def _runtime_id(value: Any) -> int:

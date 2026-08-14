@@ -19,6 +19,8 @@ def test_ci_runs_unit_tests_with_incremental_coverage_gate() -> None:
     assert "--cov-fail-under=90" in workflow
     assert "check_incremental_coverage.py" in workflow
     assert "--threshold 90" in workflow
+    assert "Download commit-pinned Rust native transport artifacts for tests" in workflow
+    assert "Prepare Rust native transport artifacts for tests" in workflow
 
 
 def test_ci_runs_adapter_conformance_as_required_job() -> None:
@@ -27,6 +29,13 @@ def test_ci_runs_adapter_conformance_as_required_job() -> None:
     assert "conformance:" in workflow
     assert "Run suite-owned conformance action" in workflow
     assert "python-path }} -m nnrp.tools.adapter_conformance" in workflow
+    assert "Download commit-pinned Rust native transport artifacts" in workflow
+    assert "scripts/download_nnrp_rs_workflow_artifacts.py" in workflow
+    assert "--workflow-run-id ${{ env.NNRP_RS_RELEASE_RUN_ID }}" in workflow
+    assert "--workflow-commit ${{ env.NNRP_RS_SOURCE_COMMIT }}" in workflow
+    assert "Prepare Rust native transport artifacts for adapter cases" in workflow
+    assert "prepare_native_artifacts.py" in workflow
+    assert "--clean artifacts/native-downloads/*.zip" in workflow
     assert "- conformance" in workflow
 
 
@@ -36,6 +45,15 @@ def test_adapter_conformance_manifest_claims_preview4_runtime_capabilities() -> 
 
     assert '"protocol_version": "nnrp-1-preview4"' in manifest
     for capability in (
+        "handshake.basic",
+        "session.open_close",
+        "session.resume",
+        "flow_update",
+        "frame_submit.tensor.inline",
+        "result_push.basic",
+        "cache.lifecycle",
+        "transport.tcp",
+        "transport.quic",
         "control.cancel_abort",
         "control.supersede",
         "control.priority_update",
@@ -63,8 +81,8 @@ def test_ci_runs_independent_process_wire_conformance() -> None:
     workflow = _read_ci_workflow()
 
     assert "wire-conformance:" in workflow
-    assert "NNRP_DOC_SOURCE_COMMIT: dcd36a73ef74f62a23575c1a06fe0eb9f3a0bcbb" in workflow
-    assert "NNRP_CONFORMANCE_SOURCE_COMMIT: 95daf385184312c13d66fa18a7e1ecf0b6ff4558" in workflow
+    assert "NNRP_DOC_SOURCE_COMMIT: 3439ded0d318bd736f6485b17f2563fae77627bf" in workflow
+    assert "NNRP_CONFORMANCE_SOURCE_COMMIT: 05dc6d8283d0941b129f1c5a93e399b97153d38b" in workflow
     assert "NNRP_RS_SOURCE_COMMIT: 295f5b65ac71885b5c1b54d927b2595005038481" in workflow
     assert workflow.count("ref: ${{ env.NNRP_DOC_SOURCE_COMMIT }}") == 1
     assert workflow.count("ref: ${{ env.NNRP_CONFORMANCE_SOURCE_COMMIT }}") == 3

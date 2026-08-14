@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 import copy
 import importlib.util
 import json
@@ -61,7 +62,37 @@ def frozen_contract() -> dict[str, object]:
             "ConnectionLifecycleState": ["open", "closing", "closed"],
             "SessionLifecycleState": ["open", "resumed", "closing", "draining", "closed"],
         },
+        "wireLayouts": {
+            "BodyRegionPrelude": {
+                "size": 32,
+                "validation": copy.deepcopy(checker.EXPECTED_BODY_REGION_VALIDATION),
+            }
+        },
         "types": {
+            "TransportSelectionOptions": {
+                "fields": [
+                    {"name": name, "type": field_type, "required": required}
+                    for name, field_type, required in checker.EXPECTED_TRANSPORT_SELECTION_OPTIONS
+                ],
+                "peerSupportedTransportsSemantics": (
+                    "set; duplicates have no effect and input order is not semantically significant"
+                ),
+                "requestedMaxFrameBytesZeroRule": (
+                    "zero is a valid requested size and must not be rejected or treated as absent"
+                ),
+            },
+            "TransportProbeObservation": {
+                "stateConstraint": ["succeeded", "failed"],
+            },
+            "TransportProviderDescriptor": {
+                "nameSemantics": (
+                    "provider-owned package or display name; protocol transport identity is transport_id and "
+                    "selection must not derive it from name"
+                ),
+            },
+            "ResultPushMetadata": {
+                "validation": copy.deepcopy(checker.EXPECTED_RESULT_PUSH_VALIDATION),
+            },
             "SessionLifecycleSnapshot": {
                 "fields": [
                     {"name": "session_id", "type": "u32", "required": True},
@@ -228,8 +259,7 @@ def frozen_contract() -> dict[str, object]:
         "roleSurfaces": {
             "clientSubmitWait": {
                 "scopeRule": (
-                    "These rules apply when an SDK exposes a cancellable or time-bounded "
-                    "submit-and-wait convenience."
+                    "These rules apply when an SDK exposes a cancellable or time-bounded submit-and-wait convenience."
                 ),
                 "preDispatchCancellationRule": (
                     "Cancellation before FRAME_SUBMIT dispatch fails the local wait and emits no submit "
@@ -314,9 +344,7 @@ def test_rejects_contract_version_and_role_surface_drift() -> None:
             checker.check_contract(write_contract(Path(directory), contract), ROOT)
 
     contract = frozen_contract()
-    contract["roleSurfaces"]["clientSubmitWait"]["postDispatchCancellationRule"] = (
-        "cancel only the local task"
-    )
+    contract["roleSurfaces"]["clientSubmitWait"]["postDispatchCancellationRule"] = "cancel only the local task"
     with (
         tempfile.TemporaryDirectory() as directory,
         pytest.raises(SystemExit, match="client submit-wait semantics drifted"),
@@ -366,6 +394,66 @@ def test_rejects_python_projection_drift() -> None:
     with (
         tempfile.TemporaryDirectory() as directory,
         pytest.raises(SystemExit, match="Python SDK projection map drifted"),
+    ):
+        checker.check_contract(write_contract(Path(directory), contract), ROOT)
+
+    contract = frozen_contract()
+    del contract["languageProjections"]["python"]["baselineMetadataCodecs"]["ObjectReferenceBlock"]
+    with (
+        tempfile.TemporaryDirectory() as directory,
+        pytest.raises(SystemExit, match="Python SDK projection map drifted"),
+    ):
+        checker.check_contract(write_contract(Path(directory), contract), ROOT)
+
+
+def test_rejects_missing_python_baseline_metadata_codec_surface() -> None:
+    checker = load_checker()
+    valid_module = ast.parse(
+        """
+class _FixedWidthMetadata:
+    def pack(self): ...
+    @classmethod
+    def unpack(cls, payload): ...
+
+class ExampleMetadata(_FixedWidthMetadata):
+    def pack(self): ...
+"""
+    )
+    checker.require_python_baseline_metadata_codec(valid_module, "ExampleMetadata")
+
+    invalid_module = ast.parse(
+        """
+class _FixedWidthMetadata:
+    def pack(self): ...
+    @classmethod
+    def unpack(cls, payload): ...
+
+class ExampleMetadata(_FixedWidthMetadata):
+    pass
+"""
+    )
+    with pytest.raises(
+        SystemExit,
+        match="Python baseline metadata codec ExampleMetadata.pack is missing",
+    ):
+        checker.require_python_baseline_metadata_codec(invalid_module, "ExampleMetadata")
+
+
+def test_rejects_frozen_data_plane_validation_drift() -> None:
+    checker = load_checker()
+    contract = frozen_contract()
+    contract["wireLayouts"]["BodyRegionPrelude"]["validation"]["objectReferenceBlockBytesMultiple"] = 16
+    with (
+        tempfile.TemporaryDirectory() as directory,
+        pytest.raises(SystemExit, match="BodyRegionPrelude validation contract drifted"),
+    ):
+        checker.check_contract(write_contract(Path(directory), contract), ROOT)
+
+    contract = frozen_contract()
+    contract["types"]["ResultPushMetadata"]["validation"]["tensorCoverageRule"] = "best effort"
+    with (
+        tempfile.TemporaryDirectory() as directory,
+        pytest.raises(SystemExit, match="ResultPushMetadata validation contract drifted"),
     ):
         checker.check_contract(write_contract(Path(directory), contract), ROOT)
 
@@ -468,6 +556,84 @@ def test_current_modules_export_the_frozen_client_event_and_terminal_surface() -
     assert "NativeOperationLifecycle" not in checker.exported_names(root_module)
 
 
+def test_every_frozen_python_projection_target_is_publicly_resolvable() -> None:
+    checker = load_checker()
+
+    checker.require_python_projection_targets(
+        copy.deepcopy(checker.EXPECTED_PYTHON_PROJECTIONS),
+        ROOT,
+    )
+
+
+def test_python_projection_target_gate_rejects_missing_public_type() -> None:
+    checker = load_checker()
+    projection = copy.deepcopy(checker.EXPECTED_PYTHON_PROJECTIONS)
+    projection["transportSelectionOptions"] = "nnrp.native.MissingTransportSelectionOptions"
+
+    with pytest.raises(SystemExit, match="MissingTransportSelectionOptions is not publicly resolvable"):
+        checker.require_python_projection_targets(projection, ROOT)
+
+
+def test_rejects_transport_selection_options_field_drift() -> None:
+    checker = load_checker()
+    contract = frozen_contract()
+    contract["types"]["TransportSelectionOptions"]["fields"].pop()
+
+    with (
+        tempfile.TemporaryDirectory() as directory,
+        pytest.raises(SystemExit, match="TransportSelectionOptions field contract drifted"),
+    ):
+        checker.check_contract(write_contract(Path(directory), contract), ROOT)
+
+
+def test_rejects_transport_selection_peer_set_semantics_drift() -> None:
+    checker = load_checker()
+    contract = frozen_contract()
+    contract["types"]["TransportSelectionOptions"]["peerSupportedTransportsSemantics"] = "ordered list"
+
+    with (
+        tempfile.TemporaryDirectory() as directory,
+        pytest.raises(SystemExit, match="TransportSelectionOptions peer transport semantics drifted"),
+    ):
+        checker.check_contract(write_contract(Path(directory), contract), ROOT)
+
+
+def test_rejects_transport_selection_zero_frame_rule_drift() -> None:
+    checker = load_checker()
+    contract = frozen_contract()
+    contract["types"]["TransportSelectionOptions"]["requestedMaxFrameBytesZeroRule"] = "zero means absent"
+
+    with (
+        tempfile.TemporaryDirectory() as directory,
+        pytest.raises(SystemExit, match="TransportSelectionOptions zero frame-size rule drifted"),
+    ):
+        checker.check_contract(write_contract(Path(directory), contract), ROOT)
+
+
+def test_rejects_transport_probe_observation_state_constraint_drift() -> None:
+    checker = load_checker()
+    contract = frozen_contract()
+    contract["types"]["TransportProbeObservation"]["stateConstraint"].append("not-run")
+
+    with (
+        tempfile.TemporaryDirectory() as directory,
+        pytest.raises(SystemExit, match="TransportProbeObservation state constraint drifted"),
+    ):
+        checker.check_contract(write_contract(Path(directory), contract), ROOT)
+
+
+def test_rejects_transport_provider_name_semantics_drift() -> None:
+    checker = load_checker()
+    contract = frozen_contract()
+    contract["types"]["TransportProviderDescriptor"]["nameSemantics"] = "transport identity"
+
+    with (
+        tempfile.TemporaryDirectory() as directory,
+        pytest.raises(SystemExit, match="TransportProviderDescriptor name semantics drifted"),
+    ):
+        checker.check_contract(write_contract(Path(directory), contract), ROOT)
+
+
 def test_ast_helpers_reject_missing_contract_symbols() -> None:
     checker = load_checker()
     module = checker.ast.parse("class Example:\n    value: int\n    def method(self):\n        pass\n")
@@ -487,6 +653,7 @@ def test_ast_helpers_reject_missing_contract_symbols() -> None:
         checker.exported_names(module)
     with pytest.raises(SystemExit, match="missing MissingAlias"):
         checker.assignment_value(module, "MissingAlias")
+    assert checker.annotated_field_types(example) == [("value", "int")]
 
 
 def test_cli_entrypoint_checks_the_frozen_contract(monkeypatch: pytest.MonkeyPatch) -> None:

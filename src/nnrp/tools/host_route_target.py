@@ -313,7 +313,11 @@ def _binding_for_route(route: Mapping[str, Any]) -> NativeTransportBinding:
     transport = _required_string(route, "transport")
     provider_id = _required_string(route, "provider_id")
     if provider_id == "example.transport.quic.uninstalled":
-        provider = next(provider for provider in discover_native_transport_providers() if provider.name == transport)
+        provider = next(
+            provider
+            for provider in discover_native_transport_providers()
+            if provider.transport_name == transport
+        )
         provider = replace(provider, metadata=replace(provider.metadata, id=provider_id))
         return NativeTransportBinding.unavailable(provider, "provider package is not installed")
     expected = _OFFICIAL_PROVIDER_IDS.get(transport)

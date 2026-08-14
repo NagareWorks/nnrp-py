@@ -28,7 +28,6 @@ from nnrp._native_routes import (
 from nnrp.core import SessionOpenMetadata, TransportPolicy
 from nnrp.native import (
     FFI_STATUS_WOULD_BLOCK,
-    NATIVE_TRANSPORT_ID_BY_NAME,
     NativeArtifactError,
     NativeRuntimeServer,
     NativeRuntimeServerSession,
@@ -311,8 +310,7 @@ def _server_route_security_satisfied(
 
 def _base_server_candidate(binding: NativeTransportBinding) -> NativeTransportCandidateDiagnostic:
     return NativeTransportCandidateDiagnostic(
-        transport_name=binding.provider.name,
-        transport_id=NATIVE_TRANSPORT_ID_BY_NAME[binding.provider.name],
+        transport_id=binding.provider.transport_id,
         provider=binding.provider.metadata,
         local_available=binding.local_available,
         peer_supported=True,
@@ -332,7 +330,7 @@ def _resolve_server_routes(
     normalized_routes = normalize_provider_routes(provider_routes, NativeServerProviderRoute)
     bindings = _resolve_server_transport_bindings(transports)
     providers = tuple(binding.provider for binding in bindings)
-    providers_by_name = {provider.name: provider for provider in providers}
+    providers_by_name = {provider.transport_name: provider for provider in providers}
     bindings_by_name = {binding.kind: binding for binding in bindings}
     transport_names = set(providers_by_name) | set(normalized_routes)
     forced_transport = forced_transport_name(policy)
@@ -400,7 +398,7 @@ def _resolve_server_transport_bindings(
 ) -> tuple[NativeTransportBinding, ...]:
     if transports is None:
         bindings = tuple(
-            load_native_transport_binding(provider.name) for provider in discover_native_transport_providers()
+            load_native_transport_binding(provider.transport_name) for provider in discover_native_transport_providers()
         )
     else:
         bindings = tuple(transports)

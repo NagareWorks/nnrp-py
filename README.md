@@ -202,23 +202,39 @@ manifests and rejects names that are not advertised by the artifact tree:
 
 ```python
 from nnrp import (
+	NativeTransportCandidateReadiness,
+	NativeTransportSelectionOptions,
+	TransportId,
+	TransportPolicy,
 	diagnose_nnrp_endpoint_support,
 	discover_native_transport_providers,
 	select_native_transport_provider,
 )
 
 providers = discover_native_transport_providers()
-selection = select_native_transport_provider("auto")
+selection = select_native_transport_provider(
+	NativeTransportSelectionOptions(
+		peer_supported_transports=(TransportId.TCP,),
+		policy=TransportPolicy.AUTO,
+		requested_max_frame_bytes=None,
+		candidate_readiness=tuple(
+			NativeTransportCandidateReadiness.ready(provider) for provider in providers
+		),
+		probe_observations=(),
+	)
+)
 support = diagnose_nnrp_endpoint_support("nnrps://runtime.example/session/default")
 
-print([provider.name for provider in providers])
+print([(provider.name, provider.transport_name) for provider in providers])
 print(selection.selected_transport_name, selection.diagnostic)
 print(support.endpoint.authority, support.available)
 ```
 
-Installations with a single provider select it directly. Multi-provider installations can use `auto`, `probe`,
-or an explicit transport name. Provider metadata reports transport slots, cost/preference hints, platform limitations,
-and enabled native features; it is not a configuration flag over hidden shared transport logic.
+Installations with a single eligible provider select it directly. Multi-provider selection uses a `TransportPolicy`
+together with complete readiness and probe evidence. A provider descriptor keeps package identity (`name`) separate from
+the canonical carrier identity (`transport_name` / `transport_id`) and reports availability, owned library path,
+cost/preference hints, limits, and platform limitations. It is not a configuration flag over hidden shared transport
+logic.
 
 Application-facing endpoints use `nnrp://` or `nnrps://`. Provider-local locators such as `unix://`, `npipe://`,
 `ws://`, and `wss://` are lower-level diagnostics, conformance fixture inputs, or explicit provider overrides.

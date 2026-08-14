@@ -15,7 +15,7 @@
   - [x] Maximum frame bytes.
   - [x] Registered platform limitations.
 - [x] Reject aggregate and legacy provider manifest shapes.
-- [x] Reject provider names that are not advertised by the native artifact and reject duplicate transport/provider ids.
+- [x] Reject provider names that are not advertised by the native artifact, keep provider-owned names distinct from protocol transport ids, and reject duplicate transport/provider ids.
 - [x] Keep application-facing `nnrp://` / `nnrps://` endpoints separate from provider-local locators.
 
 ## TCP And QUIC Preview4 Runtime Continuity
@@ -53,7 +53,7 @@
 - [x] Select the installed transport directly for single-provider installations.
 - [x] Probe installed transports by policy for multi-provider installations.
 - [x] Preserve explicit user transport selection.
-- [x] Require exact readiness and observation evidence keyed by transport id and stable provider id; reject duplicate, unmatched, or incomplete evidence before selection.
+- [x] Accept selection evidence only through the frozen `NativeTransportSelectionOptions`; require exact readiness and observations keyed by transport id and stable provider id, keep package/provider names distinct from canonical transport identity, and reject duplicate, unmatched, or incomplete evidence before selection.
 - [x] Summarize raw probe samples into succeeded/failed observations with per-sample throughput and exact odd/even medians.
 - [x] Apply the frozen success, throughput, RTT, cost, preference, transport-id, and provider-id comparator.
 - [x] Surface typed probe metrics and complete ordered candidate diagnostics.

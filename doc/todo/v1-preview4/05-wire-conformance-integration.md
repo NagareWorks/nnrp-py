@@ -14,7 +14,7 @@
   - [x] QUIC.
   - [x] IPC.
   - [x] WebSocket.
-- [x] Include supported capabilities.
+- [x] Include the complete Rust-aligned public capability catalog, including inherited NNRP/1 capabilities, and execute every selected adapter case without SDK-local skips.
 - [x] Include frame and in-flight limits.
 
 ## Live Endpoint Harness
@@ -32,6 +32,7 @@
 - [x] Keep adapter conformance and wire conformance as separate jobs.
 - [x] Add skip diagnostics for unavailable native transports.
 - [x] Ensure skipped transport cases do not masquerade as passed cases.
+- [x] Enforce frozen `RESULT_PUSH` stale/reuse, partial, and tensor-coverage invariants at construction and decode boundaries.
 
 ## Regression Coverage
 

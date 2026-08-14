@@ -1475,6 +1475,15 @@ def _test_transport_endpoint(name: str) -> NativeTransportEndpoint:
     )
 
 
+def _test_transport_provider(name: str, artifact_path: Path | None = None) -> SimpleNamespace:
+    return SimpleNamespace(
+        name=name,
+        transport_name=name,
+        transport_id=native_module.NATIVE_TRANSPORT_ID_BY_NAME[name],
+        _artifact_path=artifact_path,
+    )
+
+
 def _test_server_role_options() -> dict[str, object]:
     return {
         "supported_profiles": (int(StandardProfile.TOKEN),),
@@ -1502,7 +1511,7 @@ class _TestNativeRuntimeClient(NativeRuntimeClient):
         name = _test_transport_name(transport_id)
         carrier = NativeTransportConnection(
             SimpleNamespace(),
-            SimpleNamespace(name=name),
+            _test_transport_provider(name),
             _test_transport_endpoint(name),
             NativeHandle(HANDLE_KIND_TRANSPORT_CONNECTION, 800, 1, 0),
         )
@@ -1522,7 +1531,7 @@ class _TestNativeRuntimeClient(NativeRuntimeClient):
         name = _test_transport_name(transport_id)
         listener = NativeTransportListener(
             SimpleNamespace(),
-            SimpleNamespace(name=name),
+            _test_transport_provider(name),
             _test_transport_endpoint(name),
             NativeHandle(HANDLE_KIND_TRANSPORT_LISTENER, 801, 1, 0),
         )
@@ -1543,7 +1552,7 @@ def test_native_transport_connection_transfers_ownership_only_after_client_role_
     role_library = FakeRuntimeLibrary()
     carrier = NativeTransportConnection(
         transport_entrypoints,
-        SimpleNamespace(name="tcp"),
+        _test_transport_provider("tcp"),
         _test_transport_endpoint("tcp"),
         NativeHandle(HANDLE_KIND_TRANSPORT_CONNECTION, 800, 1, 0),
     )
@@ -1569,7 +1578,7 @@ def test_native_transport_connection_transfers_ownership_only_after_client_role_
 def test_native_transport_binding_adopts_only_its_own_client_carrier() -> None:
     transport_entrypoints = SimpleNamespace(close=FakeFunction(NativeStatus.ok().to_ffi()))
     role_entrypoints = NativeRuntimeEntrypoints(FakeRuntimeLibrary())
-    provider = SimpleNamespace(name="tcp", transport_slots=("tcp",))
+    provider = _test_transport_provider("tcp")
     binding = NativeTransportBinding(transport_entrypoints, provider, role_entrypoints)
     carrier = NativeTransportConnection(
         transport_entrypoints,
@@ -1593,7 +1602,7 @@ def test_native_transport_binding_adopts_only_its_own_client_carrier() -> None:
 
 def test_native_transport_binding_requires_client_role_entrypoints() -> None:
     transport_entrypoints = SimpleNamespace(close=FakeFunction(NativeStatus.ok().to_ffi()))
-    provider = SimpleNamespace(name="tcp", transport_slots=("tcp",))
+    provider = _test_transport_provider("tcp")
     binding = NativeTransportBinding(transport_entrypoints, provider)
     carrier = NativeTransportConnection(
         transport_entrypoints,
@@ -1631,7 +1640,7 @@ def test_native_transport_connection_remains_owned_when_client_role_adoption_fai
     role_library = FakeRuntimeLibrary(status=_NnrpFfiStatus(FFI_STATUS_INTERNAL_ERROR, 0, 0, 0))
     carrier = NativeTransportConnection(
         transport_entrypoints,
-        SimpleNamespace(name="tcp"),
+        _test_transport_provider("tcp"),
         _test_transport_endpoint("tcp"),
         NativeHandle(HANDLE_KIND_TRANSPORT_CONNECTION, 800, 1, 0),
     )
@@ -1653,7 +1662,7 @@ def test_native_transport_listener_transfers_ownership_only_after_server_role_ad
     role_library = FakeRuntimeLibrary()
     listener = NativeTransportListener(
         transport_entrypoints,
-        SimpleNamespace(name="ipc"),
+        _test_transport_provider("ipc"),
         _test_transport_endpoint("ipc"),
         NativeHandle(HANDLE_KIND_TRANSPORT_LISTENER, 801, 1, 0),
     )
@@ -1680,7 +1689,7 @@ def test_native_transport_listener_transfers_ownership_only_after_server_role_ad
 def test_native_transport_binding_adopts_only_its_own_server_listener() -> None:
     transport_entrypoints = SimpleNamespace(close=FakeFunction(NativeStatus.ok().to_ffi()))
     role_entrypoints = NativeRuntimeEntrypoints(FakeRuntimeLibrary())
-    provider = SimpleNamespace(name="ipc", transport_slots=("ipc",))
+    provider = _test_transport_provider("ipc")
     binding = NativeTransportBinding(transport_entrypoints, provider, role_entrypoints)
     listener = NativeTransportListener(
         transport_entrypoints,
@@ -1714,7 +1723,7 @@ def test_native_transport_binding_adopts_only_its_own_server_listener() -> None:
 
 def test_native_transport_binding_requires_server_role_entrypoints() -> None:
     transport_entrypoints = SimpleNamespace(close=FakeFunction(NativeStatus.ok().to_ffi()))
-    provider = SimpleNamespace(name="ipc", transport_slots=("ipc",))
+    provider = _test_transport_provider("ipc")
     binding = NativeTransportBinding(transport_entrypoints, provider)
     listener = NativeTransportListener(
         transport_entrypoints,
@@ -1737,7 +1746,7 @@ def test_native_transport_listener_remains_owned_when_server_role_adoption_fails
     role_library = FakeRuntimeLibrary(status=_NnrpFfiStatus(FFI_STATUS_INTERNAL_ERROR, 0, 0, 0))
     listener = NativeTransportListener(
         transport_entrypoints,
-        SimpleNamespace(name="ipc"),
+        _test_transport_provider("ipc"),
         _test_transport_endpoint("ipc"),
         NativeHandle(HANDLE_KIND_TRANSPORT_LISTENER, 801, 1, 0),
     )
@@ -1760,7 +1769,7 @@ def test_native_server_policy_callback_receives_exact_session_open_metadata() ->
     role_library = FakeRuntimeLibrary()
     listener = NativeTransportListener(
         transport_entrypoints,
-        SimpleNamespace(name="ipc"),
+        _test_transport_provider("ipc"),
         _test_transport_endpoint("ipc"),
         NativeHandle(HANDLE_KIND_TRANSPORT_LISTENER, 801, 1, 0),
     )
@@ -1822,7 +1831,7 @@ def test_native_server_policy_callback_rejects_application_exceptions() -> None:
     role_library = FakeRuntimeLibrary()
     listener = NativeTransportListener(
         transport_entrypoints,
-        SimpleNamespace(name="ipc"),
+        _test_transport_provider("ipc"),
         _test_transport_endpoint("ipc"),
         NativeHandle(HANDLE_KIND_TRANSPORT_LISTENER, 801, 1, 0),
     )
@@ -1860,7 +1869,7 @@ def test_native_server_policy_dispatcher_rejects_invalid_metadata_and_stopped_ex
     role_library = FakeRuntimeLibrary()
     listener = NativeTransportListener(
         transport_entrypoints,
-        SimpleNamespace(name="ipc"),
+        _test_transport_provider("ipc"),
         _test_transport_endpoint("ipc"),
         NativeHandle(HANDLE_KIND_TRANSPORT_LISTENER, 801, 1, 0),
     )
@@ -1910,7 +1919,7 @@ def test_native_server_policy_worker_does_not_convert_fatal_exception_to_rejecti
     role_library = FakeRuntimeLibrary()
     listener = NativeTransportListener(
         transport_entrypoints,
-        SimpleNamespace(name="ipc"),
+        _test_transport_provider("ipc"),
         _test_transport_endpoint("ipc"),
         NativeHandle(HANDLE_KIND_TRANSPORT_LISTENER, 801, 1, 0),
     )
@@ -1945,7 +1954,7 @@ def test_native_server_policy_completion_failure_surfaces_from_server_close() ->
     role_library = FakeRuntimeLibrary()
     listener = NativeTransportListener(
         transport_entrypoints,
-        SimpleNamespace(name="ipc"),
+        _test_transport_provider("ipc"),
         _test_transport_endpoint("ipc"),
         NativeHandle(HANDLE_KIND_TRANSPORT_LISTENER, 801, 1, 0),
     )
@@ -1980,7 +1989,7 @@ def test_native_server_close_preserves_policy_failure_when_ticket_release_also_f
     )
     listener = NativeTransportListener(
         transport_entrypoints,
-        SimpleNamespace(name="ipc"),
+        _test_transport_provider("ipc"),
         _test_transport_endpoint("ipc"),
         NativeHandle(HANDLE_KIND_TRANSPORT_LISTENER, 801, 1, 0),
     )
@@ -2026,7 +2035,7 @@ def test_native_server_close_waits_for_pending_policy_completion() -> None:
     role_library = FakeRuntimeLibrary()
     listener = NativeTransportListener(
         transport_entrypoints,
-        SimpleNamespace(name="ipc"),
+        _test_transport_provider("ipc"),
         _test_transport_endpoint("ipc"),
         NativeHandle(HANDLE_KIND_TRANSPORT_LISTENER, 801, 1, 0),
     )
@@ -2071,7 +2080,7 @@ def test_native_server_bind_failure_closes_policy_dispatcher() -> None:
     role_library.nnrp_server_bind.handler = lambda _request, _output: _NnrpFfiStatus(FFI_STATUS_INVALID_STATE, 0, 0, 0)
     listener = NativeTransportListener(
         transport_entrypoints,
-        SimpleNamespace(name="ipc"),
+        _test_transport_provider("ipc"),
         _test_transport_endpoint("ipc"),
         NativeHandle(HANDLE_KIND_TRANSPORT_LISTENER, 801, 1, 0),
     )
@@ -2191,6 +2200,7 @@ def _write_provider_artifact(root: Path, scope: str, *, slots: list[str] | None 
         json.dumps(
             {
                 "package": f"nnrp-ffi-transport-{scope}",
+                "abi_version": "4.4.0",
                 "transport_scope": scope,
                 "transport_slots": slots or [scope],
                 "enabled_features": [f"transport-{scope}"],
@@ -2239,6 +2249,7 @@ def _provider_metadata(scope: str) -> native_module.NativeTransportProviderMetad
 def _provider_artifact_manifest(scope: str) -> dict[str, object]:
     return {
         "package": f"nnrp-ffi-transport-{scope}",
+        "abi_version": "4.4.0",
         "transport_scope": scope,
         "transport_slots": [scope],
         "enabled_features": [f"transport-{scope}"],
@@ -2257,8 +2268,8 @@ def _probe_sample(
     failed: bool = False,
 ) -> NativeTransportProbeSample:
     return NativeTransportProbeSample(
+        transport_id=native_module.NATIVE_TRANSPORT_ID_BY_NAME[scope],
         provider_id=str(_provider_manifest(scope)["id"]),
-        transport_name=scope,
         elapsed_us=elapsed_us,
         rtt_us=rtt_us,
         bytes_sent=bytes_sent,
@@ -2284,7 +2295,7 @@ def _probe_observations(
         matching = [
             sample
             for sample in samples
-            if sample.provider_id == provider.metadata.id and sample.transport_name == provider.name
+            if sample.provider_id == provider.metadata.id and sample.transport_name == provider.transport_name
         ]
         if not matching:
             continue
@@ -2294,6 +2305,36 @@ def _probe_observations(
         else:
             observations.append(native_module.NativeTransportProbeObservation.succeeded(provider, metrics))
     return observations
+
+
+def _select_transport(
+    policy: TransportPolicy = TransportPolicy.AUTO,
+    *,
+    root: Path,
+    native_platform: NativePlatform,
+    supported_transports: tuple[TransportId, ...] | None = None,
+    requested_max_frame_bytes: int | None = None,
+    candidate_readiness: list[native_module.NativeTransportCandidateReadiness] | None = None,
+    probe_observations: list[native_module.NativeTransportProbeObservation] | None = None,
+) -> native_module.NativeTransportSelection:
+    providers = discover_native_transport_providers(root, native_platform)
+    peer_supported_transports = supported_transports
+    if peer_supported_transports is None:
+        peer_supported_transports = tuple(provider.transport_id for provider in providers)
+    readiness = candidate_readiness
+    if readiness is None:
+        readiness = [native_module.NativeTransportCandidateReadiness.ready(provider) for provider in providers]
+    return select_native_transport_provider(
+        native_module.NativeTransportSelectionOptions(
+            peer_supported_transports=peer_supported_transports,
+            policy=policy,
+            requested_max_frame_bytes=requested_max_frame_bytes,
+            candidate_readiness=tuple(readiness),
+            probe_observations=tuple(probe_observations or ()),
+        ),
+        root=root,
+        native_platform=native_platform,
+    )
 
 
 def _write_provider_artifact_with_manifest(root: Path, scope: str, manifest: object) -> Path:
@@ -2314,39 +2355,81 @@ def test_discover_native_transport_providers_reports_preview4_artifact_metadata(
 
     assert providers == (
         NativeTransportProvider(
-            name="tcp",
-            artifact_path=tcp_artifact,
-            manifest_path=tcp_artifact.with_name("manifest.json"),
-            transport_slots=("tcp",),
-            enabled_features=("transport-tcp",),
-            package="nnrp-ffi-transport-tcp",
-            transport_scope="tcp",
-            platform_tag="linux-x86_64",
+            name="nnrp-ffi-transport-tcp",
+            version="4.4.0",
+            transport_id=TransportId.TCP,
+            kind=native_module.NativeTransportProviderKind.NATIVE_DYNAMIC,
+            available=True,
+            library_path=str(tcp_artifact),
             metadata=_provider_metadata("tcp"),
         ),
         NativeTransportProvider(
-            name="ipc",
-            artifact_path=ipc_artifact,
-            manifest_path=ipc_artifact.with_name("manifest.json"),
-            transport_slots=("ipc",),
-            enabled_features=("transport-ipc",),
-            package="nnrp-ffi-transport-ipc",
-            transport_scope="ipc",
-            platform_tag="linux-x86_64",
+            name="nnrp-ffi-transport-ipc",
+            version="4.4.0",
+            transport_id=TransportId.IPC,
+            kind=native_module.NativeTransportProviderKind.NATIVE_DYNAMIC,
+            available=True,
+            library_path=str(ipc_artifact),
             metadata=_provider_metadata("ipc"),
         ),
         NativeTransportProvider(
-            name="websocket",
-            artifact_path=websocket_artifact,
-            manifest_path=websocket_artifact.with_name("manifest.json"),
-            transport_slots=("websocket",),
-            enabled_features=("transport-websocket",),
-            package="nnrp-ffi-transport-websocket",
-            transport_scope="websocket",
-            platform_tag="linux-x86_64",
+            name="nnrp-ffi-transport-websocket",
+            version="4.4.0",
+            transport_id=TransportId.WEBSOCKET,
+            kind=native_module.NativeTransportProviderKind.NATIVE_DYNAMIC,
+            available=True,
+            library_path=str(websocket_artifact),
             metadata=_provider_metadata("websocket"),
         ),
     )
+
+
+@pytest.mark.parametrize(
+    ("override", "match"),
+    [
+        ({"name": ""}, "name must be a non-empty string"),
+        ({"version": ""}, "version must be a non-empty string"),
+        ({"transport_id": TransportId.UNSPECIFIED}, "transport_id must identify a selectable transport"),
+        ({"kind": "native-dynamic"}, "kind must be a NativeTransportProviderKind"),
+        ({"available": 1}, "available must be a bool"),
+        ({"library_path": Path("provider.so")}, "library_path must be a string or None"),
+        ({"metadata": object()}, "metadata must be a NativeTransportProviderMetadata"),
+        ({"diagnostic": 1}, "diagnostic must be a string or None"),
+    ],
+)
+def test_native_transport_provider_rejects_invalid_frozen_descriptor_fields(
+    override: dict[str, Any],
+    match: str,
+) -> None:
+    values: dict[str, Any] = {
+        "name": "nnrp-ffi-transport-tcp",
+        "version": "4.4.0",
+        "transport_id": TransportId.TCP,
+        "kind": native_module.NativeTransportProviderKind.NATIVE_DYNAMIC,
+        "available": True,
+        "library_path": "libnnrp_ffi.so",
+        "metadata": _provider_metadata("tcp"),
+        "diagnostic": None,
+    }
+    values.update(override)
+
+    with pytest.raises(ValueError, match=match):
+        NativeTransportProvider(**values)
+
+
+def test_native_transport_provider_name_is_not_the_transport_identity() -> None:
+    provider = NativeTransportProvider(
+        name="provider-package-with-an-independent-name",
+        version="4.4.0",
+        transport_id=TransportId.TCP,
+        kind=native_module.NativeTransportProviderKind.NATIVE_DYNAMIC,
+        available=True,
+        library_path="libnnrp_ffi.so",
+        metadata=_provider_metadata("tcp"),
+    )
+
+    assert provider.name == "provider-package-with-an-independent-name"
+    assert provider.transport_name == "tcp"
 
 
 def test_discover_native_transport_provider_ignores_removed_aggregate_artifact(tmp_path: Path) -> None:
@@ -2370,7 +2453,7 @@ def test_resolve_native_transport_provider_rejects_unadvertised_provider(tmp_pat
         native_platform=NativePlatform("linux", "x86_64"),
     )
 
-    assert provider.name == "tcp"
+    assert provider.transport_name == "tcp"
     with pytest.raises(NativeArtifactError, match="not advertised"):
         resolve_native_transport_provider("ipc", root=tmp_path, native_platform=NativePlatform("linux", "x86_64"))
 
@@ -2600,7 +2683,7 @@ def test_diagnose_nnrp_endpoint_support_selects_installed_provider(tmp_path: Pat
     )
     assert support.available is True
     assert support.selection is not None
-    assert support.selection.selected_provider.artifact_path == tcp_artifact
+    assert support.selection.selected_provider.library_path == str(tcp_artifact)
     assert support.selection.selected_transport_id is TransportId.TCP
     assert support.diagnostic == "NNRP endpoint nnrps://runtime.example/session/default selected tcp carrier"
 
@@ -2650,14 +2733,12 @@ def test_diagnose_native_transport_endpoint_support_reports_available_provider(t
             secure=True,
         ),
         provider=NativeTransportProvider(
-            name="websocket",
-            artifact_path=websocket_artifact,
-            manifest_path=websocket_artifact.with_name("manifest.json"),
-            transport_slots=("websocket",),
-            enabled_features=("transport-websocket",),
-            package="nnrp-ffi-transport-websocket",
-            transport_scope="websocket",
-            platform_tag="linux-x86_64",
+            name="nnrp-ffi-transport-websocket",
+            version="4.4.0",
+            transport_id=TransportId.WEBSOCKET,
+            kind=native_module.NativeTransportProviderKind.NATIVE_DYNAMIC,
+            available=True,
+            library_path=str(websocket_artifact),
             metadata=_provider_metadata("websocket"),
         ),
         available=True,
@@ -2695,13 +2776,12 @@ def test_diagnose_native_transport_endpoint_support_skips_missing_provider(
 def test_select_native_transport_provider_selects_single_installed_transport(tmp_path: Path) -> None:
     tcp_artifact = _write_provider_artifact(tmp_path, "tcp")
 
-    selection = select_native_transport_provider(
+    selection = _select_transport(
         root=tmp_path,
         native_platform=NativePlatform("linux", "x86_64"),
-        candidate_readiness=_candidate_readiness(tmp_path),
     )
 
-    assert selection.selected_provider.artifact_path == tcp_artifact
+    assert selection.selected_provider.library_path == str(tcp_artifact)
     assert selection.selected_transport_name == "tcp"
     assert selection.selected_transport_id is TransportId.TCP
     assert selection.policy is TransportPolicy.AUTO
@@ -2717,24 +2797,21 @@ def test_select_native_transport_provider_applies_preview4_policy_order(tmp_path
     _write_provider_artifact(tmp_path, "websocket")
 
     samples = [_probe_sample(scope) for scope in ("tcp", "quic", "ipc", "websocket")]
-    auto = select_native_transport_provider(
+    auto = _select_transport(
         root=tmp_path,
         native_platform=NativePlatform("linux", "x86_64"),
-        candidate_readiness=_candidate_readiness(tmp_path),
         probe_observations=_probe_observations(tmp_path, samples),
     )
-    preferred_websocket = select_native_transport_provider(
+    preferred_websocket = _select_transport(
         TransportPolicy.PREFER_WEBSOCKET,
         root=tmp_path,
         native_platform=NativePlatform("linux", "x86_64"),
-        candidate_readiness=_candidate_readiness(tmp_path),
         probe_observations=_probe_observations(tmp_path, samples),
     )
-    preferred_tcp = select_native_transport_provider(
-        "prefer-tcp",
+    preferred_tcp = _select_transport(
+        TransportPolicy.PREFER_TCP,
         root=tmp_path,
         native_platform=NativePlatform("linux", "x86_64"),
-        candidate_readiness=_candidate_readiness(tmp_path),
         probe_observations=_probe_observations(tmp_path, samples),
     )
 
@@ -2746,13 +2823,17 @@ def test_select_native_transport_provider_applies_preview4_policy_order(tmp_path
 def test_select_native_transport_provider_rejects_missing_forced_transport(tmp_path: Path) -> None:
     _write_provider_artifact(tmp_path, "tcp")
 
-    with pytest.raises(NativeArtifactError, match="forced native transport is not available: ipc"):
-        select_native_transport_provider(
+    with pytest.raises(
+        native_module.NativeTransportSelectionError,
+        match="forced native transport is not available: ipc",
+    ) as caught:
+        _select_transport(
             TransportPolicy.FORCE_IPC,
             root=tmp_path,
             native_platform=NativePlatform("linux", "x86_64"),
-            candidate_readiness=_candidate_readiness(tmp_path),
         )
+
+    assert caught.value.transport_id is TransportId.IPC
 
 
 def test_select_native_transport_provider_reports_forced_transport_rejection(tmp_path: Path) -> None:
@@ -2762,69 +2843,124 @@ def test_select_native_transport_provider_reports_forced_transport_rejection(tmp
         NativeArtifactError,
         match="forced native transport tcp rejected: peer-unsupported",
     ) as caught:
-        select_native_transport_provider(
+        _select_transport(
             TransportPolicy.FORCE_TCP,
             root=tmp_path,
             native_platform=NativePlatform("linux", "x86_64"),
             supported_transports=(TransportId.QUIC,),
-            candidate_readiness=_candidate_readiness(tmp_path),
         )
 
     assert caught.value.candidates[0].rejection_reason is (
         native_module.NativeTransportRejectionReason.PEER_UNSUPPORTED
     )
+    assert caught.value.transport_id is TransportId.TCP
 
 
 def test_select_native_transport_provider_rejects_empty_provider_registry(tmp_path: Path) -> None:
     with pytest.raises(NativeArtifactError, match="no viable native transport provider"):
-        select_native_transport_provider(
+        _select_transport(
             root=tmp_path,
             native_platform=NativePlatform("linux", "x86_64"),
-            candidate_readiness=[],
         )
 
 
-def test_select_native_transport_provider_accepts_integer_and_auto_string_policy(tmp_path: Path) -> None:
-    _write_provider_artifact(tmp_path, "websocket")
-
-    auto = select_native_transport_provider(
-        "auto",
-        root=tmp_path,
-        native_platform=NativePlatform("linux", "x86_64"),
-        candidate_readiness=_candidate_readiness(tmp_path),
-    )
-    forced = select_native_transport_provider(
-        int(TransportPolicy.FORCE_WEBSOCKET),
-        root=tmp_path,
-        native_platform=NativePlatform("linux", "x86_64"),
-        candidate_readiness=_candidate_readiness(tmp_path),
-    )
-
-    assert auto.selected_transport_id is TransportId.WEBSOCKET
-    assert forced.selected_transport_id is TransportId.WEBSOCKET
+def test_native_transport_selection_options_rejects_non_enum_policy() -> None:
+    with pytest.raises(ValueError, match="policy must be a TransportPolicy"):
+        native_module.NativeTransportSelectionOptions(
+            peer_supported_transports=(TransportId.TCP,),
+            policy="auto",  # type: ignore[arg-type]
+            requested_max_frame_bytes=None,
+            candidate_readiness=(),
+            probe_observations=(),
+        )
 
 
-def test_select_native_transport_provider_rejects_invalid_policy(tmp_path: Path) -> None:
+def test_native_transport_selection_options_rejects_bare_integer_transport_id() -> None:
+    with pytest.raises(ValueError, match="selectable transport IDs"):
+        native_module.NativeTransportSelectionOptions(
+            peer_supported_transports=(int(TransportId.TCP),),  # type: ignore[arg-type]
+            policy=TransportPolicy.AUTO,
+            requested_max_frame_bytes=None,
+            candidate_readiness=(),
+            probe_observations=(),
+        )
+
+
+@pytest.mark.parametrize(
+    ("candidate_readiness", "probe_observations", "match"),
+    [
+        ((object(),), (), "candidate_readiness must contain"),
+        ((), (object(),), "probe_observations must contain"),
+    ],
+)
+def test_native_transport_selection_options_rejects_untyped_evidence(
+    candidate_readiness: tuple[object, ...],
+    probe_observations: tuple[object, ...],
+    match: str,
+) -> None:
+    with pytest.raises(ValueError, match=match):
+        native_module.NativeTransportSelectionOptions(
+            peer_supported_transports=(TransportId.TCP,),
+            policy=TransportPolicy.AUTO,
+            requested_max_frame_bytes=None,
+            candidate_readiness=candidate_readiness,  # type: ignore[arg-type]
+            probe_observations=probe_observations,  # type: ignore[arg-type]
+        )
+
+
+@pytest.mark.parametrize(
+    ("override", "match"),
+    [
+        ({"code": "invalid-evidence"}, "code must be a NativeTransportSelectionErrorCode"),
+        ({"policy": "auto"}, "policy must be a TransportPolicy or None"),
+        ({"transport_id": TransportId.UNSPECIFIED}, "transport_id must identify a selectable transport or be None"),
+        ({"candidates": []}, "candidates must contain NativeTransportCandidateDiagnostic values"),
+        ({"diagnostic": object()}, "diagnostic must be a string"),
+    ],
+)
+def test_native_transport_selection_error_rejects_untyped_frozen_fields(
+    override: dict[str, Any],
+    match: str,
+) -> None:
+    values: dict[str, Any] = {
+        "code": native_module.NativeTransportSelectionErrorCode.INVALID_EVIDENCE,
+        "diagnostic": "invalid evidence",
+        "policy": TransportPolicy.AUTO,
+        "transport_id": None,
+        "candidates": (),
+    }
+    values.update(override)
+
+    with pytest.raises(ValueError, match=match):
+        native_module.NativeTransportSelectionError(**values)
+
+
+def test_native_transport_selection_accepts_zero_frame_request_and_duplicate_peer_ids(
+    tmp_path: Path,
+) -> None:
     _write_provider_artifact(tmp_path, "tcp")
 
-    with pytest.raises(NativeArtifactError, match="unsupported native transport policy"):
-        select_native_transport_provider(
-            "prefer-stdio",
-            root=tmp_path,
-            native_platform=NativePlatform("linux", "x86_64"),
-            candidate_readiness=_candidate_readiness(tmp_path),
-        )
+    selection = _select_transport(
+        root=tmp_path,
+        native_platform=NativePlatform("linux", "x86_64"),
+        supported_transports=(TransportId.TCP, TransportId.TCP),
+        requested_max_frame_bytes=0,
+    )
+
+    assert selection.selected_transport_id is TransportId.TCP
+    assert selection.candidates[0].within_limits is True
 
 
 def test_select_native_transport_provider_rejects_unspecified_supported_transport(tmp_path: Path) -> None:
     _write_provider_artifact(tmp_path, "tcp")
 
-    with pytest.raises(NativeArtifactError, match="unsupported native transport id"):
-        select_native_transport_provider(
-            root=tmp_path,
-            native_platform=NativePlatform("linux", "x86_64"),
-            supported_transports=(TransportId.UNSPECIFIED,),
-            candidate_readiness=_candidate_readiness(tmp_path),
+    with pytest.raises(ValueError, match="selectable transport IDs"):
+        native_module.NativeTransportSelectionOptions(
+            peer_supported_transports=(TransportId.UNSPECIFIED,),
+            policy=TransportPolicy.AUTO,
+            requested_max_frame_bytes=None,
+            candidate_readiness=tuple(_candidate_readiness(tmp_path)),
+            probe_observations=(),
         )
 
 
@@ -2833,11 +2969,10 @@ def test_select_native_transport_provider_reports_remote_unsupported_transport(t
     _write_provider_artifact(tmp_path, "ipc")
     _write_provider_artifact(tmp_path, "quic")
 
-    selection = select_native_transport_provider(
+    selection = _select_transport(
         root=tmp_path,
         native_platform=NativePlatform("linux", "x86_64"),
         supported_transports=(TransportId.TCP, TransportId.QUIC),
-        candidate_readiness=_candidate_readiness(tmp_path),
         probe_observations=_probe_observations(
             tmp_path,
             [_probe_sample("tcp"), _probe_sample("quic")],
@@ -2880,10 +3015,9 @@ def test_select_native_transport_provider_uses_deterministic_probe_metrics(tmp_p
             failed=True,
         ),
     ]
-    selection = select_native_transport_provider(
+    selection = _select_transport(
         root=tmp_path,
         native_platform=NativePlatform("linux", "x86_64"),
-        candidate_readiness=_candidate_readiness(tmp_path),
         probe_observations=_probe_observations(tmp_path, samples),
     )
 
@@ -2900,10 +3034,9 @@ def test_select_native_transport_provider_requires_probe_observations_for_probe_
     _write_provider_artifact(tmp_path, "quic")
 
     with pytest.raises(NativeArtifactError, match="no viable native transport provider") as caught:
-        select_native_transport_provider(
+        _select_transport(
             root=tmp_path,
             native_platform=NativePlatform("linux", "x86_64"),
-            candidate_readiness=_candidate_readiness(tmp_path),
             probe_observations=[],
         )
     assert all(
@@ -2918,12 +3051,12 @@ def test_select_native_transport_provider_distinguishes_failed_and_missing_probe
     _write_provider_artifact(tmp_path, "tcp")
     _write_provider_artifact(tmp_path, "quic")
     providers = discover_native_transport_providers(tmp_path, NativePlatform("linux", "x86_64"))
-    tcp = next(provider for provider in providers if provider.name == "tcp")
-    quic = next(provider for provider in providers if provider.name == "quic")
+    tcp = next(provider for provider in providers if provider.transport_name == "tcp")
+    quic = next(provider for provider in providers if provider.transport_name == "quic")
     quic_metrics = native_module.summarize_native_provider_probe(quic, [_probe_sample("quic")])
     assert quic_metrics is not None
 
-    selection = select_native_transport_provider(
+    selection = _select_transport(
         root=tmp_path,
         native_platform=NativePlatform("linux", "x86_64"),
         candidate_readiness=[native_module.NativeTransportCandidateReadiness.ready(provider) for provider in providers],
@@ -2976,7 +3109,7 @@ def test_select_native_transport_provider_rejects_invalid_evidence(
             observations *= 2
 
     with pytest.raises(native_module.NativeTransportSelectionError) as caught:
-        select_native_transport_provider(
+        _select_transport(
             root=tmp_path,
             native_platform=NativePlatform("linux", "x86_64"),
             candidate_readiness=readiness,
@@ -3068,7 +3201,7 @@ def test_select_native_transport_provider_applies_candidate_readiness(
     provider = discover_native_transport_providers(tmp_path, NativePlatform("linux", "x86_64"))[0]
 
     with pytest.raises(native_module.NativeTransportSelectionError) as caught:
-        select_native_transport_provider(
+        _select_transport(
             root=tmp_path,
             native_platform=NativePlatform("linux", "x86_64"),
             candidate_readiness=[readiness_factory(provider)],
@@ -3109,11 +3242,10 @@ def test_select_native_transport_provider_enforces_requested_frame_limit(tmp_pat
     _write_provider_artifact(tmp_path, "tcp")
 
     with pytest.raises(NativeArtifactError, match="no viable native transport provider") as caught:
-        select_native_transport_provider(
+        _select_transport(
             root=tmp_path,
             native_platform=NativePlatform("linux", "x86_64"),
             requested_max_frame_bytes=67108865,
-            candidate_readiness=_candidate_readiness(tmp_path),
         )
 
     assert len(caught.value.candidates) == 1
@@ -3126,11 +3258,12 @@ def test_select_native_transport_provider_rejects_invalid_requested_frame_limit(
     _write_provider_artifact(tmp_path, "tcp")
 
     with pytest.raises(ValueError, match="requested_max_frame_bytes"):
-        select_native_transport_provider(
-            root=tmp_path,
-            native_platform=NativePlatform("linux", "x86_64"),
+        native_module.NativeTransportSelectionOptions(
+            peer_supported_transports=(TransportId.TCP,),
+            policy=TransportPolicy.AUTO,
             requested_max_frame_bytes=True,
-            candidate_readiness=_candidate_readiness(tmp_path),
+            candidate_readiness=tuple(_candidate_readiness(tmp_path)),
+            probe_observations=(),
         )
 
 
@@ -3168,10 +3301,9 @@ def test_select_native_transport_provider_compares_shared_cost_model_before_pref
     _write_provider_artifact_with_manifest(tmp_path, "ipc", ipc_manifest)
 
     samples = [_probe_sample("tcp"), _probe_sample("ipc")]
-    selection = select_native_transport_provider(
+    selection = _select_transport(
         root=tmp_path,
         native_platform=NativePlatform("linux", "x86_64"),
-        candidate_readiness=_candidate_readiness(tmp_path),
         probe_observations=_probe_observations(tmp_path, samples),
     )
 
@@ -3217,16 +3349,16 @@ def test_select_native_transport_provider_compares_shared_cost_model_before_pref
         ),
         (
             lambda: NativeTransportProbeSample(
+                transport_id=TransportId.TCP,
                 provider_id="",
-                transport_name="tcp",
                 elapsed_us=1,
             ),
             "provider_id",
         ),
         (
             lambda: NativeTransportProbeSample(
+                transport_id=TransportId.TCP,
                 provider_id="provider-\u8f93\u5165",
-                transport_name="tcp",
                 elapsed_us=1,
             ),
             "provider_id",
@@ -3250,11 +3382,11 @@ def test_select_native_transport_provider_compares_shared_cost_model_before_pref
         ),
         (
             lambda: NativeTransportProbeSample(
+                transport_id=TransportId.UNSPECIFIED,
                 provider_id="provider",
-                transport_name="auto",
                 elapsed_us=1,
             ),
-            "transport_name",
+            "transport_id",
         ),
     ],
 )
@@ -3496,7 +3628,7 @@ def test_load_native_transport_binding_registers_runtime_shutdown(
 ) -> None:
     artifact = tmp_path / "nnrp_ffi.dll"
     artifact.write_bytes(b"fake")
-    provider = SimpleNamespace(name="tcp", artifact_path=artifact)
+    provider = _test_transport_provider("tcp", artifact)
     library = object()
     registrations: list[tuple[object, Path]] = []
 

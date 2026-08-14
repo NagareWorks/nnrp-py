@@ -17,6 +17,7 @@ from nnrp.native import (
     NativeTransportCandidateDiagnostic,
     NativeTransportProbeState,
     NativeTransportProvider,
+    NativeTransportProviderKind,
     NativeTransportRejectionReason,
     NativeTransportSelectionError,
     NativeTransportSelectionErrorCode,
@@ -49,7 +50,6 @@ def candidate(
     if provider_id is not None:
         metadata = replace(metadata, id=provider_id)
     return NativeTransportCandidateDiagnostic(
-        transport_name=transport,
         transport_id=NATIVE_TRANSPORT_ID_BY_NAME[transport],
         provider=metadata,
         local_available=rejection is not NativeTransportRejectionReason.LOCAL_UNAVAILABLE,
@@ -62,14 +62,12 @@ def candidate(
 
 def provider(transport: str, tmp_path: Path) -> NativeTransportProvider:
     return NativeTransportProvider(
-        name=transport,
-        artifact_path=tmp_path / "libnnrp_ffi",
-        manifest_path=tmp_path / "manifest.json",
-        transport_slots=(transport,),
-        enabled_features=(),
-        package=f"nnrp-ffi-transport-{transport}",
-        transport_scope=transport,
-        platform_tag="test-x86_64",
+        name=f"nnrp-ffi-transport-{transport}",
+        version="4.4.0",
+        transport_id=NATIVE_TRANSPORT_ID_BY_NAME[transport],
+        kind=NativeTransportProviderKind.NATIVE_DYNAMIC,
+        available=True,
+        library_path=str(tmp_path / "libnnrp_ffi"),
         metadata=official_provider_metadata(transport),
     )
 

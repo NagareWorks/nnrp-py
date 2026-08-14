@@ -111,6 +111,18 @@ def test_stage_artifacts_rejects_missing_transport(tmp_path: Path) -> None:
         module.stage_artifacts(tmp_path, tmp_path / "output", "1.0.0-preview.4.22")
 
 
+@pytest.mark.parametrize("checksum_count", [0, 2])
+def test_stage_artifacts_requires_exactly_one_checksum_manifest(tmp_path: Path, checksum_count: int) -> None:
+    module = load_module()
+    for index in range(checksum_count):
+        manifest_dir = tmp_path / f"manifest-{index}"
+        manifest_dir.mkdir()
+        (manifest_dir / "SHA256SUMS").write_text("", encoding="utf-8")
+
+    with pytest.raises(FileNotFoundError, match=rf"expected one SHA256SUMS, found {checksum_count}"):
+        module.stage_artifacts(tmp_path, tmp_path / "output", "1.0.0-preview.4.22")
+
+
 def test_stage_artifacts_rejects_missing_or_wrong_checksum(tmp_path: Path) -> None:
     module = load_module()
     version = "1.0.0-preview.4.22"

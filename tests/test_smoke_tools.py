@@ -3,6 +3,7 @@ import contextlib
 import ipaddress
 import socket
 import ssl
+import struct
 import tempfile
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -1934,7 +1935,15 @@ async def _run_tcp_current_invalid_coverage_server_once(
             session_id=session_id,
             frame_id=int(submit_packet.header.frame_id),
         )
-        valid_metadata = ResultPushMetadata.unpack(result_packet.metadata)
+        invalid_metadata = bytearray(result_packet.metadata)
+        coverage_marker = struct.pack("<HH", 0xA55A, 0x5AA5)
+        marked_metadata = ResultPushMetadata.unpack(result_packet.metadata)
+        marked_metadata.covered_tile_count = 0xA55A
+        marked_metadata.dropped_tile_count = 0x5AA5
+        marked_bytes = marked_metadata.pack()
+        coverage_offset = marked_bytes.index(coverage_marker)
+        assert marked_bytes.count(coverage_marker) == 1
+        struct.pack_into("<HH", invalid_metadata, coverage_offset, 1, 1)
         await connection.send_result_packet(
             NnrpPacket.build(
                 version_major=result_packet.header.version_major,
@@ -1946,31 +1955,7 @@ async def _run_tcp_current_invalid_coverage_server_once(
                 view_id=result_packet.header.view_id,
                 route_id=result_packet.header.route_id,
                 trace_id=result_packet.header.trace_id,
-                metadata=ResultPushMetadata(
-                    status_code=valid_metadata.status_code,
-                    result_flags=valid_metadata.result_flags,
-                    section_count=valid_metadata.section_count,
-                    tile_count=valid_metadata.tile_count,
-                    active_profile_id=valid_metadata.active_profile_id,
-                    reserved0=valid_metadata.reserved0,
-                    inference_ms=valid_metadata.inference_ms,
-                    queue_ms=valid_metadata.queue_ms,
-                    server_total_ms=valid_metadata.server_total_ms,
-                    reserved1=valid_metadata.reserved1,
-                    tile_base_id=valid_metadata.tile_base_id,
-                    tile_index_bytes=valid_metadata.tile_index_bytes,
-                    reserved2=valid_metadata.reserved2,
-                    reserved3=valid_metadata.reserved3,
-                    result_class=valid_metadata.result_class,
-                    applied_budget_policy=valid_metadata.applied_budget_policy,
-                    reserved4=valid_metadata.reserved4,
-                    reused_frame_id=valid_metadata.reused_frame_id,
-                    covered_tile_count=1,
-                    dropped_tile_count=1,
-                    payload_kind_bitmap=valid_metadata.payload_kind_bitmap,
-                    payload_frame_count=valid_metadata.payload_frame_count,
-                    reserved5=valid_metadata.reserved5,
-                ).pack(),
+                metadata=bytes(invalid_metadata),
                 body=result_packet.body,
             )
         )

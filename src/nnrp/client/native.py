@@ -46,6 +46,7 @@ from nnrp.native import (
     NativeTransportSelection,
     NativeTransportSelectionError,
     NativeTransportSelectionErrorCode,
+    NativeTransportSelectionOptions,
     NativeWouldBlockError,
     NnrpEndpoint,
     _allocate_native_handle_id,
@@ -960,7 +961,7 @@ def _select_client_transport(
         library=library,
     )
     providers = tuple(binding.provider for binding in bindings)
-    providers_by_name = {provider.name: provider for provider in providers}
+    providers_by_name = {provider.transport_name: provider for provider in providers}
     bindings_by_name = {binding.kind: binding for binding in bindings}
     transport_names = set(providers_by_name) | set(normalized_routes) | {"tcp", "quic"}
     forced_transport = forced_transport_name(policy)
@@ -970,37 +971,37 @@ def _select_client_transport(
     peer_supported_transports = {"tcp", "quic"} | set(normalized_routes)
     readiness = tuple(
         NativeTransportCandidateReadiness(
-            transport_id=NATIVE_TRANSPORT_ID_BY_NAME[provider.name],
+            transport_id=provider.transport_id,
             provider_id=provider.metadata.id,
-            route_resolved=routes[provider.name].route_resolved,
-            security_satisfied=routes[provider.name].security_satisfied,
+            route_resolved=routes[provider.transport_name].route_resolved,
+            security_satisfied=routes[provider.transport_name].security_satisfied,
             diagnostic=(
                 "provider route is unresolved"
-                if not routes[provider.name].route_resolved
+                if not routes[provider.transport_name].route_resolved
                 else "provider route does not satisfy application security"
-                if not routes[provider.name].security_satisfied
+                if not routes[provider.transport_name].security_satisfied
                 else None
             ),
         )
         for provider in providers
     )
     eligible_provider_names = {
-        provider.name
+        provider.transport_name
         for provider in providers
-        if bindings_by_name[provider.name].local_available
-        and policy_allows(policy, provider.name)
-        and provider.name in peer_supported_transports
-        and routes[provider.name].route_resolved
-        and routes[provider.name].security_satisfied
+        if bindings_by_name[provider.transport_name].local_available
+        and policy_allows(policy, provider.transport_name)
+        and provider.transport_name in peer_supported_transports
+        and routes[provider.transport_name].route_resolved
+        and routes[provider.transport_name].security_satisfied
     }
     observations: list[NativeTransportProbeObservation] = []
     for provider in providers:
-        if len(eligible_provider_names) <= 1 or provider.name not in eligible_provider_names:
+        if len(eligible_provider_names) <= 1 or provider.transport_name not in eligible_provider_names:
             continue
-        route = routes[provider.name]
+        route = routes[provider.transport_name]
         if route.endpoint is None:
             continue
-        binding = bindings_by_name[provider.name]
+        binding = bindings_by_name[provider.transport_name]
         try:
             metrics = binding._probe(route.endpoint, route.security, 3, 64, 0, 1_000)
         except Exception as error:
@@ -1015,10 +1016,16 @@ def _select_client_transport(
     try:
         selection = _select_native_transport_provider_from_providers(
             providers,
-            policy,
-            supported_transports=tuple(sorted(peer_supported_transports)),
-            candidate_readiness=readiness,
-            probe_observations=observations,
+            NativeTransportSelectionOptions(
+                peer_supported_transports=tuple(
+                    NATIVE_TRANSPORT_ID_BY_NAME[name]
+                    for name in sorted(peer_supported_transports)
+                ),
+                policy=policy,
+                requested_max_frame_bytes=None,
+                candidate_readiness=tuple(readiness),
+                probe_observations=tuple(observations),
+            ),
             provider_availability={binding.provider.metadata.id: binding.local_available for binding in bindings},
             provider_diagnostics={binding.provider.metadata.id: binding.diagnostic for binding in bindings},
         )
@@ -1049,7 +1056,7 @@ def _resolve_client_transport_bindings(
         providers = discover_native_transport_providers(root, native_platform)
         bindings = tuple(
             load_native_transport_binding(
-                provider.name,
+                provider.transport_name,
                 artifact_path=artifact_path,
                 root=root,
                 native_platform=native_platform,

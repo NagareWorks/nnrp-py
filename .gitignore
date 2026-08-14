@@ -13,6 +13,7 @@ artifacts/
 .ruff_cache/
 .tox/
 .venv/
+.venv-*/
 venv/
 build/
 dist/

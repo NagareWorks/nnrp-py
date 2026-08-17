@@ -11,8 +11,10 @@ artifacts/
 .nox/
 .pytest_cache/
 .ruff_cache/
+.uv-cache/
 .tox/
 .venv/
+.venv-*/
 venv/
 build/
 dist/

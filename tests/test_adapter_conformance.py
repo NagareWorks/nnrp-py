@@ -8,6 +8,68 @@ from nnrp.native import FFI_STATUS_INVALID_ARGUMENT, NativeInvalidArgumentError,
 from nnrp.tools import adapter_conformance
 from nnrp.tools.adapter_conformance import build_adapter_case_results_report, main, write_adapter_case_results
 
+_FROZEN_PARAMETERS = {
+    "l0.header.fixed_shape.golden": {
+        "header_hex": "4e4e525001001028210000003000000000100000070000000b0000000200000015cd5b0700000000"
+    },
+    "l0.body_region.prelude.golden": {
+        "metadata_hex": "1800000018000000180000000e00000010000000050000000000000000000000"
+    },
+    "l0.control.client_hello.golden": {
+        "metadata_hex": (
+            "0101010001000000010000000300000003000000210000000300000001000700"
+            "0100020040000000000001007017640002000000000000006000000000000000"
+        )
+    },
+    "l0.control.session_patch_ack.golden": {
+        "metadata_hex": (
+            "010003001100000044000000000000000200000028230000680105000300000000000000010000000300000010000000"
+        )
+    },
+    "l0.flow_update.packet.golden": {
+        "packet_hex": (
+            "4e4e525001001728000000002000000000000000150000000000000000000600"
+            "0d00000000000000010402000000010000000000000000000000000028000000"
+            "0500000003000000"
+        )
+    },
+    "l0.result_hint.packet.golden": {
+        "packet_hex": (
+            "4e4e525001001828000000001000000000000000150000002f01000000000700"
+            "0e000000000000000300000003000000030000003c000000"
+        )
+    },
+    "l0.frame_submit.metadata.golden": {
+        "metadata_hex": (
+            "80026801200020005400020001020000640070170700000000000000c0000000"
+            "00000000000000000807060504030201000000000205ff000300000029000000"
+            "1100000002000000"
+        )
+    },
+    "l0.result_push.metadata.golden": {
+        "metadata_hex": (
+            "0000050001005400020000004b0302004e030000000000001000000000000000"
+            "000000000000000000000000010100002900000035001f000300000003000000"
+        )
+    },
+    "l0.object_reference.block.golden": {"metadata_hex": "020000000700000044332211000000008877665500000000"},
+    "l0.typed_payload.descriptor.golden": {"descriptor_hex": "10000300040000000700000000000000"},
+    "l0.typed_payload.frame_regions.golden": {
+        "descriptor_region_hex": (
+            "0200010000000000030000000000000004000200030000000200000000000000"
+            "08000300050000000500000000000000100004000a0000000300000000000000"
+        ),
+        "payload_hex": "746f6b6175766964656f657674",
+    },
+    "l0.typed_payload.descriptor.current.golden": {
+        "descriptor_hex": "020002020110000003000000020000000800000018000000"
+    },
+}
+
+
+def _case(case_id: str) -> dict[str, object]:
+    return {"id": case_id, "parameters": _FROZEN_PARAMETERS.get(case_id, {})}
+
 
 def _write_plan(tmp_path: Path) -> Path:
     plan_path = tmp_path / "adapter-plan.json"
@@ -75,7 +137,7 @@ def test_build_adapter_case_results_report_executes_supported_cases() -> None:
         "l1.session.open_close",
         "l1.cache.unimplemented",
     ]
-    assert [result["outcome"] for result in report["results"]] == ["pass", "pass", "skip"]
+    assert [result["outcome"] for result in report["results"]] == ["pass", "pass", "fail"]
 
 
 def test_build_adapter_case_results_report_executes_preview4_common_header_golden(tmp_path: Path) -> None:
@@ -84,21 +146,19 @@ def test_build_adapter_case_results_report_executes_preview4_common_header_golde
         {
             "protocol_version": "nnrp-1-preview4",
             "artifacts": {"evidence_dir": str(evidence_dir)},
-            "cases": [{"id": "l0.header.fixed_shape.golden"}],
+            "cases": [_case("l0.header.fixed_shape.golden")],
         }
     )
 
     result = report["results"][0]
     assert result["outcome"] == "pass"
     evidence = json.loads((evidence_dir / "l0-header-fixed_shape-golden.json").read_text())
-    assert evidence["header_hex"] == (
-        "4e4e5250010010282100000003020100060504004433221188776655aa99ccbb0807060504030201"
-    )
-    assert evidence["session_id"] == 0x11223344
-    assert evidence["frame_id"] == 0x55667788
-    assert evidence["view_id"] == 0x99AA
-    assert evidence["route_id"] == 0xBBCC
-    assert evidence["trace_id"] == 0x0102030405060708
+    assert evidence["header_hex"] == _FROZEN_PARAMETERS["l0.header.fixed_shape.golden"]["header_hex"]
+    assert evidence["session_id"] == 7
+    assert evidence["frame_id"] == 11
+    assert evidence["view_id"] == 2
+    assert evidence["route_id"] == 0
+    assert evidence["trace_id"] == 123456789
 
 
 def test_build_adapter_case_results_report_executes_current_typed_payload_golden(tmp_path: Path) -> None:
@@ -107,7 +167,7 @@ def test_build_adapter_case_results_report_executes_current_typed_payload_golden
         {
             "protocol_version": "nnrp-1-preview4",
             "artifacts": {"evidence_dir": str(evidence_dir)},
-            "cases": [{"id": "l0.typed_payload.descriptor.current.golden"}],
+            "cases": [_case("l0.typed_payload.descriptor.current.golden")],
         }
     )
 
@@ -130,6 +190,83 @@ def test_build_adapter_case_results_report_executes_current_typed_payload_golden
     }
 
 
+def test_build_adapter_case_results_report_executes_all_selected_preview4_cases() -> None:
+    case_ids = [
+        "l0.header.fixed_shape.golden",
+        "l0.control.client_hello.golden",
+        "l0.control.session_patch_ack.golden",
+        "l0.flow_update.packet.golden",
+        "l0.result_hint.packet.golden",
+        "l0.frame_submit.metadata.golden",
+        "l0.result_push.metadata.golden",
+        "l0.body_region.prelude.golden",
+        "l0.object_reference.block.golden",
+        "l0.typed_payload.descriptor.golden",
+        "l0.typed_payload.frame_regions.golden",
+        "l1.typed_payload.region.pack",
+        "l1.flow_update.metadata.validation",
+        "l1.result_hint.metadata.validation",
+        "l1.cache.lifecycle.roundtrip",
+        "l1.transport_probe.metadata.roundtrip",
+        "l1.frame_submit.message.parse_emit",
+        "l1.result_push.message.parse_emit",
+        "l1.result_push.object_reference.resolve",
+        "l3.transport.probe.selection",
+        "l3.transport.tcp.session_smoke",
+        "l3.transport.quic.session_smoke",
+        "l0.typed_payload.descriptor.current.golden",
+        "l1.control.cancel-abort",
+        "l1.control.priority-deadline",
+        "l1.control.progress-backpressure",
+        "l1.control.capability-costs",
+        "l1.object.lifecycle",
+        "l1.object.delta",
+        "l1.control.route-execution-hint",
+        "l1.control.cache-reference",
+        "l1.control.degrade-budget",
+    ]
+    report = build_adapter_case_results_report(
+        {
+            "protocol_version": "nnrp-1-preview4",
+            "cases": [_case(case_id) for case_id in case_ids],
+        }
+    )
+
+    assert [result["id"] for result in report["results"]] == case_ids
+    assert [result["outcome"] for result in report["results"]] == ["pass"] * len(case_ids)
+
+
+@pytest.mark.parametrize(
+    ("descriptor", "message"),
+    [
+        (b"short", "must be 16 bytes"),
+        (bytes.fromhex("10010300040000000700000000000000"), "reserved fields"),
+        (bytes.fromhex("03000300040000000700000000000000"), "payload_kind is invalid"),
+    ],
+)
+def test_baseline_descriptor_rejects_malformed_wire_values(descriptor: bytes, message: str) -> None:
+    with pytest.raises(ValueError, match=message):
+        adapter_conformance._BaselineTypedPayloadDescriptor.unpack(descriptor)
+
+
+@pytest.mark.parametrize(
+    ("descriptors", "payload", "message"),
+    [
+        (b"short", b"", "multiple of 16"),
+        (bytes.fromhex("02000100010000000100000000000000"), b"x", "contiguous"),
+        (bytes.fromhex("02000100000000000200000000000000"), b"x", "exceeds payload"),
+        (bytes.fromhex("02000100000000000100000000000000"), b"xy", "exactly covered"),
+    ],
+)
+def test_baseline_descriptor_region_rejects_invalid_coverage(
+    descriptors: bytes,
+    payload: bytes,
+    message: str,
+) -> None:
+    with pytest.raises(ValueError, match=message):
+        adapter_conformance._parse_baseline_typed_payload_region(descriptors, payload)
+
+
 def test_preview4_common_header_case_rejects_wire_reencoding_drift(monkeypatch: pytest.MonkeyPatch) -> None:
     class DriftingHeader:
         @classmethod
@@ -144,7 +281,7 @@ def test_preview4_common_header_case_rejects_wire_reencoding_drift(monkeypatch: 
     report = build_adapter_case_results_report(
         {
             "protocol_version": "nnrp-1-preview4",
-            "cases": [{"id": "l0.header.fixed_shape.golden"}],
+            "cases": [_case("l0.header.fixed_shape.golden")],
         }
     )
 
@@ -160,12 +297,101 @@ def test_preview4_common_header_case_rejects_runtime_projection_drift(monkeypatc
     report = build_adapter_case_results_report(
         {
             "protocol_version": "nnrp-1-preview4",
-            "cases": [{"id": "l0.header.fixed_shape.golden"}],
+            "cases": [_case("l0.header.fixed_shape.golden")],
         }
     )
 
     assert report["results"][0]["outcome"] == "fail"
     assert "caller-controlled wire fields" in report["results"][0]["message"]
+
+
+def test_metadata_roundtrip_helper_rejects_reencoding_drift() -> None:
+    class DriftingMetadata:
+        @classmethod
+        def unpack(cls, _payload: bytes) -> "DriftingMetadata":
+            return cls()
+
+        def pack(self) -> bytes:
+            return b"drift"
+
+    execution = adapter_conformance._AdapterCaseExecution(
+        {"id": "l1.handshake.basic", "parameters": {"metadata_hex": "00"}},
+        adapter_conformance._AdapterSmokeBackend(),
+        {},
+    )
+
+    with pytest.raises(ValueError, match="did not preserve the frozen wire bytes"):
+        execution._round_trip_metadata("drift", DriftingMetadata, "metadata_hex")
+
+
+def test_packet_roundtrip_helper_rejects_message_type_and_reencoding_drift(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class Metadata:
+        @classmethod
+        def unpack(cls, _payload: bytes) -> "Metadata":
+            return cls()
+
+        def pack(self) -> bytes:
+            return b"meta"
+
+    class Packet:
+        def __init__(self, message_type: adapter_conformance.MessageType, encoded: bytes) -> None:
+            self.header = type("Header", (), {"msg_type": message_type})()
+            self.metadata = b"meta"
+            self._encoded = encoded
+
+        def pack(self) -> bytes:
+            return self._encoded
+
+    execution = adapter_conformance._AdapterCaseExecution(
+        {"id": "l1.handshake.basic", "parameters": {"packet_hex": "00"}},
+        adapter_conformance._AdapterSmokeBackend(),
+        {},
+    )
+
+    monkeypatch.setattr(
+        adapter_conformance.NnrpPacket,
+        "unpack",
+        lambda _payload: Packet(adapter_conformance.MessageType.CLIENT_HELLO, b"\x00"),
+    )
+    with pytest.raises(ValueError, match="expected FLOW_UPDATE"):
+        execution._round_trip_packet(
+            "wrong-type",
+            adapter_conformance.MessageType.FLOW_UPDATE,
+            Metadata,
+        )
+
+    monkeypatch.setattr(
+        adapter_conformance.NnrpPacket,
+        "unpack",
+        lambda _payload: Packet(adapter_conformance.MessageType.FLOW_UPDATE, b"drift"),
+    )
+    with pytest.raises(ValueError, match="did not preserve the frozen wire bytes"):
+        execution._round_trip_packet(
+            "drift",
+            adapter_conformance.MessageType.FLOW_UPDATE,
+            Metadata,
+        )
+
+
+@pytest.mark.parametrize(
+    "parameters",
+    [
+        {},
+        {"header_hex": _FROZEN_PARAMETERS["l0.header.fixed_shape.golden"]["header_hex"], "extra": "00"},
+    ],
+)
+def test_frozen_golden_case_rejects_missing_or_extra_parameters(parameters: dict[str, str]) -> None:
+    report = build_adapter_case_results_report(
+        {
+            "protocol_version": "nnrp-1-preview4",
+            "cases": [{"id": "l0.header.fixed_shape.golden", "parameters": parameters}],
+        }
+    )
+
+    assert report["results"][0]["outcome"] == "fail"
+    assert "parameters must contain exactly" in report["results"][0]["message"]
 
 
 def test_build_adapter_case_results_report_marks_runtime_smoke_failures() -> None:
@@ -302,6 +528,55 @@ def test_adapter_case_rejects_invalid_parameter_container() -> None:
 
     assert report["results"][0]["outcome"] == "fail"
     assert "parameters" in report["results"][0]["message"]
+
+
+@pytest.mark.parametrize(
+    ("frozen_parameters", "message"),
+    [
+        ({}, "missing parameters"),
+        ({"l0.frame_submit.metadata.golden": {}}, "missing frozen metadata_hex"),
+        (
+            {"l0.frame_submit.metadata.golden": {"metadata_hex": "not-hex"}},
+            "invalid frozen metadata_hex",
+        ),
+    ],
+)
+def test_frozen_cross_case_parameter_lookup_rejects_missing_or_invalid_values(
+    frozen_parameters: dict[str, object],
+    message: str,
+) -> None:
+    execution = adapter_conformance._AdapterCaseExecution(
+        {"id": "l1.frame_submit.message.parse_emit"},
+        adapter_conformance._AdapterSmokeBackend(),
+        frozen_parameters,
+    )
+
+    with pytest.raises(ValueError, match=message):
+        execution._frozen_case_hex("l0.frame_submit.metadata.golden", "metadata_hex")
+
+
+def test_adapter_parameter_helpers_preserve_string_payload_and_reject_unknown_smoke_transport() -> None:
+    execution = adapter_conformance._AdapterCaseExecution(
+        {"id": "l1.frame_submit.tensor.inline", "parameters": {"payload": "token"}},
+        adapter_conformance._AdapterSmokeBackend(),
+        {},
+    )
+
+    assert execution._payload_parameter("payload", b"default") == b"token"
+    with pytest.raises(ValueError, match="unsupported native session-smoke transport"):
+        with adapter_conformance._open_native_transport_session("udp"):
+            pass
+
+
+def test_result_payload_size_uses_raw_body_for_tensor_only_results() -> None:
+    class Metadata:
+        payload_kind_bitmap = adapter_conformance.PayloadKind.TENSOR
+
+    class Result:
+        body = b"tensor"
+        metadata = Metadata()
+
+    assert adapter_conformance._result_payload_size(Result()) == len(b"tensor")
 
 
 def test_adapter_result_state_validation_failure_is_reported() -> None:
@@ -473,10 +748,13 @@ def test_adapter_runtime_helpers_read_native_handle_shapes() -> None:
 def test_adapter_evidence_dir_resolution_ignores_invalid_shapes(tmp_path: Path) -> None:
     assert adapter_conformance._resolve_evidence_dir({}) is None
     assert adapter_conformance._resolve_evidence_dir({"artifacts": {"evidence_dir": ""}}) is None
-    assert adapter_conformance._resolve_evidence_dir(
-        {"artifacts": {"evidence_dir": "evidence"}},
-        base_dir=tmp_path,
-    ) == tmp_path / "evidence"
+    assert (
+        adapter_conformance._resolve_evidence_dir(
+            {"artifacts": {"evidence_dir": "evidence"}},
+            base_dir=tmp_path,
+        )
+        == tmp_path / "evidence"
+    )
 
 
 def test_adapter_case_failure_preserves_native_diagnostics() -> None:

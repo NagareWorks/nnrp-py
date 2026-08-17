@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 from contextlib import contextmanager
 from dataclasses import replace
@@ -10,16 +11,21 @@ from typing import Any
 import pytest
 
 from nnrp._native_routes import official_provider_metadata
+from nnrp.core import MessageType
 from nnrp.native import (
+    FFI_STATUS_WOULD_BLOCK,
     NATIVE_TRANSPORT_ID_BY_NAME,
     NativeArtifactError,
+    NativeStatus,
     NativeTransportBinding,
     NativeTransportCandidateDiagnostic,
     NativeTransportProbeState,
     NativeTransportProvider,
+    NativeTransportProviderKind,
     NativeTransportRejectionReason,
     NativeTransportSelectionError,
     NativeTransportSelectionErrorCode,
+    NativeWouldBlockError,
 )
 from nnrp.tools import host_route_target
 
@@ -49,7 +55,6 @@ def candidate(
     if provider_id is not None:
         metadata = replace(metadata, id=provider_id)
     return NativeTransportCandidateDiagnostic(
-        transport_name=transport,
         transport_id=NATIVE_TRANSPORT_ID_BY_NAME[transport],
         provider=metadata,
         local_available=rejection is not NativeTransportRejectionReason.LOCAL_UNAVAILABLE,
@@ -62,14 +67,12 @@ def candidate(
 
 def provider(transport: str, tmp_path: Path) -> NativeTransportProvider:
     return NativeTransportProvider(
-        name=transport,
-        artifact_path=tmp_path / "libnnrp_ffi",
-        manifest_path=tmp_path / "manifest.json",
-        transport_slots=(transport,),
-        enabled_features=(),
-        package=f"nnrp-ffi-transport-{transport}",
-        transport_scope=transport,
-        platform_tag="test-x86_64",
+        name=f"nnrp-ffi-transport-{transport}",
+        version="4.4.0",
+        transport_id=NATIVE_TRANSPORT_ID_BY_NAME[transport],
+        kind=NativeTransportProviderKind.NATIVE_DYNAMIC,
+        available=True,
+        library_path=str(tmp_path / "libnnrp_ffi"),
         metadata=official_provider_metadata(transport),
     )
 
@@ -374,8 +377,31 @@ def test_run_server_case_reports_success_terminal_failure_and_rollback(
     assert isinstance(success_fixture, dict)
     routes = (route("tcp"),)
     resolved_routes = (dict(route("tcp"), locator="tcp://127.0.0.1:0"),)
-    session = SimpleNamespace(active_transport_name="tcp", close=lambda: None)
-    server = SimpleNamespace(bound_provider_endpoints={"tcp": "tcp://127.0.0.1:43210"}, accept=lambda _opts: session)
+    close_calls: list[str] = []
+
+    class CloseEvent:
+        def as_runtime(self) -> object:
+            return SimpleNamespace(header=SimpleNamespace(message_type=MessageType.SESSION_CLOSE))
+
+    event_timeouts: list[float | None] = []
+
+    async def next_event(timeout: float | None = None) -> object:
+        close_calls.append("event")
+        event_timeouts.append(timeout)
+        return CloseEvent()
+
+    def close_session() -> None:
+        close_calls.append("close")
+
+    session = SimpleNamespace(
+        active_transport_name="tcp",
+        next_event=next_event,
+        close=close_session,
+    )
+    async def accept(_opts: object) -> object:
+        return session
+
+    server = SimpleNamespace(bound_provider_endpoints={"tcp": "tcp://127.0.0.1:43210"}, accept=accept)
 
     @contextmanager
     def listen(*_args: Any, **_kwargs: Any):
@@ -392,14 +418,19 @@ def test_run_server_case_reports_success_terminal_failure_and_rollback(
     )
     assert result["terminal"] == "success"
     assert result["route_evidence"]["accepted_sessions"][0]["provider_id"] == "nnrp.transport.tcp.native"
+    assert close_calls == ["event", "close"]
+    assert event_timeouts and 0 < event_timeouts[0] <= 0.05
 
     terminal_routes = (route("tcp", failures=("terminal_listener_failure",)),)
     terminal_case = scenario("server", list(terminal_routes))
     terminal_fixture = terminal_case["host_route"]
     assert isinstance(terminal_fixture, dict)
+    async def terminal_accept(_opts: object) -> object:
+        raise NativeArtifactError("terminal closed")
+
     terminal_server = SimpleNamespace(
         bound_provider_endpoints={"tcp": "tcp://127.0.0.1:43211"},
-        accept=lambda _opts: (_ for _ in ()).throw(NativeArtifactError("terminal closed")),
+        accept=terminal_accept,
     )
 
     @contextmanager
@@ -491,6 +522,32 @@ def test_transport_binding_availability_state_cannot_be_ambiguous(tmp_path: Path
         NativeTransportBinding(None, tcp_provider)
     with pytest.raises(ValueError, match="must not declare"):
         NativeTransportBinding(object(), tcp_provider, unavailable_diagnostic="unexpected")  # type: ignore[arg-type]
+
+
+def test_finish_peer_close_retries_with_finite_native_poll_timeouts() -> None:
+    poll_timeouts: list[float | None] = []
+    close_calls = 0
+
+    class CloseEvent:
+        def as_runtime(self) -> object:
+            return SimpleNamespace(header=SimpleNamespace(message_type=MessageType.SESSION_CLOSE))
+
+    class Session:
+        async def next_event(self, timeout: float | None = None) -> object:
+            poll_timeouts.append(timeout)
+            if len(poll_timeouts) == 1:
+                raise NativeWouldBlockError(NativeStatus(FFI_STATUS_WOULD_BLOCK))
+            return CloseEvent()
+
+        def close(self) -> None:
+            nonlocal close_calls
+            close_calls += 1
+
+    asyncio.run(host_route_target._finish_peer_close(Session(), timeout_ms=500))
+
+    assert len(poll_timeouts) == 2
+    assert all(timeout is not None and 0 < timeout <= 0.05 for timeout in poll_timeouts)
+    assert close_calls == 1
 
 
 @pytest.mark.parametrize(

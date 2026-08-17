@@ -19,6 +19,7 @@ from nnrp import (
 )
 from nnrp.client import SubmitRequest
 from nnrp.core import MessageType
+from nnrp.native import NativeServerEvent
 from nnrp.runtime import (
     InFlightPolicy,
     NativeRuntimeEvent,
@@ -517,7 +518,7 @@ def test_open_native_role_loopback_yields_roles_and_coordinates_close(monkeypatc
     calls: list[tuple[object, ...]] = []
 
     class Server:
-        def accept(self, options: object) -> object:
+        async def accept(self, options: object) -> object:
             calls.append(("accept", options))
             return server_session
 
@@ -572,10 +573,12 @@ def test_close_native_role_sessions_completes_session_close_handshake() -> None:
             assert close_started.wait(timeout=1)
             calls.append("server-receive-close")
             return (
-                _runtime_event(
-                    MessageType.SESSION_CLOSE,
-                    RuntimeEventMetadataKind.SESSION_CLOSE,
-                    SessionCloseMetadata(SessionCloseReason.NORMAL, InFlightPolicy.DRAIN, 0, 0, 0, 0),
+                NativeServerEvent.runtime(
+                    _runtime_event(
+                        MessageType.SESSION_CLOSE,
+                        RuntimeEventMetadataKind.SESSION_CLOSE,
+                        SessionCloseMetadata(SessionCloseReason.NORMAL, InFlightPolicy.DRAIN, 0, 0, 0, 0),
+                    )
                 ),
             )
 
@@ -634,6 +637,11 @@ def test_build_benchmark_results_report_measures_native_scenarios_when_artifacts
     monkeypatch.setattr(benchmark, "load_native_schema_codec", lambda: schema_codec)
     monkeypatch.setattr(benchmark, "_open_native_role_loopback", role_loopbacks.open)
     monkeypatch.setattr(benchmark, "probe_native_artifact", native_probe)
+    monkeypatch.setattr(
+        benchmark.asyncio,
+        "run",
+        lambda _awaitable: pytest.fail("native benchmark hot paths must reuse an asyncio.Runner"),
+    )
 
     report = build_benchmark_results_report(_plan_document())
 
@@ -1050,7 +1058,7 @@ class FakeNativeServerOperation:
         self.operation_id = operation.operation_id
         self.frame_id = operation.frame_id
 
-    def send_result(self, metadata, body: bytes | bytearray | memoryview = b"") -> None:
+    async def send_result(self, metadata, body: bytes | bytearray | memoryview = b"") -> None:
         del metadata
         self.server_session.entrypoints.server_send_result(self.operation_id, body)
         self.server_session.connection.results.append(
@@ -1065,6 +1073,28 @@ class FakeNativeServerOperation:
             )
         )
 
+    async def send_progress(self, metadata, body=b"") -> None:
+        self.server_session.entrypoints.runtime_frame_send(MessageType.PROGRESS, metadata, body)
+        self.server_session.connection.runtime_events.append(
+            _runtime_event(
+                MessageType.PROGRESS,
+                RuntimeEventMetadataKind.PROGRESS,
+                metadata,
+                body=bytes(body),
+            )
+        )
+
+    async def send_partial_result(self, metadata, body=b"") -> None:
+        self.server_session.entrypoints.runtime_frame_send(MessageType.PARTIAL_RESULT, metadata, body)
+        self.server_session.connection.runtime_events.append(
+            _runtime_event(
+                MessageType.PARTIAL_RESULT,
+                RuntimeEventMetadataKind.PARTIAL_RESULT,
+                metadata,
+                body=bytes(body),
+            )
+        )
+
 
 class FakeNativeServerSession:
     def __init__(self, connection: FakeNativeConnection) -> None:
@@ -1073,8 +1103,9 @@ class FakeNativeServerSession:
         self.pending_submits: list[FakeNativeOperation] = []
         self.control_events: list[int] = []
 
-    def receive_submit(self, *, timeout_ms: int = 0, max_events: int = 1) -> FakeNativeServerOperation:
-        self.entrypoints.server_await_events(timeout_ms, max_events)
+    async def receive_submit(self, timeout: float | None = None) -> FakeNativeServerOperation:
+        timeout_ms = 0 if timeout is None else max(0, int(timeout * 1_000))
+        self.entrypoints.server_await_events(timeout_ms, 1)
         if not self.pending_submits:
             raise AssertionError("fake role loopback submit was not queued")
         return FakeNativeServerOperation(self, self.pending_submits.pop(0))
@@ -1084,29 +1115,6 @@ class FakeNativeServerSession:
         events = tuple(self.control_events[:max_events])
         del self.control_events[:max_events]
         return events
-
-    def send_progress(self, metadata, body=b"") -> None:
-        self.entrypoints.runtime_frame_send(MessageType.PROGRESS, metadata, body)
-        self.connection.runtime_events.append(
-            _runtime_event(
-                MessageType.PROGRESS,
-                RuntimeEventMetadataKind.PROGRESS,
-                metadata,
-                body=bytes(body),
-            )
-        )
-
-    def send_partial_result(self, metadata, body=b"") -> None:
-        self.entrypoints.runtime_frame_send(MessageType.PARTIAL_RESULT, metadata, body)
-        self.connection.runtime_events.append(
-            _runtime_event(
-                MessageType.PARTIAL_RESULT,
-                RuntimeEventMetadataKind.PARTIAL_RESULT,
-                metadata,
-                body=bytes(body),
-            )
-        )
-
 
 class FakeNativeObjectMetadataBuffer:
     def __init__(self, payload: bytes) -> None:

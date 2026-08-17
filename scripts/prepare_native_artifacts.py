@@ -12,6 +12,7 @@ from typing import Any
 
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_OUTPUT = ROOT / "src" / "nnrp" / "native_artifacts"
+DEFAULT_TEMP_ROOT = ROOT / "artifacts" / ".tmp"
 
 _ARCH_ALIASES = {
     "amd64": "x86_64",
@@ -41,9 +42,10 @@ def prepare_native_artifacts(
     if clean and output.exists():
         shutil.rmtree(output)
     output.mkdir(parents=True, exist_ok=True)
+    DEFAULT_TEMP_ROOT.mkdir(parents=True, exist_ok=True)
 
     installed: list[Path] = []
-    with tempfile.TemporaryDirectory(prefix="nnrp-native-artifacts-") as temp_dir:
+    with tempfile.TemporaryDirectory(prefix="nnrp-native-artifacts-", dir=DEFAULT_TEMP_ROOT) as temp_dir:
         temp_root = Path(temp_dir)
         for source in inputs:
             for package_dir in _iter_package_dirs(source, temp_root):

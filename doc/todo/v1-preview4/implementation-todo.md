@@ -11,6 +11,9 @@ Preview4 Python work adapts the SDK to runtime control frames, runtime objects, 
 - [x] [05 - Wire conformance integration](05-wire-conformance-integration.md)
 - [x] [06 - Packaging, benchmarks, and docs](06-packaging-benchmarks-docs.md)
 - [x] [07 - SDK contract v9 recovery and multiplexing parity](07-sdk-contract-v9-recovery-and-multiplexing.md)
+- [x] [08 - SDK contract v10 lifecycle parity](08-sdk-contract-v10-lifecycle-parity.md)
+- [x] [09 - SDK contract v13 role-event parity](09-sdk-contract-v13-role-event-parity.md)
+- [x] [10 - SDK contract v14 server-operation ownership](10-sdk-contract-v14-server-operation-ownership.md)
 
 ## Coordination Rules
 

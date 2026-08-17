@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Any
 
 from nnrp.client import NativeClientOptions, NativeClientProviderRoute, connect_native_client_connection
-from nnrp.core import TransportPolicy
+from nnrp.core import MessageType, TransportPolicy
 from nnrp.native import (
     NativeArtifactError,
     NativeRuntimeError,
@@ -23,6 +23,7 @@ from nnrp.native import (
     NativeTransportProvider,
     NativeTransportSelectionError,
     NativeTransportServerSecurity,
+    NativeWouldBlockError,
     discover_native_transport_providers,
     load_native_transport_binding,
 )
@@ -266,7 +267,7 @@ def _run_server_case(
             _write_ready_report(scenario, routes, server.bound_provider_endpoints, ready_output)
             if terminal_provider is not None:
                 try:
-                    server.accept(NativeServerAcceptOptions(timeout_ms=2_000))
+                    asyncio.run(_accept_server_transport_names(server, count=1, timeout_ms=2_000))
                 except NativeArtifactError as error:
                     evidence = _server_evidence(
                         fixture,
@@ -280,11 +281,7 @@ def _run_server_case(
                     return _passed_result(scenario, "error", evidence, message=str(error))
                 raise AssertionError("terminal listener injection accepted a session")
 
-            accepted = []
-            for _index in range(len(routes)):
-                session = server.accept(NativeServerAcceptOptions(timeout_ms=3_000))
-                accepted.append(session.active_transport_name)
-                session.close()
+            accepted = asyncio.run(_accept_server_transport_names(server, count=len(routes), timeout_ms=3_000))
             evidence = _server_evidence(
                 fixture,
                 routes,
@@ -304,11 +301,41 @@ def _run_server_case(
         )
 
 
+async def _accept_server_transport_names(server: Any, *, count: int, timeout_ms: int) -> list[str]:
+    accepted = []
+    for _index in range(count):
+        session = await server.accept(NativeServerAcceptOptions(timeout_ms=timeout_ms))
+        accepted.append(session.active_transport_name)
+        await _finish_peer_close(session, timeout_ms=timeout_ms)
+    return accepted
+
+
+async def _finish_peer_close(session: Any, *, timeout_ms: int) -> None:
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + (timeout_ms / 1_000)
+    while True:
+        remaining = deadline - loop.time()
+        if remaining <= 0:
+            raise TimeoutError("timed out waiting for the peer SESSION_CLOSE event")
+        try:
+            event = await session.next_event(timeout=min(remaining, 0.05))
+        except NativeWouldBlockError:
+            continue
+        runtime_event = event.as_runtime()
+        if runtime_event is not None and runtime_event.header.message_type is MessageType.SESSION_CLOSE:
+            break
+    session.close()
+
+
 def _binding_for_route(route: Mapping[str, Any]) -> NativeTransportBinding:
     transport = _required_string(route, "transport")
     provider_id = _required_string(route, "provider_id")
     if provider_id == "example.transport.quic.uninstalled":
-        provider = next(provider for provider in discover_native_transport_providers() if provider.name == transport)
+        provider = next(
+            provider
+            for provider in discover_native_transport_providers()
+            if provider.transport_name == transport
+        )
         provider = replace(provider, metadata=replace(provider.metadata, id=provider_id))
         return NativeTransportBinding.unavailable(provider, "provider package is not installed")
     expected = _OFFICIAL_PROVIDER_IDS.get(transport)

@@ -2,11 +2,69 @@ from __future__ import annotations
 
 import argparse
 import ast
+import importlib
 import json
+import sys
 from pathlib import Path
 from typing import Any
 
-EXPECTED_CONTRACT_VERSION = 9
+EXPECTED_CONTRACT_VERSION = 15
+EXPECTED_CLIENT_SUBMIT_WAIT = {
+    "scopeRule": ("These rules apply when an SDK exposes a cancellable or time-bounded submit-and-wait convenience."),
+    "preDispatchCancellationRule": (
+        "Cancellation before FRAME_SUBMIT dispatch fails the local wait and emits no submit or cancellation frame."
+    ),
+    "postDispatchCancellationRule": (
+        "Cancellation after FRAME_SUBMIT dispatch fails the local wait with the language-native "
+        "cancellation error and sends CANCEL for the submitted operation."
+    ),
+    "timeoutRule": (
+        "A time-bounded submit wait sends DEADLINE before dispatch; expiry fails the local wait "
+        "with the language-native timeout error and sends CANCEL for the submitted operation."
+    ),
+    "lifecycleRule": (
+        "The local lifecycle event produced by caller cancellation or wait expiry remains "
+        "observable through the client event pump and must not race the same submit wait into a "
+        "successful NnrpResult return. A terminal lifecycle initiated independently by the peer "
+        "may complete the submit wait as NnrpResult evidence."
+    ),
+}
+EXPECTED_SERVER_EVENT_PUMP = {
+    "canonicalOperation": "server_session.next_event",
+    "submitConvenience": "server_session.receive_submit",
+    "orderingRule": "next_event delivers every server event in per-session wire order without filtering",
+    "submitRule": (
+        "receive_submit is a selective convenience that may skip non-submit events only by retaining "
+        "them in the same session queue; it must never discard, decode-and-forget, or acknowledge them"
+    ),
+    "ownershipRule": (
+        "a FRAME_SUBMIT event becomes one ServerOperation before it is exposed to the application, "
+        "so consuming the canonical event pump never loses the reply capability"
+    ),
+    "concurrencyRule": (
+        "one session has one serialized receive source; concurrent receive calls are rejected or "
+        "serialized and never race the native event queue"
+    ),
+}
+EXPECTED_SERVER_OPERATION_INVARIANTS = [
+    "submit.header.message_type is frame_submit",
+    "submit.metadata is the frame_submit metadata variant",
+    "operation_id equals submit.metadata.operation_id",
+    "frame_id equals submit.header.frame_id",
+    "the reply capability remains valid until exactly one terminal outcome is sent or the session closes",
+]
+EXPECTED_RESULT_SUCCESS_RULE = (
+    "A successful result has terminal_state success and an event whose message type is result_push "
+    "and whose metadata variant is result_push."
+)
+EXPECTED_RESULT_NON_SUCCESS_RULE = (
+    "Cancelled, dropped, and error results preserve the terminal protocol or lifecycle event that "
+    "established the state; SDKs do not synthesize RESULT_PUSH metadata for them."
+)
+EXPECTED_PROVIDER_NAME_SEMANTICS = (
+    "provider-owned package or display name; protocol transport identity is "
+    "transport_id and selection must not derive it from name"
+)
 EXPECTED_OPERATION_STATES = {
     "ACCEPTED": 0,
     "RUNNING": 1,
@@ -18,11 +76,134 @@ EXPECTED_OPERATION_STATES = {
     "COMPLETED": 7,
 }
 EXPECTED_TERMINAL_STATES = {"SUCCESS": 0, "CANCELLED": 1, "DROPPED": 2, "ERROR": 3}
+EXPECTED_BODY_REGION_VALIDATION = {
+    "objectReferenceBlockBytesMultiple": 24,
+    "typedPayloadDescriptorBytesMultiple": 24,
+    "extensionDescriptorBytesMultiple": 16,
+    "typedPayloadDescriptorCountRule": (
+        "typed_payload_descriptor_bytes equals payload_frame_count * 24 for FRAME_SUBMIT and RESULT_PUSH"
+    ),
+}
+EXPECTED_RESULT_PUSH_VALIDATION = {
+    "staleReuseRule": (
+        "(result_class is stale_reuse or result_flags contains stale) if and only if reused_frame_id is non-zero"
+    ),
+    "tensorPartialRule": (
+        "(result_class is partial or result_flags contains partial) requires dropped_tile_count greater than zero "
+        "for tensor payloads"
+    ),
+    "tensorCoverageRule": ("covered_tile_count plus dropped_tile_count equals tile_count for tensor payloads"),
+    "nonTensorCoverageRule": (
+        "section_count, tile_count, tile_base_id, tile_index_bytes, covered_tile_count, and dropped_tile_count "
+        "are zero when payload_kind_bitmap contains no tensor payload"
+    ),
+}
+EXPECTED_PYTHON_PROJECTIONS = {
+    "submitRequest": "nnrp.client.SubmitRequest",
+    "submitHeaderContext": "nnrp.client.SubmitHeaderContext",
+    "submitBuilders": ["SubmitRequest.tensor", "SubmitRequest.token", "SubmitRequest.typed_payload"],
+    "runtimeFrameHeader": "nnrp.runtime.RuntimeFrameHeader",
+    "runtimeEvent": "nnrp.runtime.NativeRuntimeEvent",
+    "clientEvent": "nnrp.runtime.NativeClientEvent",
+    "serverEvent": "nnrp.server.NativeServerEvent",
+    "serverOperation": "nnrp.NativeRuntimeServerOperation",
+    "roleMethods": {
+        "client.open_session": "open_session",
+        "client.resume_session": "resume_session",
+        "client_session.recovery_ticket": "recovery_ticket",
+        "client_session.next_event": "next_event",
+        "server.accept": "accept",
+        "server_session.next_event": "next_event",
+        "server_session.receive_submit": "receive_submit",
+        "server_operation.send_result": "send_result",
+        "server_operation.send_result_drop": "send_result_drop",
+        "server_operation.send_progress": "send_progress",
+        "server_operation.send_partial_result": "send_partial_result",
+    },
+    "operationLifecycleEvent": "nnrp.runtime.OperationLifecycleEvent",
+    "terminalEvent": "nnrp.runtime.NativeTerminalEvent",
+    "result": "nnrp.NativeRuntimeResult",
+    "clientRoles": ["nnrp.client.NativeClientConnection", "nnrp.NativeRuntimeSession"],
+    "serverRoles": ["nnrp.server.NativeServer", "nnrp.NativeRuntimeServerSession"],
+    "runtimeMetadataNamespace": "nnrp.runtime",
+    "capabilityMetadata": "nnrp.runtime.CapabilityMetadata",
+    "connectionLifecycle": "nnrp.lifecycle.ConnectionLifecycleSnapshot",
+    "sessionLifecycle": "nnrp.lifecycle.SessionLifecycleSnapshot",
+    "typedPayloadDescriptor": "nnrp.core.TypedPayloadDescriptor",
+    "typedPayloadFrame": "nnrp.core.TypedPayloadFrame",
+    "cacheObjectId": "nnrp.cache.CacheObjectIdentity",
+    "cacheLease": "nnrp.cache.CacheLeaseDescriptor",
+    "cacheLeaseResult": "nnrp.cache.CacheLeaseResult",
+    "cachePolicyOptions": "nnrp.cache.CachePolicyOptions",
+    "transportProviderMetadata": "nnrp.native.NativeTransportProviderMetadata",
+    "transportProviderDescriptor": "nnrp.native.NativeTransportProvider",
+    "transportSelectionOptions": "nnrp.native.NativeTransportSelectionOptions",
+    "transportSelection": "nnrp.native.NativeTransportSelection",
+    "transportSelectionFailure": "nnrp.native.NativeTransportSelectionError",
+    "applicationEndpoint": "nnrp.native.NnrpEndpoint",
+    "providerEndpoint": "nnrp.native.NativeTransportEndpoint",
+    "clientTransportSecurity": "nnrp.native.NativeTransportClientSecurity",
+    "serverTransportSecurity": "nnrp.native.NativeTransportServerSecurity",
+    "clientProviderRoute": "nnrp.client.NativeClientProviderRoute",
+    "serverProviderRoute": "nnrp.server.NativeServerProviderRoute",
+    "schemaDescriptor": "nnrp.schema.SchemaDescriptorHeader",
+    "schemaRegistry": "nnrp.schema.SchemaRegistryCatalog",
+    "clientBootstrapOptions": "nnrp.client.NativeClientOptions",
+    "clientSessionOptions": "nnrp.client.NativeClientSessionOptions",
+    "sessionRecoveryTicket": "nnrp.client.NativeSessionRecoveryTicket",
+    "sessionRecoveryTicketEncode": "NativeSessionRecoveryTicket.to_bytes",
+    "sessionRecoveryTicketDecode": "NativeSessionRecoveryTicket.from_bytes",
+    "serverBootstrapOptions": "nnrp.server.NativeServerBootstrapOptions",
+    "serverSessionOptions": "nnrp.server.NativeServerSessionOptions",
+    "serverAcceptOptions": "nnrp.server.NativeServerAcceptOptions",
+    "serverSessionPolicy": "nnrp.server.NativeServerSessionPolicy",
+    "baselineMetadataCodecs": {
+        "ClientHelloMetadata": ["ClientHelloMetadata.pack", "ClientHelloMetadata.unpack"],
+        "SessionPatchAckMetadata": ["SessionPatchAckMetadata.pack", "SessionPatchAckMetadata.unpack"],
+        "FlowUpdateMetadata": ["FlowUpdateMetadata.pack", "FlowUpdateMetadata.unpack"],
+        "ResultHintMetadata": ["ResultHintMetadata.pack", "ResultHintMetadata.unpack"],
+        "FrameSubmitMetadata": ["FrameSubmitMetadata.pack", "FrameSubmitMetadata.unpack"],
+        "ResultPushMetadata": ["ResultPushMetadata.pack", "ResultPushMetadata.unpack"],
+        "CachePutMetadata": ["CachePutMetadata.pack", "CachePutMetadata.unpack"],
+        "CacheAckMetadata": ["CacheAckMetadata.pack", "CacheAckMetadata.unpack"],
+        "CacheInvalidateMetadata": ["CacheInvalidateMetadata.pack", "CacheInvalidateMetadata.unpack"],
+        "TransportProbeMetadata": ["TransportProbeMetadata.pack", "TransportProbeMetadata.unpack"],
+        "TransportProbeAckMetadata": ["TransportProbeAckMetadata.pack", "TransportProbeAckMetadata.unpack"],
+        "ObjectReferenceBlock": ["ObjectReferenceBlock.pack", "ObjectReferenceBlock.unpack"],
+    },
+}
+EXPECTED_TRANSPORT_SELECTION_OPTIONS = [
+    ("peer_supported_transports", "TransportId[]", True),
+    ("policy", "TransportPolicy", True),
+    ("requested_max_frame_bytes", "u64?", False),
+    ("candidate_readiness", "TransportCandidateReadiness[]", True),
+    ("probe_observations", "TransportProbeObservation[]", True),
+]
+
+PYTHON_BASELINE_METADATA_CODEC_MODULES = {
+    "ClientHelloMetadata": "control",
+    "SessionPatchAckMetadata": "control",
+    "FlowUpdateMetadata": "control",
+    "ResultHintMetadata": "control",
+    "FrameSubmitMetadata": "data",
+    "ResultPushMetadata": "data",
+    "CachePutMetadata": "control",
+    "CacheAckMetadata": "control",
+    "CacheInvalidateMetadata": "control",
+    "TransportProbeMetadata": "control",
+    "TransportProbeAckMetadata": "control",
+    "ObjectReferenceBlock": "data",
+}
 
 
 def require(condition: bool, message: str) -> None:
     if not condition:
         raise SystemExit(message)
+
+
+def require_mapping(value: Any, message: str) -> dict[str, Any]:
+    require(isinstance(value, dict), message)
+    return value
 
 
 def field_shape(type_contract: dict[str, Any]) -> list[tuple[str, str, bool]]:
@@ -48,12 +229,38 @@ def annotated_fields(class_node: ast.ClassDef) -> list[str]:
     ]
 
 
+def annotated_field_types(class_node: ast.ClassDef) -> list[tuple[str, str]]:
+    return [
+        (node.target.id, ast.unparse(node.annotation))
+        for node in class_node.body
+        if isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name)
+    ]
+
+
+def public_annotated_fields(class_node: ast.ClassDef) -> list[str]:
+    return [name for name in annotated_fields(class_node) if not name.startswith("_")]
+
+
+def public_annotated_field_types(class_node: ast.ClassDef) -> list[tuple[str, str]]:
+    return [(name, annotation) for name, annotation in annotated_field_types(class_node) if not name.startswith("_")]
+
+
 def enum_values(class_node: ast.ClassDef) -> dict[str, int]:
     values: dict[str, int] = {}
     for node in class_node.body:
         if not isinstance(node, ast.Assign) or len(node.targets) != 1 or not isinstance(node.targets[0], ast.Name):
             continue
         if isinstance(node.value, ast.Constant) and type(node.value.value) is int:
+            values[node.targets[0].id] = node.value.value
+    return values
+
+
+def string_enum_values(class_node: ast.ClassDef) -> dict[str, str]:
+    values: dict[str, str] = {}
+    for node in class_node.body:
+        if not isinstance(node, ast.Assign) or len(node.targets) != 1 or not isinstance(node.targets[0], ast.Name):
+            continue
+        if isinstance(node.value, ast.Constant) and isinstance(node.value.value, str):
             values[node.targets[0].id] = node.value.value
     return values
 
@@ -79,6 +286,34 @@ def method_is_async(class_node: ast.ClassDef, name: str) -> bool:
     raise SystemExit(f"Python SDK is missing {class_node.name}.{name}")
 
 
+def class_base_names(class_node: ast.ClassDef) -> set[str]:
+    return {ast.unparse(base) for base in class_node.bases}
+
+
+def class_method_names(class_node: ast.ClassDef) -> set[str]:
+    return {node.name for node in class_node.body if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))}
+
+
+def require_python_baseline_metadata_codec(
+    module: ast.Module,
+    type_name: str,
+) -> None:
+    base = class_definition(module, "_FixedWidthMetadata")
+    require(
+        {"pack", "unpack"} <= class_method_names(base),
+        "Python fixed-width metadata codec base is missing pack or unpack",
+    )
+    codec = class_definition(module, type_name)
+    require(
+        "_FixedWidthMetadata" in class_base_names(codec),
+        f"Python baseline metadata codec {type_name} does not use the fixed-width codec base",
+    )
+    require(
+        "pack" in class_method_names(codec),
+        f"Python baseline metadata codec {type_name}.pack is missing",
+    )
+
+
 def exported_names(module: ast.Module) -> set[str]:
     for node in module.body:
         if (
@@ -92,6 +327,146 @@ def exported_names(module: ast.Module) -> set[str]:
                 if isinstance(element, ast.Constant) and isinstance(element.value, str)
             }
     raise SystemExit("Python SDK module is missing a static __all__ declaration")
+
+
+def resolve_public_target(target: str) -> Any:
+    parts = target.split(".")
+    for module_length in range(len(parts), 0, -1):
+        module_name = ".".join(parts[:module_length])
+        try:
+            value: Any = importlib.import_module(module_name)
+        except ModuleNotFoundError as error:
+            if error.name != module_name:
+                raise
+            continue
+        for attribute in parts[module_length:]:
+            require(hasattr(value, attribute), f"Python frozen projection target {target} is not publicly resolvable")
+            value = getattr(value, attribute)
+        return value
+    raise SystemExit(f"Python frozen projection module for {target} is not importable")
+
+
+def require_python_projection_targets(projection: dict[str, Any], source_root: Path) -> None:
+    source_path = str(source_root / "src")
+    inserted = source_path not in sys.path
+    if inserted:
+        sys.path.insert(0, source_path)
+    try:
+        checked_keys: set[str] = set()
+
+        direct_keys = {
+            "submitRequest",
+            "submitHeaderContext",
+            "runtimeFrameHeader",
+            "runtimeEvent",
+            "clientEvent",
+            "serverEvent",
+            "serverOperation",
+            "operationLifecycleEvent",
+            "terminalEvent",
+            "result",
+            "capabilityMetadata",
+            "connectionLifecycle",
+            "sessionLifecycle",
+            "typedPayloadDescriptor",
+            "typedPayloadFrame",
+            "cacheObjectId",
+            "cacheLease",
+            "cacheLeaseResult",
+            "cachePolicyOptions",
+            "transportProviderMetadata",
+            "transportProviderDescriptor",
+            "transportSelectionOptions",
+            "transportSelection",
+            "transportSelectionFailure",
+            "applicationEndpoint",
+            "providerEndpoint",
+            "clientTransportSecurity",
+            "serverTransportSecurity",
+            "clientProviderRoute",
+            "serverProviderRoute",
+            "schemaDescriptor",
+            "schemaRegistry",
+            "clientBootstrapOptions",
+            "clientSessionOptions",
+            "sessionRecoveryTicket",
+            "serverBootstrapOptions",
+            "serverSessionOptions",
+            "serverAcceptOptions",
+            "serverSessionPolicy",
+        }
+        for key in direct_keys:
+            resolve_public_target(projection[key])
+            checked_keys.add(key)
+
+        for key in ("clientRoles", "serverRoles"):
+            for target in projection[key]:
+                resolve_public_target(target)
+            checked_keys.add(key)
+
+        resolve_public_target(projection["runtimeMetadataNamespace"])
+        checked_keys.add("runtimeMetadataNamespace")
+
+        submit_request = resolve_public_target(projection["submitRequest"])
+        for target in projection["submitBuilders"]:
+            owner, method = target.split(".", 1)
+            require(owner == submit_request.__name__, f"Python submit builder owner drifted: {target}")
+            require(hasattr(submit_request, method), f"Python frozen submit builder {target} is missing")
+        checked_keys.add("submitBuilders")
+
+        recovery_ticket = resolve_public_target(projection["sessionRecoveryTicket"])
+        for key in ("sessionRecoveryTicketEncode", "sessionRecoveryTicketDecode"):
+            owner, method = projection[key].split(".", 1)
+            require(owner == recovery_ticket.__name__, f"Python recovery ticket codec owner drifted: {projection[key]}")
+            require(
+                hasattr(recovery_ticket, method),
+                f"Python frozen recovery ticket codec {projection[key]} is missing",
+            )
+            checked_keys.add(key)
+
+        role_owners = {
+            "client": resolve_public_target(projection["clientRoles"][0]),
+            "client_session": resolve_public_target(projection["clientRoles"][1]),
+            "server": resolve_public_target(projection["serverRoles"][0]),
+            "server_session": resolve_public_target(projection["serverRoles"][1]),
+            "server_operation": resolve_public_target(projection["serverOperation"]),
+        }
+        for operation, method in projection["roleMethods"].items():
+            owner = operation.split(".", 1)[0]
+            require(
+                hasattr(role_owners[owner], method),
+                f"Python frozen role method {operation} -> {method} is missing",
+            )
+        checked_keys.add("roleMethods")
+
+        for type_name, methods in projection["baselineMetadataCodecs"].items():
+            codec = resolve_public_target(f"nnrp.core.{type_name}")
+            for target in methods:
+                owner, method = target.split(".", 1)
+                require(owner == type_name, f"Python baseline codec owner drifted: {target}")
+                require(hasattr(codec, method), f"Python frozen baseline codec {target} is missing")
+        checked_keys.add("baselineMetadataCodecs")
+
+        require(
+            checked_keys == set(projection),
+            "Python projection target gate does not cover exactly every frozen semantic key: "
+            f"missing={sorted(set(projection) - checked_keys)}, extra={sorted(checked_keys - set(projection))}",
+        )
+    finally:
+        if inserted:
+            sys.path.remove(source_path)
+
+
+def assignment_value(module: ast.Module, name: str) -> str:
+    for node in module.body:
+        if (
+            isinstance(node, ast.Assign)
+            and len(node.targets) == 1
+            and isinstance(node.targets[0], ast.Name)
+            and node.targets[0].id == name
+        ):
+            return ast.unparse(node.value)
+    raise SystemExit(f"Python SDK is missing {name}")
 
 
 def check_contract(contract_path: Path, source_root: Path) -> None:
@@ -111,8 +486,60 @@ def check_contract(contract_path: Path, source_root: Path) -> None:
         == EXPECTED_TERMINAL_STATES,
         "ResultTerminalState contract drifted",
     )
+    semantic_enums = contract["semanticEnums"]
+    expected_connection_lifecycle_states = {"OPEN": "open", "CLOSING": "closing", "CLOSED": "closed"}
+    expected_session_lifecycle_states = {
+        "OPEN": "open",
+        "RESUMED": "resumed",
+        "CLOSING": "closing",
+        "DRAINING": "draining",
+        "CLOSED": "closed",
+    }
+    require(
+        {value.upper(): value for value in semantic_enums["ConnectionLifecycleState"]}
+        == expected_connection_lifecycle_states,
+        "ConnectionLifecycleState contract drifted",
+    )
+    require(
+        {value.upper(): value for value in semantic_enums["SessionLifecycleState"]}
+        == expected_session_lifecycle_states,
+        "SessionLifecycleState contract drifted",
+    )
+
+    body_region_prelude = contract.get("wireLayouts", {}).get("BodyRegionPrelude", {})
+    require(
+        body_region_prelude.get("size") == 32
+        and body_region_prelude.get("validation") == EXPECTED_BODY_REGION_VALIDATION,
+        "BodyRegionPrelude validation contract drifted",
+    )
 
     types = contract["types"]
+    require(
+        field_shape(types["TransportSelectionOptions"]) == EXPECTED_TRANSPORT_SELECTION_OPTIONS,
+        "TransportSelectionOptions field contract drifted",
+    )
+    require(
+        types["TransportSelectionOptions"].get("peerSupportedTransportsSemantics")
+        == "set; duplicates have no effect and input order is not semantically significant",
+        "TransportSelectionOptions peer transport semantics drifted",
+    )
+    require(
+        types["TransportSelectionOptions"].get("requestedMaxFrameBytesZeroRule")
+        == "zero is a valid requested size and must not be rejected or treated as absent",
+        "TransportSelectionOptions zero frame-size rule drifted",
+    )
+    require(
+        types["TransportProbeObservation"].get("stateConstraint") == ["succeeded", "failed"],
+        "TransportProbeObservation state constraint drifted",
+    )
+    require(
+        types["TransportProviderDescriptor"].get("nameSemantics") == EXPECTED_PROVIDER_NAME_SEMANTICS,
+        "TransportProviderDescriptor name semantics drifted",
+    )
+    require(
+        types.get("ResultPushMetadata", {}).get("validation") == EXPECTED_RESULT_PUSH_VALIDATION,
+        "ResultPushMetadata validation contract drifted",
+    )
     lifecycle = types["OperationLifecycleEvent"]
     require(
         field_shape(lifecycle) == [("operation_id", "u64", True), ("state", "OperationState", True)],
@@ -122,6 +549,14 @@ def check_contract(contract_path: Path, source_root: Path) -> None:
         lifecycle.get("terminalMapping")
         == {"completed": "success", "cancelled": "cancelled", "superseded": "dropped", "failed": "error"},
         "OperationLifecycleEvent terminal mapping drifted",
+    )
+
+    client_event = types["ClientEvent"]
+    require(client_event.get("representation") == "tagged-union", "ClientEvent is no longer a tagged union")
+    require(client_event.get("variants") == ["runtime", "lifecycle"], "ClientEvent variants drifted")
+    require(
+        client_event.get("variantTypes") == {"runtime": "RuntimeEvent", "lifecycle": "OperationLifecycleEvent"},
+        "ClientEvent variant types drifted",
     )
 
     terminal = types["TerminalEvent"]
@@ -141,6 +576,93 @@ def check_contract(contract_path: Path, source_root: Path) -> None:
             ("event", "TerminalEvent", True),
         ],
         "NnrpResult field contract drifted",
+    )
+    require(
+        result.get("successRule") == EXPECTED_RESULT_SUCCESS_RULE
+        and result.get("nonSuccessRule") == EXPECTED_RESULT_NON_SUCCESS_RULE,
+        "NnrpResult terminal evidence rules drifted",
+    )
+
+    server_operation = types["ServerOperation"]
+    require(
+        field_shape(server_operation)
+        == [
+            ("operation_id", "u64", True),
+            ("frame_id", "u32", True),
+            ("submit", "RuntimeEvent", True),
+        ],
+        "ServerOperation field contract drifted",
+    )
+    require(
+        server_operation.get("terminalMethods") == ["send_result", "send_result_drop"]
+        and server_operation.get("streamingMethods") == ["send_progress", "send_partial_result"],
+        "ServerOperation method contract drifted",
+    )
+    require(
+        server_operation.get("invariants") == EXPECTED_SERVER_OPERATION_INVARIANTS,
+        "ServerOperation invariants drifted",
+    )
+
+    server_event = types["ServerEvent"]
+    require(server_event.get("representation") == "tagged-union", "ServerEvent is no longer a tagged union")
+    require(server_event.get("variants") == ["submit", "runtime", "lifecycle"], "ServerEvent variants drifted")
+    require(
+        server_event.get("variantTypes")
+        == {
+            "submit": "ServerOperation",
+            "runtime": "RuntimeEvent",
+            "lifecycle": "OperationLifecycleEvent",
+        },
+        "ServerEvent variant types drifted",
+    )
+
+    lifecycle_projection = types["OperationLifecycleEvent"].get("nativeEventProjection", {})
+    require(
+        lifecycle_projection
+        == {
+            "eventKind": "operation_lifecycle",
+            "eventKindCode": 14,
+            "headerPresent": 0,
+            "payloadBytes": 1,
+            "payloadLayout": [
+                {
+                    "name": "state",
+                    "type": "OperationState",
+                    "wireType": "u8",
+                    "offset": 0,
+                }
+            ],
+            "operationIdentity": (
+                "diagnostic.related_operation_id and the operation handle, when the handle remains live"
+            ),
+            "ownership": "the one-byte state payload follows the same payload_owner lifetime as wire-event payloads",
+        },
+        "OperationLifecycleEvent native projection drifted",
+    )
+
+    require(
+        field_shape(types["SessionLifecycleSnapshot"])
+        == [
+            ("session_id", "u32", True),
+            ("state", "SessionLifecycleState", True),
+            ("profile_id", "u16", True),
+            ("priority_class", "SessionPriorityClass", True),
+            ("schema_id", "u32", True),
+            ("schema_version", "u32", True),
+            ("max_in_flight_operations", "u16", True),
+            ("route_scope_id", "u32", True),
+            ("last_operation_id", "u64", True),
+            ("session_error_code", "u32", True),
+        ],
+        "SessionLifecycleSnapshot field contract drifted",
+    )
+    require(
+        field_shape(types["ConnectionLifecycleSnapshot"])
+        == [
+            ("state", "ConnectionLifecycleState", True),
+            ("sessions", "SessionLifecycleSnapshot[]", True),
+        ],
+        "ConnectionLifecycleSnapshot field contract drifted",
     )
 
     recovery_ticket = types["SessionRecoveryTicket"]
@@ -166,33 +688,15 @@ def check_contract(contract_path: Path, source_root: Path) -> None:
         "SessionRecoveryTicket opaque encoding drifted",
     )
 
-    python_projection = contract["languageProjections"]["python"]
-    require(
-        python_projection.get("operationLifecycleEvent") == "nnrp.runtime.OperationLifecycleEvent",
-        "Python OperationLifecycleEvent projection drifted",
+    python_projection = require_mapping(
+        require_mapping(contract.get("languageProjections"), "SDK language projections must be an object").get(
+            "python"
+        ),
+        "Python SDK projection must be an object",
     )
     require(
-        python_projection.get("terminalEvent") == "nnrp.runtime.NativeTerminalEvent",
-        "Python NativeTerminalEvent projection drifted",
-    )
-    require(
-        python_projection.get("result") == "nnrp.NativeRuntimeResult",
-        "Python NativeRuntimeResult projection drifted",
-    )
-    expected_recovery_projections = {
-        "clientBootstrapOptions": "nnrp.client.NativeClientOptions",
-        "clientSessionOptions": "nnrp.client.NativeClientSessionOptions",
-        "sessionRecoveryTicket": "nnrp.client.NativeSessionRecoveryTicket",
-        "sessionRecoveryTicketEncode": "NativeSessionRecoveryTicket.to_bytes",
-        "sessionRecoveryTicketDecode": "NativeSessionRecoveryTicket.from_bytes",
-        "serverBootstrapOptions": "nnrp.server.NativeServerBootstrapOptions",
-        "serverSessionOptions": "nnrp.server.NativeServerSessionOptions",
-        "serverAcceptOptions": "nnrp.server.NativeServerAcceptOptions",
-        "serverSessionPolicy": "nnrp.server.NativeServerSessionPolicy",
-    }
-    require(
-        all(python_projection.get(name) == value for name, value in expected_recovery_projections.items()),
-        "Python recovery and role option projections drifted",
+        python_projection == EXPECTED_PYTHON_PROJECTIONS,
+        "Python SDK projection map drifted; update the implementation contract test with the frozen API",
     )
 
     role_operations = contract.get("roleOperations", {})
@@ -208,6 +712,74 @@ def check_contract(contract_path: Path, source_root: Path) -> None:
         and role_operations.get("client_session.recovery_ticket", {}).get("async") is False,
         "recovery role operation async semantics drifted",
     )
+    require(
+        role_operations.get("client_session.next_event", {}).get("returns") == "ClientEvent"
+        and role_operations.get("client_session.next_event", {}).get("async") is True,
+        "client next_event role operation drifted",
+    )
+    require(
+        role_operations.get("server.accept", {}).get("returns") == "ServerSession"
+        and role_operations.get("server.accept", {}).get("async") is True
+        and role_operations.get("server_session.next_event", {}).get("returns") == "ServerEvent"
+        and role_operations.get("server_session.next_event", {}).get("async") is True,
+        "server event role operations drifted",
+    )
+    receive_submit = role_operations.get("server_session.receive_submit", {})
+    require(
+        receive_submit.get("returns") == "ServerOperation"
+        and receive_submit.get("async") is True
+        and receive_submit.get("selective") is True
+        and receive_submit.get("retainsSkippedEvents") is True,
+        "server receive_submit role operation drifted",
+    )
+    expected_operation_methods = {
+        "server_operation.send_result": (
+            [("metadata", "ResultPushMetadata", True), ("body", "bytes", False)],
+            True,
+        ),
+        "server_operation.send_result_drop": (
+            [("metadata", "ResultDropReasonMetadata", True), ("diagnostic", "bytes", False)],
+            True,
+        ),
+        "server_operation.send_progress": (
+            [("metadata", "ProgressMetadata", True), ("body", "bytes", False)],
+            False,
+        ),
+        "server_operation.send_partial_result": (
+            [("metadata", "PartialResultMetadata", True), ("body", "bytes", False)],
+            False,
+        ),
+    }
+    for operation_name, (parameters, terminal) in expected_operation_methods.items():
+        operation = role_operations.get(operation_name, {})
+        require(
+            [
+                (parameter.get("name"), parameter.get("type"), parameter.get("required"))
+                for parameter in operation.get("parameters", [])
+            ]
+            == parameters
+            and operation.get("returns") == "void"
+            and operation.get("async") is True
+            and operation.get("terminal") is terminal,
+            f"{operation_name} role operation drifted",
+        )
+    role_surfaces = require_mapping(contract.get("roleSurfaces"), "SDK role surfaces must be an object")
+    client_submit_wait = require_mapping(
+        role_surfaces.get("clientSubmitWait"),
+        "client submit-wait contract must be an object",
+    )
+    require(
+        client_submit_wait == EXPECTED_CLIENT_SUBMIT_WAIT,
+        "client submit-wait semantics drifted",
+    )
+    server_event_pump = require_mapping(
+        role_surfaces.get("serverEventPump"),
+        "server event-pump contract must be an object",
+    )
+    require(
+        server_event_pump == EXPECTED_SERVER_EVENT_PUMP,
+        "server event-pump semantics drifted",
+    )
 
     runtime_module = parse_module(source_root / "src" / "nnrp" / "runtime" / "types.py")
     runtime_public_module = parse_module(source_root / "src" / "nnrp" / "runtime" / "__init__.py")
@@ -217,6 +789,33 @@ def check_contract(contract_path: Path, source_root: Path) -> None:
     server_module = parse_module(source_root / "src" / "nnrp" / "server" / "native.py")
     server_public_module = parse_module(source_root / "src" / "nnrp" / "server" / "__init__.py")
     root_module = parse_module(source_root / "src" / "nnrp" / "__init__.py")
+    lifecycle_module = parse_module(source_root / "src" / "nnrp" / "lifecycle.py")
+    control_metadata_module = parse_module(source_root / "src" / "nnrp" / "core" / "messages" / "control.py")
+    data_metadata_module = parse_module(source_root / "src" / "nnrp" / "core" / "messages" / "data.py")
+    core_public_module = parse_module(source_root / "src" / "nnrp" / "core" / "__init__.py")
+    metadata_modules = {
+        "control": control_metadata_module,
+        "data": data_metadata_module,
+    }
+    for type_name, module_name in PYTHON_BASELINE_METADATA_CODEC_MODULES.items():
+        require_python_baseline_metadata_codec(metadata_modules[module_name], type_name)
+    require(
+        set(PYTHON_BASELINE_METADATA_CODEC_MODULES) <= exported_names(core_public_module),
+        "nnrp.core is missing frozen baseline metadata codec exports",
+    )
+    data_plane_source = (source_root / "src" / "nnrp" / "core" / "messages" / "data.py").read_text(encoding="utf-8")
+    for implementation_marker in (
+        "self.object_reference_bytes % OBJECT_REFERENCE_BLOCK_LENGTH",
+        "self.typed_payload_descriptor_bytes % TYPED_PAYLOAD_DESCRIPTOR_LENGTH",
+        "self.extension_descriptor_bytes % EXTENSION_FRAME_DESCRIPTOR_LENGTH",
+        "stale != (metadata.reused_frame_id != 0)",
+        "partial and metadata.dropped_tile_count == 0",
+        "metadata.covered_tile_count + metadata.dropped_tile_count != metadata.tile_count",
+    ):
+        require(
+            implementation_marker in data_plane_source,
+            f"Python data-plane implementation is missing frozen rule: {implementation_marker}",
+        )
     require(
         enum_values(class_definition(runtime_module, "OperationState")) == EXPECTED_OPERATION_STATES,
         "Python OperationState implementation drifted",
@@ -230,6 +829,10 @@ def check_contract(contract_path: Path, source_root: Path) -> None:
         "Python OperationLifecycleEvent implementation fields drifted",
     )
     require(
+        assignment_value(runtime_module, "NativeClientEvent") == "NativeRuntimeEvent | OperationLifecycleEvent",
+        "Python NativeClientEvent implementation drifted",
+    )
+    require(
         annotated_fields(class_definition(runtime_module, "NativeTerminalEvent")) == ["kind", "value"],
         "Python NativeTerminalEvent implementation is not a closed tagged union",
     )
@@ -238,17 +841,174 @@ def check_contract(contract_path: Path, source_root: Path) -> None:
         == ["operation_id", "terminal_state", "event"],
         "Python NativeRuntimeResult implementation fields drifted",
     )
+    require(
+        annotated_field_types(class_definition(native_module, "NativeTransportSelectionOptions"))
+        == [
+            ("peer_supported_transports", "tuple[TransportId, ...]"),
+            ("policy", "TransportPolicy"),
+            ("requested_max_frame_bytes", "int | None"),
+            ("candidate_readiness", "tuple[NativeTransportCandidateReadiness, ...]"),
+            ("probe_observations", "tuple[NativeTransportProbeObservation, ...]"),
+        ],
+        "Python NativeTransportSelectionOptions implementation shape drifted",
+    )
+    expected_transport_shapes = {
+        "NativeTransportProviderCost": [("model_id", "int"), ("units", "int")],
+        "NativeTransportProviderLimits": [("max_frame_bytes", "int")],
+        "NativeTransportProviderMetadata": [
+            ("id", "str"),
+            ("cost", "NativeTransportProviderCost"),
+            ("preference_rank", "int"),
+            ("limits", "NativeTransportProviderLimits"),
+            ("limitations", "tuple[NativeTransportProviderLimitation, ...]"),
+        ],
+        "NativeTransportProvider": [
+            ("name", "str"),
+            ("version", "str"),
+            ("transport_id", "TransportId"),
+            ("kind", "NativeTransportProviderKind"),
+            ("available", "bool"),
+            ("library_path", "str | None"),
+            ("metadata", "NativeTransportProviderMetadata"),
+            ("diagnostic", "str | None"),
+        ],
+        "NativeTransportCandidateReadiness": [
+            ("transport_id", "TransportId"),
+            ("provider_id", "str"),
+            ("route_resolved", "bool"),
+            ("security_satisfied", "bool"),
+            ("diagnostic", "str | None"),
+        ],
+        "NativeTransportProbeMetrics": [
+            ("sample_count", "int"),
+            ("success_count", "int"),
+            ("median_throughput_bytes_per_sec", "int"),
+            ("median_rtt_us", "int"),
+        ],
+        "NativeTransportProbeSample": [
+            ("transport_id", "TransportId"),
+            ("provider_id", "str"),
+            ("elapsed_us", "int"),
+            ("rtt_us", "int | None"),
+            ("bytes_sent", "int"),
+            ("bytes_received", "int"),
+            ("timed_out", "bool"),
+            ("failed", "bool"),
+        ],
+        "NativeTransportProbeObservation": [
+            ("transport_id", "TransportId"),
+            ("provider_id", "str"),
+            ("state", "NativeTransportProbeState"),
+            ("metrics", "NativeTransportProbeMetrics | None"),
+            ("diagnostic", "str | None"),
+        ],
+        "NativeTransportCandidateDiagnostic": [
+            ("transport_id", "TransportId"),
+            ("provider", "NativeTransportProviderMetadata"),
+            ("local_available", "bool"),
+            ("peer_supported", "bool"),
+            ("within_limits", "bool"),
+            ("probe_state", "NativeTransportProbeState"),
+            ("probe", "NativeTransportProbeMetrics | None"),
+            ("selection_rank", "int | None"),
+            ("rejection_reason", "NativeTransportRejectionReason | None"),
+            ("diagnostic", "str | None"),
+        ],
+        "NativeTransportSelection": [
+            ("selected_provider", "NativeTransportProvider"),
+            ("candidates", "tuple[NativeTransportCandidateDiagnostic, ...]"),
+            ("policy", "TransportPolicy"),
+            ("diagnostic", "str | None"),
+        ],
+        "NativeTransportSelectionError": [
+            ("code", "NativeTransportSelectionErrorCode"),
+            ("policy", "TransportPolicy | None"),
+            ("transport_id", "TransportId | None"),
+            ("candidates", "tuple[NativeTransportCandidateDiagnostic, ...]"),
+            ("diagnostic", "str"),
+        ],
+    }
+    for type_name, expected_fields in expected_transport_shapes.items():
+        require(
+            public_annotated_field_types(class_definition(native_module, type_name)) == expected_fields,
+            f"Python {type_name} public field types drifted from the frozen transport contract",
+        )
+    server_operation_class = class_definition(native_module, "NativeRuntimeServerOperation")
+    require(
+        public_annotated_fields(server_operation_class) == ["operation_id", "frame_id", "submit"],
+        "Python NativeRuntimeServerOperation public fields drifted",
+    )
+    for method_name, tail_name in (
+        ("send_result", "body"),
+        ("send_result_drop", "diagnostic"),
+        ("send_progress", "body"),
+        ("send_partial_result", "body"),
+    ):
+        require(
+            method_parameters(server_operation_class, method_name) == ["self", "metadata", tail_name]
+            and method_is_async(server_operation_class, method_name)
+            and method_return_annotation(server_operation_class, method_name) == "None",
+            f"Python NativeRuntimeServerOperation.{method_name} signature drifted",
+        )
+    server_session_class = class_definition(native_module, "NativeRuntimeServerSession")
+    server_session_methods = {
+        node.name for node in server_session_class.body if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+    }
+    require(
+        not {"send_result", "send_result_drop", "send_progress", "send_partial_result", "send_result_drop_reason"}
+        & server_session_methods,
+        "Python NativeRuntimeServerSession bypasses frozen operation ownership",
+    )
+    server_event_class = class_definition(native_module, "NativeServerEvent")
+    require(
+        annotated_fields(server_event_class) == ["kind", "value"],
+        "Python NativeServerEvent implementation is not a closed tagged union",
+    )
+    require(
+        string_enum_values(class_definition(native_module, "NativeServerEventKind"))
+        == {"SUBMIT": "submit", "RUNTIME": "runtime", "LIFECYCLE": "lifecycle"},
+        "Python NativeServerEventKind drifted",
+    )
     runtime_exports = exported_names(runtime_public_module)
     require(
-        {"OperationLifecycleEvent", "NativeTerminalEvent", "OperationState", "ResultTerminalState"} <= runtime_exports,
-        "nnrp.runtime is missing frozen terminal API exports",
+        {
+            "NativeClientEvent",
+            "OperationLifecycleEvent",
+            "NativeTerminalEvent",
+            "OperationState",
+            "ResultTerminalState",
+        }
+        <= runtime_exports,
+        "nnrp.runtime is missing frozen client-event or terminal API exports",
     )
     root_exports = exported_names(root_module)
-    require("NativeRuntimeResult" in root_exports, "nnrp is missing the frozen NativeRuntimeResult export")
+    require(
+        {"NativeClientEvent", "NativeRuntimeResult"} <= root_exports,
+        "nnrp is missing frozen client event or result exports",
+    )
     require("NativeOperationLifecycle" not in root_exports, "nnrp still exports legacy NativeOperationLifecycle")
     native_class_names = {node.name for node in native_module.body if isinstance(node, ast.ClassDef)}
+    native_constants = {
+        node.targets[0].id: node.value.value
+        for node in native_module.body
+        if isinstance(node, ast.Assign)
+        and len(node.targets) == 1
+        and isinstance(node.targets[0], ast.Name)
+        and isinstance(node.value, ast.Constant)
+        and isinstance(node.value.value, int)
+    }
+    require(
+        native_constants.get("EVENT_KIND_OPERATION_LIFECYCLE") == 14,
+        "Python operation lifecycle native event kind drifted",
+    )
     require("NativeOperationLifecycle" not in native_class_names, "legacy NativeOperationLifecycle remains public")
     session = class_definition(native_module, "NativeRuntimeSession")
+    require(
+        method_parameters(session, "next_event") == ["self", "timeout"]
+        and method_is_async(session, "next_event")
+        and method_return_annotation(session, "next_event") == "NativeClientEvent",
+        "NativeRuntimeSession.next_event drifted",
+    )
     for method_name in ("poll_result", "submit_and_poll_result", "async_submit_and_poll_result"):
         require(
             "state" not in method_parameters(session, method_name),
@@ -339,6 +1099,26 @@ def check_contract(contract_path: Path, source_root: Path) -> None:
         == ["accepted", "session_error_code", "diagnostic"],
         "NativeServerSessionPolicyDecision fields drifted",
     )
+    native_server = class_definition(server_module, "NativeServer")
+    require(
+        method_parameters(native_server, "accept") == ["self", "options"]
+        and method_is_async(native_server, "accept")
+        and method_return_annotation(native_server, "accept") == "NativeRuntimeServerSession",
+        "NativeServer.accept drifted",
+    )
+    native_server_session = class_definition(native_module, "NativeRuntimeServerSession")
+    require(
+        method_parameters(native_server_session, "next_event") == ["self", "timeout"]
+        and method_is_async(native_server_session, "next_event")
+        and method_return_annotation(native_server_session, "next_event") == "NativeServerEvent",
+        "NativeRuntimeServerSession.next_event drifted",
+    )
+    require(
+        method_parameters(native_server_session, "receive_submit") == ["self", "timeout"]
+        and method_is_async(native_server_session, "receive_submit")
+        and method_return_annotation(native_server_session, "receive_submit") == "NativeRuntimeServerOperation",
+        "NativeRuntimeServerSession.receive_submit drifted",
+    )
 
     client_exports = exported_names(client_public_module)
     require(
@@ -359,11 +1139,54 @@ def check_contract(contract_path: Path, source_root: Path) -> None:
             "NativeServerAcceptOptions",
             "NativeServerSessionPolicy",
             "NativeServerSessionPolicyDecision",
+            "NativeServerEvent",
+            "NativeServerEventKind",
         }
         <= server_exports,
-        "nnrp.server is missing frozen v9 exports",
+        "nnrp.server is missing frozen role-event exports",
     )
     require("NativeServerOptions" not in server_exports, "nnrp.server still exports legacy NativeServerOptions")
+
+    require(
+        string_enum_values(class_definition(lifecycle_module, "ConnectionLifecycleState"))
+        == expected_connection_lifecycle_states,
+        "Python ConnectionLifecycleState implementation drifted",
+    )
+    require(
+        string_enum_values(class_definition(lifecycle_module, "SessionLifecycleState"))
+        == expected_session_lifecycle_states,
+        "Python SessionLifecycleState implementation drifted",
+    )
+    require(
+        annotated_fields(class_definition(lifecycle_module, "SessionLifecycleSnapshot"))
+        == [
+            "session_id",
+            "state",
+            "profile_id",
+            "priority_class",
+            "schema_id",
+            "schema_version",
+            "max_in_flight_operations",
+            "route_scope_id",
+            "last_operation_id",
+            "session_error_code",
+        ],
+        "Python SessionLifecycleSnapshot implementation fields drifted",
+    )
+    require(
+        annotated_fields(class_definition(lifecycle_module, "ConnectionLifecycleSnapshot")) == ["state", "sessions"],
+        "Python ConnectionLifecycleSnapshot implementation fields drifted",
+    )
+    require(
+        {
+            "ConnectionLifecycleSnapshot",
+            "ConnectionLifecycleState",
+            "SessionLifecycleSnapshot",
+            "SessionLifecycleState",
+        }
+        == exported_names(lifecycle_module),
+        "nnrp.lifecycle exports drifted",
+    )
 
 
 def main() -> None:
@@ -372,6 +1195,15 @@ def main() -> None:
     parser.add_argument("--source-root", type=Path, default=Path(__file__).resolve().parents[1])
     args = parser.parse_args()
     check_contract(args.contract, args.source_root)
+    contract = require_mapping(
+        json.loads(args.contract.read_text(encoding="utf-8")),
+        "SDK API contract root must be an object",
+    )
+    projections = require_mapping(contract.get("languageProjections"), "SDK API contract lacks languageProjections")
+    require_python_projection_targets(
+        require_mapping(projections.get("python"), "SDK API contract lacks the Python projection"),
+        args.source_root,
+    )
 
 
 if __name__ == "__main__":

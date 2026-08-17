@@ -6,9 +6,11 @@ import asyncio
 import atexit
 import ctypes
 import json
+import math
 import os
 import platform
 import threading
+import time
 from collections.abc import AsyncIterator, Callable, Iterable, Mapping
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass, field, replace
@@ -39,6 +41,7 @@ from nnrp.runtime import (
     CacheReferenceMetadata,
     CapabilityMetadata,
     ControlRequestMetadata,
+    NativeClientEvent,
     NativeRuntimeEvent,
     NativeTerminalEvent,
     ObjectDeltaMetadata,
@@ -128,6 +131,7 @@ RUNTIME_FEATURE_RECOVERY = 0x0000000000000040
 RUNTIME_FEATURE_TYPED_PAYLOAD = 0x0000000000000080
 RUNTIME_FEATURE_TRANSPORT_SLOTS = 0x0000000000000100
 RUNTIME_FEATURE_BATCH_POLLING = 0x0000000000000200
+_INDEFINITE_EVENT_POLL_SLICE_MS = 100
 RUNTIME_FEATURE_CACHE_LEASE_OPS = 0x0000000000000400
 RUNTIME_FEATURE_SCHEMA_REGISTRY_HANDLES = 0x0000000000000800
 RUNTIME_FEATURE_BUFFER_HANDLES = 0x0000000000001000
@@ -291,6 +295,7 @@ EVENT_KIND_ERROR = 10
 EVENT_KIND_RESULT_HINT = 11
 EVENT_KIND_PARTIAL_RESULT = 12
 EVENT_KIND_RUNTIME_FRAME = 13
+EVENT_KIND_OPERATION_LIFECYCLE = 14
 DEFAULT_ARTIFACT_ROOT_ENV = "NNRP_NATIVE_ARTIFACT_ROOT"
 _CallbackEventT = TypeVar("_CallbackEventT")
 
@@ -411,17 +416,45 @@ class NativeTransportProviderMetadata:
             raise ValueError("limitations must not contain duplicates")
 
 
+class NativeTransportProviderKind(StrEnum):
+    PURE_RUST = "pure-rust"
+    NATIVE_DYNAMIC = "native-dynamic"
+    WASM = "wasm"
+
+
 @dataclass(frozen=True)
 class NativeTransportProvider:
     name: str
-    artifact_path: Path
-    manifest_path: Path
-    transport_slots: tuple[str, ...]
-    enabled_features: tuple[str, ...]
-    package: str
-    transport_scope: str
-    platform_tag: str
+    version: str
+    transport_id: TransportId
+    kind: NativeTransportProviderKind
+    available: bool
+    library_path: str | None
     metadata: NativeTransportProviderMetadata
+    diagnostic: str | None = None
+    _artifact_path: Path | None = field(default=None, init=False, repr=False, compare=False)
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.name, str) or not self.name:
+            raise ValueError("name must be a non-empty string")
+        if not isinstance(self.version, str) or not self.version:
+            raise ValueError("version must be a non-empty string")
+        if self.transport_id not in NATIVE_TRANSPORT_NAME_BY_ID:
+            raise ValueError("transport_id must identify a selectable transport")
+        if not isinstance(self.kind, NativeTransportProviderKind):
+            raise ValueError("kind must be a NativeTransportProviderKind")
+        if not isinstance(self.available, bool):
+            raise ValueError("available must be a bool")
+        if self.library_path is not None and not isinstance(self.library_path, str):
+            raise ValueError("library_path must be a string or None")
+        if not isinstance(self.metadata, NativeTransportProviderMetadata):
+            raise ValueError("metadata must be a NativeTransportProviderMetadata")
+        if self.diagnostic is not None and not isinstance(self.diagnostic, str):
+            raise ValueError("diagnostic must be a string or None")
+
+    @property
+    def transport_name(self) -> str:
+        return NATIVE_TRANSPORT_NAME_BY_ID[self.transport_id]
 
 
 @dataclass(frozen=True)
@@ -447,7 +480,7 @@ class NativeTransportCandidateReadiness:
     @classmethod
     def ready(cls, provider: NativeTransportProvider) -> NativeTransportCandidateReadiness:
         return cls(
-            transport_id=NATIVE_TRANSPORT_ID_BY_NAME[provider.name],
+            transport_id=provider.transport_id,
             provider_id=provider.metadata.id,
             route_resolved=True,
             security_satisfied=True,
@@ -460,7 +493,7 @@ class NativeTransportCandidateReadiness:
         diagnostic: str,
     ) -> NativeTransportCandidateReadiness:
         return cls(
-            transport_id=NATIVE_TRANSPORT_ID_BY_NAME[provider.name],
+            transport_id=provider.transport_id,
             provider_id=provider.metadata.id,
             route_resolved=False,
             security_satisfied=True,
@@ -474,7 +507,7 @@ class NativeTransportCandidateReadiness:
         diagnostic: str,
     ) -> NativeTransportCandidateReadiness:
         return cls(
-            transport_id=NATIVE_TRANSPORT_ID_BY_NAME[provider.name],
+            transport_id=provider.transport_id,
             provider_id=provider.metadata.id,
             route_resolved=True,
             security_satisfied=False,
@@ -554,8 +587,8 @@ class NativeTransportEndpointSupport:
 
 @dataclass(frozen=True)
 class NativeTransportProbeSample:
+    transport_id: TransportId
     provider_id: str
-    transport_name: str
     elapsed_us: int
     rtt_us: int | None = None
     bytes_sent: int = 0
@@ -564,21 +597,19 @@ class NativeTransportProbeSample:
     failed: bool = False
 
     def __post_init__(self) -> None:
+        if self.transport_id not in NATIVE_TRANSPORT_NAME_BY_ID:
+            raise ValueError("transport_id must identify a selectable transport")
         if not isinstance(self.provider_id, str) or not self.provider_id or not self.provider_id.isascii():
             raise ValueError("provider_id must be a non-empty ASCII string")
-        if not isinstance(self.transport_name, str):
-            raise ValueError("transport_name must be a canonical transport name")
-        try:
-            canonical_transport_name = _normalize_native_transport_scope(self.transport_name)
-        except NativeArtifactError as error:
-            raise ValueError("transport_name must be a canonical transport name") from error
-        if canonical_transport_name != self.transport_name:
-            raise ValueError("transport_name must be a canonical transport name")
         _require_bounded_integer("elapsed_us", self.elapsed_us, 0xFFFFFFFFFFFFFFFF)
         if self.rtt_us is not None:
             _require_bounded_integer("rtt_us", self.rtt_us, 0xFFFFFFFFFFFFFFFF)
         _require_bounded_integer("bytes_sent", self.bytes_sent, 0xFFFFFFFFFFFFFFFF)
         _require_bounded_integer("bytes_received", self.bytes_received, 0xFFFFFFFFFFFFFFFF)
+
+    @property
+    def transport_name(self) -> str:
+        return NATIVE_TRANSPORT_NAME_BY_ID[self.transport_id]
 
 
 class NativeTransportProbeState(StrEnum):
@@ -641,7 +672,7 @@ class NativeTransportProbeObservation:
         metrics: NativeTransportProbeMetrics,
     ) -> NativeTransportProbeObservation:
         return cls(
-            transport_id=NATIVE_TRANSPORT_ID_BY_NAME[provider.name],
+            transport_id=provider.transport_id,
             provider_id=provider.metadata.id,
             state=NativeTransportProbeState.SUCCEEDED,
             metrics=metrics,
@@ -654,7 +685,7 @@ class NativeTransportProbeObservation:
         diagnostic: str,
     ) -> NativeTransportProbeObservation:
         return cls(
-            transport_id=NATIVE_TRANSPORT_ID_BY_NAME[provider.name],
+            transport_id=provider.transport_id,
             provider_id=provider.metadata.id,
             state=NativeTransportProbeState.FAILED,
             diagnostic=diagnostic,
@@ -674,7 +705,6 @@ class NativeTransportRejectionReason(StrEnum):
 
 @dataclass(frozen=True)
 class NativeTransportCandidateDiagnostic:
-    transport_name: str
     transport_id: TransportId
     provider: NativeTransportProviderMetadata
     local_available: bool
@@ -687,10 +717,8 @@ class NativeTransportCandidateDiagnostic:
     diagnostic: str | None = None
 
     def __post_init__(self) -> None:
-        if _normalize_native_transport_scope(self.transport_name) != self.transport_name:
-            raise ValueError("transport_name must use the canonical transport name")
-        if NATIVE_TRANSPORT_ID_BY_NAME[self.transport_name] is not self.transport_id:
-            raise ValueError("transport_id does not match transport_name")
+        if self.transport_id not in NATIVE_TRANSPORT_NAME_BY_ID:
+            raise ValueError("transport_id must identify a selectable transport")
         if not isinstance(self.provider, NativeTransportProviderMetadata):
             raise ValueError("provider must be a NativeTransportProviderMetadata")
         if self.probe_state is NativeTransportProbeState.SUCCEEDED and self.probe is None:
@@ -702,6 +730,10 @@ class NativeTransportCandidateDiagnostic:
             if self.rejection_reason is not None:
                 raise ValueError("rejected candidates must not have selection_rank")
 
+    @property
+    def transport_name(self) -> str:
+        return NATIVE_TRANSPORT_NAME_BY_ID[self.transport_id]
+
 
 @dataclass(frozen=True)
 class NativeTransportSelection:
@@ -712,11 +744,46 @@ class NativeTransportSelection:
 
     @property
     def selected_transport_name(self) -> str:
-        return self.selected_provider.name
+        return self.selected_provider.transport_name
 
     @property
     def selected_transport_id(self) -> TransportId:
-        return NATIVE_TRANSPORT_ID_BY_NAME[self.selected_provider.name]
+        return self.selected_provider.transport_id
+
+
+@dataclass(frozen=True)
+class NativeTransportSelectionOptions:
+    peer_supported_transports: tuple[TransportId, ...]
+    policy: TransportPolicy
+    requested_max_frame_bytes: int | None
+    candidate_readiness: tuple[NativeTransportCandidateReadiness, ...]
+    probe_observations: tuple[NativeTransportProbeObservation, ...]
+
+    def __post_init__(self) -> None:
+        peers = tuple(self.peer_supported_transports)
+        if any(
+            not isinstance(transport_id, TransportId)
+            or transport_id not in NATIVE_TRANSPORT_NAME_BY_ID
+            for transport_id in peers
+        ):
+            raise ValueError("peer_supported_transports must contain selectable transport IDs")
+        if not isinstance(self.policy, TransportPolicy):
+            raise ValueError("policy must be a TransportPolicy")
+        if self.requested_max_frame_bytes is not None:
+            _require_bounded_integer(
+                "requested_max_frame_bytes",
+                self.requested_max_frame_bytes,
+                0xFFFFFFFFFFFFFFFF,
+            )
+        readiness = tuple(self.candidate_readiness)
+        if any(not isinstance(value, NativeTransportCandidateReadiness) for value in readiness):
+            raise ValueError("candidate_readiness must contain NativeTransportCandidateReadiness values")
+        observations = tuple(self.probe_observations)
+        if any(not isinstance(value, NativeTransportProbeObservation) for value in observations):
+            raise ValueError("probe_observations must contain NativeTransportProbeObservation values")
+        object.__setattr__(self, "peer_supported_transports", peers)
+        object.__setattr__(self, "candidate_readiness", readiness)
+        object.__setattr__(self, "probe_observations", observations)
 
 
 class NativeTransportSelectionErrorCode(StrEnum):
@@ -728,17 +795,37 @@ class NativeTransportSelectionErrorCode(StrEnum):
 class NativeTransportSelectionError(NativeArtifactError):
     """Raised when transport evidence is invalid or cannot produce a selection."""
 
+    code: NativeTransportSelectionErrorCode
+    policy: TransportPolicy | None
+    transport_id: TransportId | None
+    candidates: tuple[NativeTransportCandidateDiagnostic, ...]
+    diagnostic: str
+
     def __init__(
         self,
         code: NativeTransportSelectionErrorCode,
         diagnostic: str,
         *,
         policy: TransportPolicy | None = None,
+        transport_id: TransportId | None = None,
         candidates: tuple[NativeTransportCandidateDiagnostic, ...] = (),
     ) -> None:
+        if not isinstance(code, NativeTransportSelectionErrorCode):
+            raise ValueError("code must be a NativeTransportSelectionErrorCode")
+        if policy is not None and not isinstance(policy, TransportPolicy):
+            raise ValueError("policy must be a TransportPolicy or None")
+        if transport_id is not None and transport_id not in NATIVE_TRANSPORT_NAME_BY_ID:
+            raise ValueError("transport_id must identify a selectable transport or be None")
+        if not isinstance(candidates, tuple) or any(
+            not isinstance(candidate, NativeTransportCandidateDiagnostic) for candidate in candidates
+        ):
+            raise ValueError("candidates must contain NativeTransportCandidateDiagnostic values")
+        if not isinstance(diagnostic, str):
+            raise ValueError("diagnostic must be a string")
         super().__init__(diagnostic, candidates=candidates)
         self.code = code
         self.policy = policy
+        self.transport_id = transport_id
         self.diagnostic = diagnostic
 
 
@@ -864,6 +951,10 @@ class NativeCallbackRejectedError(NativeRuntimeError):
 
 class NativeInternalError(NativeRuntimeError):
     """Raised when Rust FFI reports an internal failure."""
+
+
+class _NativeSubmitWaitCancelled(RuntimeError):
+    """Stop a worker-thread submit wait after caller cancellation."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -1972,7 +2063,7 @@ class NativeTransportConnection:
 
     @property
     def kind(self) -> str:
-        return self._provider.name
+        return self._provider.transport_name
 
     @property
     def endpoint(self) -> NativeTransportEndpoint:
@@ -2144,9 +2235,7 @@ class _NativeServerPolicyDispatcher:
             session_error_code,
             diagnostic_view,
         )
-        status = self._entrypoints.server_policy_complete(
-            _NnrpServerPolicyCompleteRequest(request_id, decision)
-        )
+        status = self._entrypoints.server_policy_complete(_NnrpServerPolicyCompleteRequest(request_id, decision))
         del diagnostic_owner
         raise_for_native_status(status)
 
@@ -2193,7 +2282,7 @@ class NativeTransportListener:
 
     @property
     def kind(self) -> str:
-        return self._provider.name
+        return self._provider.transport_name
 
     @property
     def endpoint(self) -> NativeTransportEndpoint:
@@ -2300,7 +2389,7 @@ class NativeTransportListener:
             return NativeRuntimeServer(
                 entrypoints,
                 NativeConnectionHandle.from_ffi(output),
-                self._provider.name,
+                self._provider.transport_name,
                 policy_dispatcher,
             )
 
@@ -2326,8 +2415,6 @@ class NativeTransportBinding:
         *,
         unavailable_diagnostic: str | None = None,
     ) -> None:
-        if provider.name not in provider.transport_slots:
-            raise NativeArtifactError(f"native provider {provider.name!r} does not own its transport slot")
         if entrypoints is None and not unavailable_diagnostic:
             raise ValueError("unavailable native transport bindings require a diagnostic")
         if entrypoints is not None and unavailable_diagnostic is not None:
@@ -2405,7 +2492,7 @@ class NativeTransportBinding:
 
     @property
     def kind(self) -> str:
-        return self.provider.name
+        return self.provider.transport_name
 
     @property
     def local_available(self) -> bool:
@@ -2552,9 +2639,9 @@ class NativeTransportBinding:
         parsed = (
             endpoint if isinstance(endpoint, NativeTransportEndpoint) else parse_native_transport_endpoint(endpoint)
         )
-        if parsed.transport_name != self.provider.name:
+        if parsed.transport_name != self.provider.transport_name:
             raise NativeArtifactError(
-                f"native provider {self.provider.name!r} cannot open {parsed.transport_name!r} endpoint"
+                f"native provider {self.provider.transport_name!r} cannot open {parsed.transport_name!r} endpoint"
             )
         return parsed
 
@@ -2604,7 +2691,7 @@ class NativeTransportBinding:
         _raise_for_native_ffi_status(
             self.entrypoints.client_security_config_create(
                 _NnrpTransportClientSecurityConfigRequest(
-                    int(NATIVE_TRANSPORT_ID_BY_NAME[self.provider.name]),
+                    int(self.provider.transport_id),
                     0,
                     server_name,
                     certificate,
@@ -2623,7 +2710,7 @@ class NativeTransportBinding:
         _raise_for_native_ffi_status(
             self.entrypoints.server_security_config_create(
                 _NnrpTransportServerSecurityConfigRequest(
-                    int(NATIVE_TRANSPORT_ID_BY_NAME[self.provider.name]),
+                    int(self.provider.transport_id),
                     0,
                     certificate,
                     private_key,
@@ -3518,10 +3605,12 @@ def _native_event_kind(event: NativePolledEvent) -> int:
 
 def _event_operation_id(event: NativePolledEvent) -> int:
     if isinstance(event, NativeRuntimeEvent):
+        value = event.metadata.value
+        if event.header.message_type is MessageType.SUPERSEDE and isinstance(value, SupersedeMetadata):
+            return value.old_operation_id
         context = _runtime_event_context(event)
         if context.diagnostic.related_operation_id:
             return context.diagnostic.related_operation_id
-        value = event.metadata.value
         return int(getattr(value, "operation_id", 0))
     return event.diagnostic.related_operation_id
 
@@ -3605,10 +3694,15 @@ class NativeRuntimeResult:
                 raise NativeHandleError(f"{message_type.name} is not a terminal result event")
             terminal_event = NativeTerminalEvent.runtime(event)
         else:
-            lifecycle = OperationLifecycleEvent(
-                selected_operation_id,
-                _operation_state_from_lifecycle_event(event),
-            )
+            if event.kind == EVENT_KIND_OPERATION_LIFECYCLE:
+                lifecycle = _operation_lifecycle_from_native_event(event)
+                if lifecycle.operation_id != selected_operation_id:
+                    raise NativeHandleError("operation lifecycle identity does not match the requested operation")
+            else:
+                lifecycle = OperationLifecycleEvent(
+                    selected_operation_id,
+                    _operation_state_from_lifecycle_event(event),
+                )
             terminal_state = _terminal_state_from_operation_state(lifecycle.state)
             terminal_event = NativeTerminalEvent.lifecycle(lifecycle)
         return cls(selected_operation_id, terminal_state, terminal_event)
@@ -3622,6 +3716,33 @@ def _operation_state_from_lifecycle_event(event: NativeLifecycleEvent) -> Operat
     if event.kind == EVENT_KIND_RESULT_PUSHED:
         return OperationState.COMPLETED
     raise NativeHandleError(f"{event.kind_name} is not a terminal operation lifecycle event")
+
+
+def _operation_lifecycle_from_native_event(event: NativeLifecycleEvent) -> OperationLifecycleEvent:
+    if event.kind != EVENT_KIND_OPERATION_LIFECYCLE:
+        raise NativeProtocolError(
+            NativeStatus(FFI_STATUS_PROTOCOL_ERROR),
+            f"headerless {event.kind_name} event is not an operation lifecycle event",
+        )
+    operation_id = _event_operation_id(event)
+    if operation_id == 0:
+        raise NativeProtocolError(
+            NativeStatus(FFI_STATUS_PROTOCOL_ERROR),
+            "operation_lifecycle event has no operation identity",
+        )
+    if len(event.payload) != 1:
+        raise NativeProtocolError(
+            NativeStatus(FFI_STATUS_PROTOCOL_ERROR),
+            "operation_lifecycle payload must contain exactly one OperationState byte",
+        )
+    try:
+        state = OperationState(event.payload[0])
+    except ValueError as error:
+        raise NativeProtocolError(
+            NativeStatus(FFI_STATUS_PROTOCOL_ERROR),
+            f"operation_lifecycle payload contains unknown OperationState {event.payload[0]}",
+        ) from error
+    return OperationLifecycleEvent(operation_id, state)
 
 
 def _terminal_state_from_operation_state(state: OperationState) -> ResultTerminalState:
@@ -3667,8 +3788,12 @@ class NativeRuntimeOperation:
     scheduling_hint: NativeOperationSchedulingHint = field(default_factory=NativeOperationSchedulingHint)
     parent_operation_id: int | None = None
     operation_group_id: int | None = None
+    _owner: NativeRuntimeSession | None = field(default=None, repr=False, compare=False)
 
     def cancel(self) -> None:
+        if self._owner is not None:
+            self._owner.cancel(frame_id=self.frame_id)
+            return
         request = _NnrpClientCancelRequest(self.session.to_ffi(), self.frame_id)
         status = self.entrypoints.client_cancel(request)
         raise_for_native_status(status)
@@ -4183,6 +4308,9 @@ class NativeRuntimeSession:
     _pending_events: list[NativePolledEvent] = field(default_factory=list, init=False, repr=False, compare=False)
     _poll_lock: threading.Lock = field(default_factory=threading.Lock, init=False, repr=False, compare=False)
     _next_runtime_frame_id: int = field(default=1, init=False, repr=False, compare=False)
+    _next_control_sequence: int = field(default=1, init=False, repr=False, compare=False)
+    _operation_frames: dict[int, int] = field(default_factory=dict, init=False, repr=False, compare=False)
+    _operation_lock: threading.Lock = field(default_factory=threading.Lock, init=False, repr=False, compare=False)
 
     def recovery_ticket(self) -> NativeSessionRecoveryTicket | None:
         self._ensure_open()
@@ -4216,7 +4344,10 @@ class NativeRuntimeSession:
             status = self.entrypoints.client_await_event(self.handle.to_ffi(), ctypes.byref(result))
             raise_for_native_status(status)
             raise_for_native_status(result.status)
-            return NativeRuntimePollResult.from_ffi(result, self.entrypoints)
+            decoded = NativeRuntimePollResult.from_ffi(result, self.entrypoints)
+            if decoded.event is not None:
+                self._observe_polled_event(decoded.event)
+            return decoded
 
     def poll_event(self, *, timeout_ms: int = 0) -> NativePolledEvent | None:
         events = self.poll_events_batch(max_events=1, timeout_ms=timeout_ms)
@@ -4300,9 +4431,12 @@ class NativeRuntimeSession:
         if native_status.status_code == FFI_STATUS_WOULD_BLOCK:
             return ()
         raise_for_native_status(native_status)
-        return tuple(
+        events = tuple(
             _native_event_from_ffi(event_buffer[index], self.entrypoints) for index in range(int(event_count.value))
         )
+        for event in events:
+            self._observe_polled_event(event)
+        return events
 
     def _take_pending_events(
         self,
@@ -4538,6 +4672,19 @@ class NativeRuntimeSession:
     async def async_poll_event(self, *, timeout_ms: int = 0) -> NativePolledEvent | None:
         return await asyncio.to_thread(self.poll_event, timeout_ms=timeout_ms)
 
+    async def next_event(self, timeout: float | None = None) -> NativeClientEvent:
+        return await asyncio.to_thread(self._next_event_blocking, timeout)
+
+    def _next_event_blocking(self, timeout: float | None = None) -> NativeClientEvent:
+        deadline = _event_deadline(timeout)
+        while True:
+            event = self.poll_event(timeout_ms=_event_poll_timeout_ms(deadline))
+            if isinstance(event, NativeRuntimeEvent):
+                return event
+            if isinstance(event, NativeLifecycleEvent):
+                return _operation_lifecycle_from_native_event(event)
+            _raise_if_event_deadline_expired(deadline)
+
     async def iter_events(
         self,
         *,
@@ -4669,16 +4816,12 @@ class NativeRuntimeSession:
         scheduling_hint: NativeOperationSchedulingHint | None = None,
     ) -> NativeRuntimeOperation:
         self._ensure_open()
+        self._validate_submit_request_identity(request)
         selected_scheduling_hint = _coerce_operation_scheduling_hint(
             scheduling_hint,
             parent_operation_id=parent_operation_id,
             operation_group_id=operation_group_id,
         )
-        if request.metadata.operation_id != request.operation_id:
-            raise ValueError(
-                "metadata.operation_id must equal the submit operation_id: "
-                f"expected {request.operation_id}, got {request.metadata.operation_id}"
-            )
         encoded_submit = request.metadata.pack() + request.body
         payload_view, _payload_owner = _buffer_view_from_payload(encoded_submit)
         ffi_request = _NnrpSubmitRequest(
@@ -4694,7 +4837,7 @@ class NativeRuntimeSession:
         out_operation = _NnrpHandle()
         status = self.entrypoints.client_submit(ffi_request, ctypes.byref(out_operation))
         raise_for_native_status(status)
-        return NativeRuntimeOperation(
+        operation = NativeRuntimeOperation(
             entrypoints=self.entrypoints,
             session=self.handle,
             handle=NativeOperationHandle.from_ffi(out_operation),
@@ -4703,7 +4846,10 @@ class NativeRuntimeSession:
             scheduling_hint=selected_scheduling_hint,
             parent_operation_id=selected_scheduling_hint.parent_operation_id,
             operation_group_id=selected_scheduling_hint.operation_group_id,
+            _owner=self,
         )
+        self._remember_operation_frame(operation.operation_id, operation.frame_id)
+        return operation
 
     def cache_backend(self, *, now_ms: int = 0, ttl_ms: int = 0, expected_version: int = 0) -> NativeCacheLeaseBackend:
         self._ensure_open()
@@ -4723,16 +4869,41 @@ class NativeRuntimeSession:
         operation_group_id: int | None = None,
         scheduling_hint: NativeOperationSchedulingHint | None = None,
     ) -> NativeRuntimeOperation:
-        try:
-            return await asyncio.to_thread(
-                self.submit_operation,
+        dispatch_lock = threading.Lock()
+        dispatch_allowed = True
+        dispatch_started = False
+
+        def dispatch() -> NativeRuntimeOperation | None:
+            nonlocal dispatch_started
+            with dispatch_lock:
+                if not dispatch_allowed:
+                    return None
+                dispatch_started = True
+            return self.submit_operation(
                 request,
                 parent_operation_id=parent_operation_id,
                 operation_group_id=operation_group_id,
                 scheduling_hint=scheduling_hint,
             )
+
+        submit_task = asyncio.create_task(asyncio.to_thread(dispatch))
+        try:
+            operation = await asyncio.shield(submit_task)
+            if operation is None:
+                raise asyncio.CancelledError
+            return operation
         except asyncio.CancelledError:
-            self.cancel(frame_id=request.frame_id)
+            with dispatch_lock:
+                cancelled_before_dispatch = not dispatch_started
+                if cancelled_before_dispatch:
+                    dispatch_allowed = False
+            if cancelled_before_dispatch:
+                submit_task.cancel()
+                raise
+            operation = await asyncio.shield(submit_task)
+            if operation is None:
+                raise
+            operation.cancel()
             raise
 
     def poll_result(
@@ -4787,6 +4958,7 @@ class NativeRuntimeSession:
 
             for index in range(int(event_count.value)):
                 event = _native_event_from_ffi(event_buffer[index], self.entrypoints)
+                self._observe_polled_event(event)
                 if (
                     matched_result is None
                     and _event_is_result_event(event)
@@ -4837,13 +5009,24 @@ class NativeRuntimeSession:
         max_events: int | None = None,
         timeout_ms: int = 0,
     ) -> NativeRuntimeResult:
-        operation = self.submit_operation(
+        wait_deadline = _submit_wait_deadline(timeout_ms)
+        selected_scheduling_hint = self._prepare_submit_wait(
             request,
             parent_operation_id=parent_operation_id,
             operation_group_id=operation_group_id,
             scheduling_hint=scheduling_hint,
+            max_events=max_events,
+            timeout_ms=timeout_ms,
         )
-        return self.poll_result(operation, max_events=max_events, timeout_ms=timeout_ms)
+        operation = self.submit_operation(
+            request,
+            scheduling_hint=selected_scheduling_hint,
+        )
+        return self._poll_submitted_result_until_deadline(
+            operation,
+            max_events=max_events,
+            wait_deadline=wait_deadline,
+        )
 
     async def async_submit_and_poll_result(
         self,
@@ -4855,8 +5038,8 @@ class NativeRuntimeSession:
         max_events: int | None = None,
         timeout_ms: int = 0,
     ) -> NativeRuntimeResult:
-        return await asyncio.to_thread(
-            self.submit_and_poll_result,
+        wait_deadline = _submit_wait_deadline(timeout_ms)
+        selected_scheduling_hint = self._prepare_submit_wait(
             request,
             parent_operation_id=parent_operation_id,
             operation_group_id=operation_group_id,
@@ -4864,6 +5047,76 @@ class NativeRuntimeSession:
             max_events=max_events,
             timeout_ms=timeout_ms,
         )
+        operation = await self.async_submit_operation(
+            request,
+            scheduling_hint=selected_scheduling_hint,
+        )
+        cancellation_requested = threading.Event()
+
+        def finish_cancellation() -> None:
+            try:
+                operation.cancel()
+            except Exception as error:
+                raise _NativeSubmitWaitCancelled from error
+            raise _NativeSubmitWaitCancelled
+
+        def poll_until_complete() -> NativeRuntimeResult:
+            try:
+                return self._poll_submitted_result_until_deadline(
+                    operation,
+                    max_events=max_events,
+                    wait_deadline=wait_deadline,
+                    cancellation_requested=cancellation_requested,
+                )
+            except _NativeSubmitWaitCancelled:
+                finish_cancellation()
+            except Exception:
+                if cancellation_requested.is_set():
+                    finish_cancellation()
+                raise
+
+        poll_task = asyncio.create_task(asyncio.to_thread(poll_until_complete))
+        try:
+            return await asyncio.shield(poll_task)
+        except asyncio.CancelledError:
+            cancellation_requested.set()
+            try:
+                await asyncio.shield(poll_task)
+            except _NativeSubmitWaitCancelled:
+                pass
+            raise
+
+    def _poll_submitted_result_until_deadline(
+        self,
+        operation: NativeRuntimeOperation,
+        *,
+        max_events: int | None,
+        wait_deadline: float | None,
+        cancellation_requested: threading.Event | None = None,
+    ) -> NativeRuntimeResult:
+        while True:
+            if cancellation_requested is not None and cancellation_requested.is_set():
+                raise _NativeSubmitWaitCancelled
+            try:
+                result = self.poll_result(
+                    operation,
+                    max_events=max_events,
+                    timeout_ms=_submit_wait_poll_timeout_ms(wait_deadline),
+                )
+                if cancellation_requested is not None and cancellation_requested.is_set():
+                    raise _NativeSubmitWaitCancelled
+                return result
+            except NativeWouldBlockError as error:
+                if cancellation_requested is not None and cancellation_requested.is_set():
+                    raise _NativeSubmitWaitCancelled from None
+                if wait_deadline is None or max_events == 0:
+                    raise
+                if time.monotonic() < wait_deadline:
+                    continue
+                operation.cancel()
+                raise TimeoutError(
+                    f"NNRP operation {operation.operation_id} exceeded its submit wait deadline"
+                ) from error
 
     def cancel_operation(
         self,
@@ -4988,31 +5241,174 @@ class NativeRuntimeSession:
         self._send_runtime_frame(MessageType.CACHE_INVALIDATE, metadata)
 
     def close(self) -> None:
-        self._ensure_open()
-        status = self.entrypoints.client_close(self.handle.to_ffi())
-        raise_for_native_status(status)
-        object.__setattr__(self, "_closed", True)
+        with self._poll_lock:
+            if self._closed:
+                return
+            status = self.entrypoints.client_close(self.handle.to_ffi())
+            raise_for_native_status(status)
+            with self._operation_lock:
+                self._operation_frames.clear()
+            object.__setattr__(self, "_closed", True)
 
     def cancel(self, *, frame_id: int) -> None:
         self._ensure_open()
-        request = _NnrpClientCancelRequest(self.handle.to_ffi(), frame_id)
-        status = self.entrypoints.client_cancel(request)
-        raise_for_native_status(status)
+        with self._poll_lock:
+            request = _NnrpClientCancelRequest(self.handle.to_ffi(), frame_id)
+            status = self.entrypoints.client_cancel(request)
+            raise_for_native_status(status)
+            self._forget_operation_frame_by_frame(frame_id)
 
     def _send_runtime_frame(
         self,
         message_type: MessageType,
         metadata: _FixedRuntimeMetadata | CacheInvalidateMetadata,
         tail: bytes | bytearray | memoryview = b"",
+        *,
+        frame_id: int | None = None,
     ) -> None:
         self._ensure_open()
         payload = _encode_native_runtime_frame(message_type, metadata, tail)
         payload_view, _payload_owner = _buffer_view_from_payload(payload)
-        frame_id = self._next_runtime_frame_id
-        request = _NnrpRuntimeFrameSendRequest(self.handle.to_ffi(), int(message_type), frame_id, payload_view)
+        selected_frame_id = self._runtime_frame_id(message_type, metadata) if frame_id is None else frame_id
+        request = _NnrpRuntimeFrameSendRequest(
+            self.handle.to_ffi(),
+            int(message_type),
+            selected_frame_id,
+            payload_view,
+        )
         status = self.entrypoints.runtime_frame_send(request)
         raise_for_native_status(status)
-        object.__setattr__(self, "_next_runtime_frame_id", 1 if frame_id == 0xFFFFFFFF else frame_id + 1)
+        operation_id = _runtime_operation_id(message_type, metadata)
+        if frame_id is None and operation_id is None:
+            object.__setattr__(
+                self,
+                "_next_runtime_frame_id",
+                1 if selected_frame_id == 0xFFFFFFFF else selected_frame_id + 1,
+            )
+        if (
+            message_type in {MessageType.CANCEL, MessageType.ABORT, MessageType.SUPERSEDE}
+            and operation_id is not None
+            and operation_id != 0
+        ):
+            self._forget_operation_frame(operation_id)
+
+    def _prepare_submit_wait(
+        self,
+        request: SubmitRequest,
+        *,
+        parent_operation_id: int | None,
+        operation_group_id: int | None,
+        scheduling_hint: NativeOperationSchedulingHint | None,
+        max_events: int | None,
+        timeout_ms: int,
+    ) -> NativeOperationSchedulingHint:
+        self._ensure_open()
+        self._validate_submit_request_identity(request)
+        if max_events is not None and max_events < 0:
+            raise ValueError("max_events must be non-negative")
+        selected_scheduling_hint = _coerce_operation_scheduling_hint(
+            scheduling_hint,
+            parent_operation_id=parent_operation_id,
+            operation_group_id=operation_group_id,
+        )
+        _require_bounded_integer("timeout_ms", timeout_ms, 0xFFFFFFFF)
+        if timeout_ms == 0:
+            return selected_scheduling_hint
+        metadata = SchedulingMetadata(
+            operation_id=request.operation_id,
+            control_sequence=self._allocate_control_sequence(),
+            priority_class=0,
+            priority_delta=0,
+            deadline_unix_ms=math.ceil(time.time() * 1000) + timeout_ms,
+            flags=0,
+        )
+        self._send_runtime_frame(MessageType.DEADLINE, metadata, frame_id=request.frame_id)
+        return selected_scheduling_hint
+
+    @staticmethod
+    def _validate_submit_request_identity(request: SubmitRequest) -> None:
+        if request.metadata.operation_id != request.operation_id:
+            raise ValueError(
+                "metadata.operation_id must equal the submit operation_id: "
+                f"expected {request.operation_id}, got {request.metadata.operation_id}"
+            )
+
+    def _runtime_frame_id(
+        self,
+        message_type: MessageType,
+        metadata: _FixedRuntimeMetadata | CacheInvalidateMetadata,
+    ) -> int:
+        operation_id = _runtime_operation_id(message_type, metadata)
+        if operation_id is None:
+            return self._next_runtime_frame_id
+        if operation_id == 0:
+            if message_type not in {
+                MessageType.CANCEL,
+                MessageType.ABORT,
+                MessageType.BUDGET_UPDATE,
+                MessageType.OBJECT_REF,
+                MessageType.OBJECT_RELEASE,
+            }:
+                raise NativeInvalidStateError(
+                    NativeStatus(FFI_STATUS_INVALID_STATE),
+                    f"{message_type.name} requires an operation-scoped non-zero operation_id",
+                )
+            return 0
+        with self._operation_lock:
+            try:
+                return self._operation_frames[operation_id]
+            except KeyError as error:
+                raise NativeInvalidStateError(
+                    NativeStatus(FFI_STATUS_INVALID_STATE),
+                    f"{message_type.name} references inactive operation {operation_id}",
+                ) from error
+
+    def _allocate_control_sequence(self) -> int:
+        with self._operation_lock:
+            sequence = self._next_control_sequence
+            object.__setattr__(
+                self,
+                "_next_control_sequence",
+                1 if sequence == 0xFFFFFFFFFFFFFFFF else sequence + 1,
+            )
+            return sequence
+
+    def _remember_operation_frame(self, operation_id: int, frame_id: int) -> None:
+        with self._operation_lock:
+            self._operation_frames[operation_id] = frame_id
+
+    def _forget_operation_frame(self, operation_id: int) -> None:
+        with self._operation_lock:
+            self._operation_frames.pop(operation_id, None)
+
+    def _forget_operation_frame_by_frame(self, frame_id: int) -> None:
+        with self._operation_lock:
+            for operation_id, operation_frame_id in tuple(self._operation_frames.items()):
+                if operation_frame_id == frame_id:
+                    self._operation_frames.pop(operation_id, None)
+
+    def _observe_polled_event(self, event: NativePolledEvent) -> None:
+        event_session = (
+            _runtime_event_context(event).session if isinstance(event, NativeRuntimeEvent) else event.session
+        )
+        if event_session != self.handle.handle:
+            return
+        if isinstance(event, NativeRuntimeEvent) and event.header.message_type is MessageType.SESSION_CLOSE:
+            with self._operation_lock:
+                self._operation_frames.clear()
+            return
+        operation_id = _event_operation_id(event)
+        if operation_id == 0:
+            return
+        terminal = _event_is_result_event(event)
+        if isinstance(event, NativeRuntimeEvent):
+            terminal = terminal or event.header.message_type in {
+                MessageType.CANCEL,
+                MessageType.ABORT,
+                MessageType.SUPERSEDE,
+            }
+        if terminal:
+            self._forget_operation_frame(operation_id)
 
     def _ensure_open(self) -> None:
         if self._closed:
@@ -5021,15 +5417,28 @@ class NativeRuntimeSession:
 
 @dataclass(frozen=True)
 class NativeRuntimeServerOperation:
-    entrypoints: NativeRuntimeEntrypoints
-    session: NativeSessionHandle
-    handle: NativeOperationHandle
     operation_id: int
     frame_id: int
-    metadata: FrameSubmitMetadata
-    body: bytes
+    submit: NativeRuntimeEvent
+    _entrypoints: NativeRuntimeEntrypoints = field(repr=False, compare=False)
+    _session: NativeSessionHandle = field(repr=False, compare=False)
+    _handle: NativeOperationHandle = field(repr=False, compare=False)
+    _owner: NativeRuntimeServerSession = field(repr=False, compare=False)
+    _terminal_reply_started: bool = field(default=False, init=False, repr=False, compare=False)
+    _reply_lock: threading.Lock = field(default_factory=threading.Lock, init=False, repr=False, compare=False)
 
-    def send_result(
+    def __post_init__(self) -> None:
+        if self.submit.header.message_type is not MessageType.FRAME_SUBMIT:
+            raise ValueError("submit must be a FRAME_SUBMIT runtime event")
+        metadata = self.submit.metadata.value
+        if not isinstance(metadata, FrameSubmitMetadata):
+            raise TypeError("submit metadata must be FrameSubmitMetadata")
+        if metadata.operation_id != self.operation_id:
+            raise ValueError("operation_id must match submit metadata")
+        if self.submit.header.frame_id != self.frame_id:
+            raise ValueError("frame_id must match submit header")
+
+    async def send_result(
         self,
         metadata: ResultPushMetadata,
         body: bytes | bytearray | memoryview = b"",
@@ -5037,10 +5446,161 @@ class NativeRuntimeServerOperation:
         if not isinstance(metadata, ResultPushMetadata):
             raise TypeError("metadata must be ResultPushMetadata")
         payload = metadata.pack() + bytes(body)
-        payload_view, _payload_owner = _buffer_view_from_payload(payload)
-        request = _NnrpServerSendResultRequest(self.handle.to_ffi(), payload_view)
-        status = self.entrypoints.server_send_result(request)
-        raise_for_native_status(status)
+        payload_view, payload_owner = _buffer_view_from_payload(payload)
+        request = _NnrpServerSendResultRequest(self._handle.to_ffi(), payload_view)
+        await self._send_terminal_reply(lambda: self._send_result_blocking(request, payload_owner))
+
+    async def send_result_drop(
+        self,
+        metadata: ResultDropReasonMetadata,
+        diagnostic: bytes | bytearray | memoryview = b"",
+    ) -> None:
+        self._require_operation_metadata(metadata)
+        diagnostic_snapshot = bytes(diagnostic)
+        await self._send_terminal_reply(
+            lambda: self._owner._send_operation_runtime_frame(
+                self._handle,
+                self.frame_id,
+                MessageType.RESULT_DROP_REASON,
+                metadata,
+                diagnostic_snapshot,
+            )
+        )
+
+    async def _send_terminal_reply(self, send: Callable[[], None]) -> None:
+        self._begin_reply(terminal=True)
+        worker = asyncio.create_task(asyncio.to_thread(send))
+        cancellation: asyncio.CancelledError | None = None
+        while not worker.done():
+            try:
+                await asyncio.shield(worker)
+            except asyncio.CancelledError as error:
+                cancellation = cancellation or error
+            except BaseException:
+                break
+
+        try:
+            worker.result()
+        except BaseException:
+            self._restore_terminal_reply()
+            if cancellation is not None:
+                raise cancellation from None
+            raise
+        self._complete_terminal_reply()
+        if cancellation is not None:
+            raise cancellation
+
+    async def send_progress(
+        self,
+        metadata: ProgressMetadata,
+        body: bytes | bytearray | memoryview = b"",
+    ) -> None:
+        self._require_operation_metadata(metadata)
+        body_snapshot = bytes(body)
+        self._begin_reply(terminal=False)
+        await asyncio.to_thread(
+            self._owner._send_operation_runtime_frame,
+            self._handle,
+            self.frame_id,
+            MessageType.PROGRESS,
+            metadata,
+            body_snapshot,
+        )
+
+    async def send_partial_result(
+        self,
+        metadata: PartialResultMetadata,
+        body: bytes | bytearray | memoryview = b"",
+    ) -> None:
+        self._require_operation_metadata(metadata)
+        body_snapshot = bytes(body)
+        self._begin_reply(terminal=False)
+        await asyncio.to_thread(
+            self._owner._send_operation_runtime_frame,
+            self._handle,
+            self.frame_id,
+            MessageType.PARTIAL_RESULT,
+            metadata,
+            body_snapshot,
+        )
+
+    def _send_result_blocking(
+        self,
+        request: _NnrpServerSendResultRequest,
+        payload_owner: ctypes.Array[ctypes.c_char] | None,
+    ) -> None:
+        self._owner._ensure_open()
+        try:
+            status = self._entrypoints.server_send_result(request)
+            raise_for_native_status(status)
+        finally:
+            del payload_owner
+
+    def _require_operation_metadata(self, metadata: object) -> None:
+        if int(getattr(metadata, "operation_id", 0)) != self.operation_id:
+            raise ValueError("metadata operation_id must match the server operation")
+
+    def _begin_reply(self, *, terminal: bool) -> None:
+        self._owner._ensure_open()
+        with self._reply_lock:
+            if self._terminal_reply_started:
+                kind = "terminal" if terminal else "incremental"
+                raise NativeInvalidStateError(
+                    NativeStatus(FFI_STATUS_INVALID_STATE),
+                    f"{kind} reply is not allowed after a terminal server reply started",
+                )
+            if terminal:
+                object.__setattr__(self, "_terminal_reply_started", True)
+
+    def _restore_terminal_reply(self) -> None:
+        with self._reply_lock:
+            object.__setattr__(self, "_terminal_reply_started", False)
+
+    def _complete_terminal_reply(self) -> None:
+        self._owner._forget_operation_frame(self.operation_id)
+
+
+class NativeServerEventKind(StrEnum):
+    SUBMIT = "submit"
+    RUNTIME = "runtime"
+    LIFECYCLE = "lifecycle"
+
+
+@dataclass(frozen=True, slots=True)
+class NativeServerEvent:
+    kind: NativeServerEventKind
+    value: NativeRuntimeServerOperation | NativeRuntimeEvent | OperationLifecycleEvent
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "kind", NativeServerEventKind(self.kind))
+        expected_type = {
+            NativeServerEventKind.SUBMIT: NativeRuntimeServerOperation,
+            NativeServerEventKind.RUNTIME: NativeRuntimeEvent,
+            NativeServerEventKind.LIFECYCLE: OperationLifecycleEvent,
+        }[self.kind]
+        if not isinstance(self.value, expected_type):
+            raise TypeError(f"{self.kind.value} server event requires {expected_type.__name__}")
+
+    @classmethod
+    def submit(cls, operation: NativeRuntimeServerOperation) -> NativeServerEvent:
+        return cls(NativeServerEventKind.SUBMIT, operation)
+
+    @classmethod
+    def runtime(cls, event: NativeRuntimeEvent) -> NativeServerEvent:
+        return cls(NativeServerEventKind.RUNTIME, event)
+
+    @classmethod
+    def lifecycle(cls, event: OperationLifecycleEvent) -> NativeServerEvent:
+        return cls(NativeServerEventKind.LIFECYCLE, event)
+
+    def as_submit(self) -> NativeRuntimeServerOperation | None:
+        return self.value if isinstance(self.value, NativeRuntimeServerOperation) else None
+
+    def as_runtime(self) -> NativeRuntimeEvent | None:
+        return self.value if isinstance(self.value, NativeRuntimeEvent) else None
+
+    def as_lifecycle(self) -> OperationLifecycleEvent | None:
+        return self.value if isinstance(self.value, OperationLifecycleEvent) else None
 
 
 @dataclass(frozen=True)
@@ -5050,45 +5610,68 @@ class NativeRuntimeServerSession:
     handle: NativeSessionHandle
     active_transport_name: str
     _closed: bool = field(default=False, init=False, repr=False, compare=False)
-    _pending_events: list[NativePolledEvent] = field(default_factory=list, init=False, repr=False, compare=False)
+    _pending_events: list[NativeServerEvent] = field(default_factory=list, init=False, repr=False, compare=False)
     _poll_lock: threading.Lock = field(default_factory=threading.Lock, init=False, repr=False, compare=False)
     _next_runtime_frame_id: int = field(default=1, init=False, repr=False, compare=False)
+    _operation_frames: dict[int, int] = field(default_factory=dict, init=False, repr=False, compare=False)
+    _operation_lock: threading.Lock = field(default_factory=threading.Lock, init=False, repr=False, compare=False)
 
-    def receive_submit(
-        self,
-        *,
-        timeout_ms: int = 0,
-        max_events: int = 1,
-    ) -> NativeRuntimeServerOperation:
+    async def next_event(self, timeout: float | None = None) -> NativeServerEvent:
+        return await asyncio.to_thread(self._next_event_blocking, timeout)
+
+    async def receive_submit(self, timeout: float | None = None) -> NativeRuntimeServerOperation:
+        return await asyncio.to_thread(self._receive_submit_blocking, timeout)
+
+    def _next_event_blocking(self, timeout: float | None = None) -> NativeServerEvent:
         self._ensure_open()
-        for event in self.poll_events(max_events=max_events, timeout_ms=timeout_ms):
-            if not isinstance(event, NativeRuntimeEvent) or event.header.message_type is not MessageType.FRAME_SUBMIT:
-                continue
-            context = _runtime_event_context(event)
-            context.operation.require_kind(HANDLE_KIND_OPERATION)
-            submit_metadata = event.metadata.value
-            if not isinstance(submit_metadata, FrameSubmitMetadata):
-                raise NativeProtocolError(
-                    NativeStatus(FFI_STATUS_PROTOCOL_ERROR),
-                    "FRAME_SUBMIT event did not decode FrameSubmitMetadata",
+        deadline = _event_deadline(timeout)
+        with self._poll_lock:
+            while True:
+                if self._pending_events:
+                    return self._pending_events.pop(0)
+                self._pending_events.extend(
+                    self._poll_native_server_events_unlocked(
+                        max_events=1,
+                        timeout_ms=_event_poll_timeout_ms(deadline),
+                    )
                 )
-            return NativeRuntimeServerOperation(
-                self.entrypoints,
-                self.handle,
-                NativeOperationHandle(context.operation),
-                submit_metadata.operation_id,
-                event.header.frame_id,
-                submit_metadata,
-                event.tail.body,
-            )
-        raise NativeWouldBlockError(NativeStatus(FFI_STATUS_WOULD_BLOCK))
+                if self._pending_events:
+                    return self._pending_events.pop(0)
+                _raise_if_event_deadline_expired(deadline)
+
+    def _receive_submit_blocking(self, timeout: float | None = None) -> NativeRuntimeServerOperation:
+        self._ensure_open()
+        deadline = _event_deadline(timeout)
+        with self._poll_lock:
+            while True:
+                operation = self._take_pending_submit_unlocked()
+                if operation is not None:
+                    return operation
+                self._pending_events.extend(
+                    self._poll_native_server_events_unlocked(
+                        max_events=64,
+                        timeout_ms=_event_poll_timeout_ms(deadline),
+                    )
+                )
+                operation = self._take_pending_submit_unlocked()
+                if operation is not None:
+                    return operation
+                _raise_if_event_deadline_expired(deadline)
+
+    def _take_pending_submit_unlocked(self) -> NativeRuntimeServerOperation | None:
+        for index, event in enumerate(self._pending_events):
+            operation = event.as_submit()
+            if operation is not None:
+                del self._pending_events[index]
+                return operation
+        return None
 
     def poll_events(
         self,
         *,
         max_events: int = 1,
         timeout_ms: int = 0,
-    ) -> tuple[NativePolledEvent, ...]:
+    ) -> tuple[NativeServerEvent, ...]:
         self._ensure_open()
         _require_bounded_integer("max_events", max_events, 0xFFFFFFFF)
         _require_bounded_integer("timeout_ms", timeout_ms, 0xFFFFFFFF)
@@ -5099,8 +5682,19 @@ class NativeRuntimeServerSession:
             del self._pending_events[: len(events)]
             remaining = max_events - len(events)
             if remaining:
-                events.extend(self._poll_native_events_unlocked(max_events=remaining, timeout_ms=timeout_ms))
+                events.extend(self._poll_native_server_events_unlocked(max_events=remaining, timeout_ms=timeout_ms))
             return tuple(events)
+
+    def _poll_native_server_events_unlocked(
+        self,
+        *,
+        max_events: int,
+        timeout_ms: int,
+    ) -> tuple[NativeServerEvent, ...]:
+        return tuple(
+            self._server_event_from_polled(event)
+            for event in self._poll_native_events_unlocked(max_events=max_events, timeout_ms=timeout_ms)
+        )
 
     def _poll_native_events_unlocked(
         self,
@@ -5130,9 +5724,39 @@ class NativeRuntimeServerSession:
             _native_event_from_ffi(event_buffer[index], self.entrypoints) for index in range(int(event_count.value))
         )
 
-    def poll_event(self, *, timeout_ms: int = 0) -> NativePolledEvent | None:
+    def poll_event(self, *, timeout_ms: int = 0) -> NativeServerEvent | None:
         events = self.poll_events(max_events=1, timeout_ms=timeout_ms)
         return events[0] if events else None
+
+    def _server_event_from_polled(self, event: NativePolledEvent) -> NativeServerEvent:
+        if isinstance(event, NativeRuntimeEvent):
+            if event.header.message_type is not MessageType.FRAME_SUBMIT:
+                self._observe_polled_event(event)
+                if event.header.message_type is MessageType.SESSION_CLOSE:
+                    with self._operation_lock:
+                        self._operation_frames.clear()
+                return NativeServerEvent.runtime(event)
+            context = _runtime_event_context(event)
+            context.operation.require_kind(HANDLE_KIND_OPERATION)
+            submit_metadata = event.metadata.value
+            if not isinstance(submit_metadata, FrameSubmitMetadata):
+                raise NativeProtocolError(
+                    NativeStatus(FFI_STATUS_PROTOCOL_ERROR),
+                    "FRAME_SUBMIT event did not decode FrameSubmitMetadata",
+                )
+            operation = NativeRuntimeServerOperation(
+                submit_metadata.operation_id,
+                event.header.frame_id,
+                event,
+                self.entrypoints,
+                self.handle,
+                NativeOperationHandle(context.operation),
+                self,
+            )
+            self._remember_operation_frame(operation.operation_id, operation.frame_id)
+            return NativeServerEvent.submit(operation)
+        self._observe_polled_event(event)
+        return NativeServerEvent.lifecycle(_operation_lifecycle_from_native_event(event))
 
     def poll_runtime_frames(
         self,
@@ -5146,53 +5770,34 @@ class NativeRuntimeServerSession:
             return ()
         with self._poll_lock:
             frames: list[NativeRuntimeEvent] = []
-            retained: list[NativePolledEvent] = []
+            retained: list[NativeServerEvent] = []
             for event in self._pending_events:
-                if isinstance(event, NativeRuntimeEvent) and len(frames) < max_events:
-                    frames.append(event)
+                runtime_event = event.as_runtime()
+                if runtime_event is not None and len(frames) < max_events:
+                    frames.append(runtime_event)
                 else:
                     retained.append(event)
             self._pending_events[:] = retained
             if len(frames) == max_events:
                 return tuple(frames)
 
-            events = self._poll_native_events_unlocked(
+            events = self._poll_native_server_events_unlocked(
                 max_events=max(64, max_events - len(frames)),
                 timeout_ms=timeout_ms,
             )
             for event in events:
-                if isinstance(event, NativeRuntimeEvent) and len(frames) < max_events:
-                    frames.append(event)
+                runtime_event = event.as_runtime()
+                if runtime_event is not None and len(frames) < max_events:
+                    frames.append(runtime_event)
                 else:
                     self._pending_events.append(event)
             return tuple(frames)
-
-    def send_progress(
-        self,
-        metadata: ProgressMetadata,
-        body: bytes | bytearray | memoryview = b"",
-    ) -> None:
-        self._send_runtime_frame(MessageType.PROGRESS, metadata, body)
-
-    def send_partial_result(
-        self,
-        metadata: PartialResultMetadata,
-        body: bytes | bytearray | memoryview = b"",
-    ) -> None:
-        self._send_runtime_frame(MessageType.PARTIAL_RESULT, metadata, body)
 
     def send_backpressure(self, metadata: PressureMetadata) -> None:
         self._send_runtime_frame(MessageType.BACKPRESSURE, metadata)
 
     def send_credit_update(self, metadata: PressureMetadata) -> None:
         self._send_runtime_frame(MessageType.CREDIT_UPDATE, metadata)
-
-    def send_result_drop_reason(
-        self,
-        metadata: ResultDropReasonMetadata,
-        diagnostic: bytes | bytearray | memoryview = b"",
-    ) -> None:
-        self._send_runtime_frame(MessageType.RESULT_DROP_REASON, metadata, diagnostic)
 
     def send_trace_context(
         self,
@@ -5278,17 +5883,81 @@ class NativeRuntimeServerSession:
         self._ensure_open()
         payload = _encode_native_runtime_frame(message_type, metadata, tail)
         payload_view, _payload_owner = _buffer_view_from_payload(payload)
-        frame_id = self._next_runtime_frame_id
+        frame_id = self._runtime_frame_id(message_type, metadata)
         request = _NnrpRuntimeFrameSendRequest(self.handle.to_ffi(), int(message_type), frame_id, payload_view)
         status = self.entrypoints.runtime_frame_send(request)
         raise_for_native_status(status)
-        object.__setattr__(self, "_next_runtime_frame_id", 1 if frame_id == 0xFFFFFFFF else frame_id + 1)
+        if _runtime_operation_id(message_type, metadata) is None:
+            object.__setattr__(self, "_next_runtime_frame_id", 1 if frame_id == 0xFFFFFFFF else frame_id + 1)
+
+    def _send_operation_runtime_frame(
+        self,
+        operation: NativeOperationHandle,
+        frame_id: int,
+        message_type: MessageType,
+        metadata: _FixedRuntimeMetadata,
+        tail: bytes | bytearray | memoryview = b"",
+    ) -> None:
+        self._ensure_open()
+        payload = _encode_native_runtime_frame(message_type, metadata, tail)
+        payload_view, _payload_owner = _buffer_view_from_payload(payload)
+        request = _NnrpRuntimeFrameSendRequest(operation.to_ffi(), int(message_type), frame_id, payload_view)
+        status = self.entrypoints.runtime_frame_send(request)
+        raise_for_native_status(status)
 
     def close(self) -> None:
-        self._ensure_open()
-        status = self.entrypoints.server_close(self.handle.to_ffi())
-        raise_for_native_status(status)
-        object.__setattr__(self, "_closed", True)
+        with self._poll_lock:
+            if self._closed:
+                return
+            status = self.entrypoints.server_close(self.handle.to_ffi())
+            raise_for_native_status(status)
+            with self._operation_lock:
+                self._operation_frames.clear()
+            object.__setattr__(self, "_closed", True)
+
+    def _runtime_frame_id(
+        self,
+        message_type: MessageType,
+        metadata: _FixedRuntimeMetadata | CacheInvalidateMetadata,
+    ) -> int:
+        operation_id = _runtime_operation_id(message_type, metadata)
+        if operation_id is None:
+            return self._next_runtime_frame_id
+        if operation_id == 0:
+            if message_type not in {MessageType.OBJECT_REF, MessageType.OBJECT_RELEASE}:
+                raise NativeInvalidStateError(
+                    NativeStatus(FFI_STATUS_INVALID_STATE),
+                    f"{message_type.name} requires an operation-scoped non-zero operation_id",
+                )
+            return 0
+        with self._operation_lock:
+            try:
+                return self._operation_frames[operation_id]
+            except KeyError as error:
+                raise NativeInvalidStateError(
+                    NativeStatus(FFI_STATUS_INVALID_STATE),
+                    f"{message_type.name} references inactive operation {operation_id}",
+                ) from error
+
+    def _remember_operation_frame(self, operation_id: int, frame_id: int) -> None:
+        with self._operation_lock:
+            self._operation_frames[operation_id] = frame_id
+
+    def _forget_operation_frame(self, operation_id: int) -> None:
+        with self._operation_lock:
+            self._operation_frames.pop(operation_id, None)
+
+    def _observe_polled_event(self, event: NativePolledEvent) -> None:
+        event_session = (
+            _runtime_event_context(event).session if isinstance(event, NativeRuntimeEvent) else event.session
+        )
+        if event_session != self.handle.handle:
+            return
+        # Server operation ownership survives peer cancellation, abort,
+        # supersession, and lifecycle delivery so the application can still
+        # send exactly one terminal result or drop reply. Successful terminal
+        # reply methods release the Python correlation; session close clears
+        # every remaining operation.
 
     def _ensure_open(self) -> None:
         if self._closed:
@@ -5296,6 +5965,33 @@ class NativeRuntimeServerSession:
                 NativeStatus(FFI_STATUS_INVALID_STATE),
                 "native runtime server session is closed",
             )
+
+
+def _runtime_operation_id(
+    message_type: MessageType,
+    metadata: _FixedRuntimeMetadata | CacheInvalidateMetadata,
+) -> int | None:
+    if message_type in {MessageType.CANCEL, MessageType.ABORT} and isinstance(metadata, ControlRequestMetadata):
+        return metadata.operation_id
+    if message_type in {MessageType.PRIORITY_UPDATE, MessageType.DEADLINE, MessageType.EXPIRE_AT} and isinstance(
+        metadata,
+        SchedulingMetadata,
+    ):
+        return metadata.operation_id
+    if message_type is MessageType.SUPERSEDE and isinstance(metadata, SupersedeMetadata):
+        return metadata.old_operation_id
+    if message_type is MessageType.BUDGET_UPDATE and isinstance(metadata, BudgetMetadata):
+        return metadata.operation_id
+    if message_type in {MessageType.ROUTE_HINT, MessageType.EXECUTION_HINT} and isinstance(
+        metadata,
+        RouteHintMetadata,
+    ):
+        return metadata.operation_id
+    if message_type is MessageType.OBJECT_REF and isinstance(metadata, ObjectReferenceMetadata):
+        return metadata.operation_id
+    if message_type is MessageType.OBJECT_RELEASE and isinstance(metadata, ObjectReleaseMetadata):
+        return metadata.operation_id
+    return None
 
 
 def _event_matches_operation(event: NativePolledEvent, operation: NativeRuntimeOperation) -> bool:
@@ -5306,11 +6002,22 @@ def _event_matches_operation(event: NativePolledEvent, operation: NativeRuntimeO
 
 
 def _event_is_result_event(event: NativePolledEvent) -> bool:
-    return _native_event_kind(event) in {
+    event_kind = _native_event_kind(event)
+    if event_kind in {
         EVENT_KIND_RESULT_PUSHED,
         EVENT_KIND_RESULT_DROPPED,
         EVENT_KIND_ERROR,
-    }
+    }:
+        return True
+    if isinstance(event, NativeLifecycleEvent) and event_kind == EVENT_KIND_OPERATION_LIFECYCLE:
+        lifecycle = _operation_lifecycle_from_native_event(event)
+        return lifecycle.state in {
+            OperationState.COMPLETED,
+            OperationState.CANCELLED,
+            OperationState.SUPERSEDED,
+            OperationState.FAILED,
+        }
+    return False
 
 
 def _dispatch_callback_batch(
@@ -5423,9 +6130,9 @@ def discover_native_transport_providers(
             continue
         provider = _provider_from_artifact_dir(candidate_dir, selected_platform)
         if provider is not None:
-            transport_id = NATIVE_TRANSPORT_ID_BY_NAME[provider.name]
+            transport_id = provider.transport_id
             if transport_id in transport_ids:
-                raise NativeArtifactError(f"duplicate native provider for transport {provider.name}")
+                raise NativeArtifactError(f"duplicate native provider for transport {provider.transport_name}")
             if provider.metadata.id in provider_ids:
                 raise NativeArtifactError(f"duplicate native provider id: {provider.metadata.id}")
             transport_ids.add(transport_id)
@@ -5442,7 +6149,7 @@ def resolve_native_transport_provider(
 ) -> NativeTransportProvider:
     normalized = _normalize_native_transport_scope(name)
     for provider in discover_native_transport_providers(root, native_platform):
-        if provider.name == normalized:
+        if provider.transport_name == normalized:
             return provider
     raise NativeArtifactError(f"native transport provider is not advertised by the native artifact: {name}")
 
@@ -5512,14 +6219,33 @@ def diagnose_nnrp_endpoint_support(
     endpoint = uri if isinstance(uri, NnrpEndpoint) else parse_nnrp_endpoint(uri)
     try:
         providers = discover_native_transport_providers(root, native_platform)
+        peer_supported: set[TransportId]
+        if supported_transports is None:
+            peer_supported = {
+                provider.transport_id
+                for provider in providers
+            }
+        else:
+            peer_supported = {
+                NATIVE_TRANSPORT_ID_BY_NAME[name]
+                for name in _normalize_supported_native_transports(supported_transports)
+            }
         selection = select_native_transport_provider(
-            policy,
+            NativeTransportSelectionOptions(
+                peer_supported_transports=tuple(sorted(peer_supported, key=int)),
+                policy=_normalize_native_transport_policy(policy),
+                requested_max_frame_bytes=requested_max_frame_bytes,
+                candidate_readiness=tuple(
+                    NativeTransportCandidateReadiness.ready(provider)
+                    for provider in providers
+                ),
+                probe_observations=_probe_observations_from_samples(
+                    providers,
+                    tuple(probe_samples or ()),
+                ),
+            ),
             root=root,
             native_platform=native_platform,
-            supported_transports=supported_transports,
-            requested_max_frame_bytes=requested_max_frame_bytes,
-            candidate_readiness=[NativeTransportCandidateReadiness.ready(provider) for provider in providers],
-            probe_observations=_probe_observations_from_samples(providers, tuple(probe_samples or ())),
         )
     except NativeArtifactError as error:
         message = str(error)
@@ -5547,12 +6273,12 @@ def diagnose_native_transport_endpoint_support(
     endpoint = uri if isinstance(uri, NativeTransportEndpoint) else parse_native_transport_endpoint(uri)
     providers = discover_native_transport_providers(root, native_platform)
     for provider in providers:
-        if endpoint.transport_name in provider.transport_slots:
+        if endpoint.transport_id is provider.transport_id:
             return NativeTransportEndpointSupport(
                 endpoint=endpoint,
                 provider=provider,
                 available=True,
-                diagnostic=f"native transport provider {provider.name!r} exposes {endpoint.transport_name}",
+                diagnostic=f"native transport provider {provider.transport_name!r} exposes {endpoint.transport_name}",
             )
     return NativeTransportEndpointSupport(
         endpoint=endpoint,
@@ -5564,52 +6290,37 @@ def diagnose_native_transport_endpoint_support(
 
 
 def select_native_transport_provider(
-    policy: TransportPolicy | str | int = TransportPolicy.AUTO,
+    options: NativeTransportSelectionOptions,
     *,
     root: Path | str | None = None,
     native_platform: NativePlatform | None = None,
-    supported_transports: (
-        tuple[str | TransportId, ...] | list[str | TransportId] | set[str | TransportId] | None
-    ) = None,
-    requested_max_frame_bytes: int | None = None,
-    candidate_readiness: (tuple[NativeTransportCandidateReadiness, ...] | list[NativeTransportCandidateReadiness]),
-    probe_observations: (
-        tuple[NativeTransportProbeObservation, ...] | list[NativeTransportProbeObservation] | None
-    ) = None,
 ) -> NativeTransportSelection:
-    resolved_policy = _normalize_native_transport_policy(policy)
+    if not isinstance(options, NativeTransportSelectionOptions):
+        raise TypeError("options must be a NativeTransportSelectionOptions")
     providers = discover_native_transport_providers(root, native_platform)
     return _select_native_transport_provider_from_providers(
         providers,
-        resolved_policy,
-        supported_transports=supported_transports,
-        requested_max_frame_bytes=requested_max_frame_bytes,
-        candidate_readiness=candidate_readiness,
-        probe_observations=probe_observations,
+        options,
     )
 
 
 def _select_native_transport_provider_from_providers(
     providers: tuple[NativeTransportProvider, ...],
-    policy: TransportPolicy | str | int = TransportPolicy.AUTO,
+    options: NativeTransportSelectionOptions,
     *,
-    supported_transports: (
-        tuple[str | TransportId, ...] | list[str | TransportId] | set[str | TransportId] | None
-    ) = None,
-    requested_max_frame_bytes: int | None = None,
-    candidate_readiness: (tuple[NativeTransportCandidateReadiness, ...] | list[NativeTransportCandidateReadiness]),
-    probe_observations: (
-        tuple[NativeTransportProbeObservation, ...] | list[NativeTransportProbeObservation] | None
-    ) = None,
     provider_availability: Mapping[str, bool] | None = None,
     provider_diagnostics: Mapping[str, str | None] | None = None,
 ) -> NativeTransportSelection:
-    resolved_policy = _normalize_native_transport_policy(policy)
-    supported = _normalize_supported_native_transports(supported_transports)
-    if requested_max_frame_bytes is not None:
-        _require_bounded_integer("requested_max_frame_bytes", requested_max_frame_bytes, 0xFFFFFFFFFFFFFFFF)
-    readiness = tuple(candidate_readiness)
-    observations = tuple(probe_observations or ())
+    if not isinstance(options, NativeTransportSelectionOptions):
+        raise TypeError("options must be a NativeTransportSelectionOptions")
+    resolved_policy = options.policy
+    supported = frozenset(
+        NATIVE_TRANSPORT_NAME_BY_ID[transport_id]
+        for transport_id in options.peer_supported_transports
+    )
+    requested_max_frame_bytes = options.requested_max_frame_bytes
+    readiness = options.candidate_readiness
+    observations = options.probe_observations
     _validate_native_transport_selection_evidence(providers, readiness, observations)
     candidates = _evaluate_native_transport_candidates(
         providers,
@@ -5722,7 +6433,7 @@ def _evaluate_native_transport_candidates(
 ) -> list[tuple[NativeTransportProvider, NativeTransportCandidateDiagnostic]]:
     candidates: list[tuple[NativeTransportProvider, NativeTransportCandidateDiagnostic]] = []
     for provider in providers:
-        transport_name = provider.name
+        transport_name = provider.transport_name
         provider_readiness = _matching_native_candidate_readiness(provider, readiness)
         local_available = provider_availability.get(provider.metadata.id, True)
         peer_supported = transport_name in supported_transports
@@ -5747,8 +6458,7 @@ def _evaluate_native_transport_candidates(
             (
                 provider,
                 NativeTransportCandidateDiagnostic(
-                    transport_name=transport_name,
-                    transport_id=NATIVE_TRANSPORT_ID_BY_NAME[transport_name],
+                    transport_id=provider.transport_id,
                     provider=provider.metadata,
                     local_available=local_available,
                     peer_supported=peer_supported,
@@ -5837,8 +6547,8 @@ def _compare_native_transport_candidates(
         _compare_values(left_probe.median_rtt_us, right_probe.median_rtt_us),
         _compare_native_transport_cost(left_provider.metadata.cost, right_provider.metadata.cost),
         _compare_values(
-            0 if _native_transport_is_preferred(policy, left_provider.name) else 1,
-            0 if _native_transport_is_preferred(policy, right_provider.name) else 1,
+            0 if _native_transport_is_preferred(policy, left_provider.transport_name) else 1,
+            0 if _native_transport_is_preferred(policy, right_provider.transport_name) else 1,
         ),
         _compare_values(left_provider.metadata.preference_rank, right_provider.metadata.preference_rank),
         _compare_values(int(left_candidate.transport_id), int(right_candidate.transport_id)),
@@ -5899,17 +6609,17 @@ def _matching_native_probe_samples(
     provider: NativeTransportProvider,
     samples: tuple[NativeTransportProbeSample, ...],
 ) -> tuple[NativeTransportProbeSample, ...]:
-    transport_id = NATIVE_TRANSPORT_ID_BY_NAME[provider.name]
+    transport_id = provider.transport_id
     return tuple(
         sample
         for sample in samples
         if sample.provider_id == provider.metadata.id
-        and NATIVE_TRANSPORT_ID_BY_NAME[_normalize_native_transport_scope(sample.transport_name)] == transport_id
+        and sample.transport_id == transport_id
     )
 
 
 def _native_transport_provider_key(provider: NativeTransportProvider) -> tuple[TransportId, str]:
-    return NATIVE_TRANSPORT_ID_BY_NAME[provider.name], provider.metadata.id
+    return provider.transport_id, provider.metadata.id
 
 
 def _matching_native_candidate_readiness(
@@ -5940,7 +6650,7 @@ def _validate_native_transport_selection_evidence(
     readiness: tuple[NativeTransportCandidateReadiness, ...],
     observations: tuple[NativeTransportProbeObservation, ...],
 ) -> None:
-    transport_ids = [NATIVE_TRANSPORT_ID_BY_NAME[provider.name] for provider in providers]
+    transport_ids = [provider.transport_id for provider in providers]
     provider_ids = [provider.metadata.id for provider in providers]
     provider_keys = {_native_transport_provider_key(provider) for provider in providers}
     readiness_keys = [(record.transport_id, record.provider_id) for record in readiness]
@@ -5993,12 +6703,14 @@ def _native_transport_selection_error(
                 NativeTransportSelectionErrorCode.FORCED_TRANSPORT_UNAVAILABLE,
                 f"forced native transport {forced_transport} rejected: {forced_candidate.rejection_reason.value}",
                 policy=policy,
+                transport_id=forced_candidate.transport_id,
                 candidates=candidates,
             )
         return NativeTransportSelectionError(
             NativeTransportSelectionErrorCode.FORCED_TRANSPORT_UNAVAILABLE,
             f"forced native transport is not available: {forced_transport}",
             policy=policy,
+            transport_id=NATIVE_TRANSPORT_ID_BY_NAME[forced_transport],
             candidates=candidates,
         )
     return NativeTransportSelectionError(
@@ -6169,18 +6881,24 @@ def load_native_transport_binding(
         native_platform=native_platform,
     )
     if artifact_path is not None:
-        provider = replace(provider, artifact_path=Path(artifact_path))
-    loaded_library = library if library is not None else load_native_library(provider.artifact_path)
+        selected_artifact_path = Path(artifact_path)
+        provider = replace(provider, library_path=str(selected_artifact_path))
+        object.__setattr__(provider, "_artifact_path", selected_artifact_path)
+    if provider._artifact_path is None:
+        raise NativeArtifactError(
+            f"native provider {provider.transport_name!r} does not own a loadable artifact"
+        )
+    loaded_library = library if library is not None else load_native_library(provider._artifact_path)
     capabilities = _call_runtime_capabilities(loaded_library)
     _validate_runtime_capabilities(
         capabilities,
-        required_transport_slots=NATIVE_TRANSPORT_SLOT_BY_NAME[provider.name],
+        required_transport_slots=NATIVE_TRANSPORT_SLOT_BY_NAME[provider.transport_name],
     )
-    _register_native_runtime_shutdown(loaded_library, provider.artifact_path)
+    _register_native_runtime_shutdown(loaded_library, provider._artifact_path)
     return NativeTransportBinding(
-        _NativeTransportEntrypoints(loaded_library, artifact_path=provider.artifact_path),
+        _NativeTransportEntrypoints(loaded_library, artifact_path=provider._artifact_path),
         provider,
-        NativeRuntimeEntrypoints(loaded_library, artifact_path=provider.artifact_path),
+        NativeRuntimeEntrypoints(loaded_library, artifact_path=provider._artifact_path),
     )
 
 
@@ -6350,17 +7068,18 @@ def _provider_from_artifact_dir(
     slots = _manifest_transport_slots(manifest, scope)
     if scope not in slots:
         raise NativeArtifactError(f"native artifact manifest scope {scope!r} is not listed in transport_slots")
-    return NativeTransportProvider(
-        name=scope,
-        artifact_path=library_path,
-        manifest_path=manifest_path,
-        transport_slots=slots,
-        enabled_features=_manifest_string_tuple(manifest, "enabled_features"),
-        package=_manifest_required_string(manifest, "package"),
-        transport_scope=scope,
-        platform_tag=native_platform.tag,
+    _manifest_string_tuple(manifest, "enabled_features")
+    provider = NativeTransportProvider(
+        name=_manifest_required_string(manifest, "package"),
+        version=_manifest_required_string(manifest, "abi_version"),
+        transport_id=NATIVE_TRANSPORT_ID_BY_NAME[scope],
+        kind=NativeTransportProviderKind.NATIVE_DYNAMIC,
+        available=True,
+        library_path=str(library_path),
         metadata=_manifest_provider_metadata(manifest),
     )
+    object.__setattr__(provider, "_artifact_path", library_path)
+    return provider
 
 
 def _required_transport_slots_for_artifact(artifact_path: Path, transport: str | None) -> int:
@@ -6608,8 +7327,43 @@ def _require_bounded_integer(name: str, value: int, maximum: int) -> None:
         raise ValueError(f"{name} must be an integer in 0..{maximum}")
 
 
+def _event_deadline(timeout: float | None) -> float | None:
+    if timeout is None:
+        return None
+    if isinstance(timeout, bool) or not isinstance(timeout, (int, float)) or not math.isfinite(timeout):
+        raise TypeError("timeout must be a finite number of seconds or None")
+    if timeout < 0:
+        raise ValueError("timeout must be non-negative")
+    return time.monotonic() + float(timeout)
+
+
+def _event_poll_timeout_ms(deadline: float | None) -> int:
+    if deadline is None:
+        return _INDEFINITE_EVENT_POLL_SLICE_MS
+    remaining_seconds = deadline - time.monotonic()
+    if remaining_seconds <= 0:
+        return 1
+    return min(0xFFFFFFFF, max(1, math.ceil(remaining_seconds * 1_000)))
+
+
+def _raise_if_event_deadline_expired(deadline: float | None) -> None:
+    if deadline is not None and time.monotonic() >= deadline:
+        raise NativeWouldBlockError(NativeStatus(FFI_STATUS_WOULD_BLOCK))
+
+
 def _ffi_role_poll_timeout_ms(timeout_ms: int) -> int:
     return 1 if timeout_ms == 0 else timeout_ms
+
+
+def _submit_wait_deadline(timeout_ms: int) -> float | None:
+    _require_bounded_integer("timeout_ms", timeout_ms, 0xFFFFFFFF)
+    return None if timeout_ms == 0 else time.monotonic() + (timeout_ms / 1_000)
+
+
+def _submit_wait_poll_timeout_ms(deadline: float | None) -> int:
+    if deadline is None:
+        return 0
+    return _event_poll_timeout_ms(deadline)
 
 
 def _validate_u64(name: str, value: int) -> None:
@@ -7002,6 +7756,7 @@ _EVENT_KIND_NAMES = {
     EVENT_KIND_RESULT_HINT: "result_hint",
     EVENT_KIND_PARTIAL_RESULT: "partial_result",
     EVENT_KIND_RUNTIME_FRAME: "runtime_frame",
+    EVENT_KIND_OPERATION_LIFECYCLE: "operation_lifecycle",
 }
 
 _PAYLOAD_FAMILY_NAMES = {"structured_event", "tool_delta", "workflow_state"}

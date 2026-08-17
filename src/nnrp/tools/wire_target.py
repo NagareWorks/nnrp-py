@@ -35,12 +35,14 @@ from nnrp.runtime import (
     CacheMissReason,
     CacheReferenceMetadata,
     NativeRuntimeEvent,
+    OperationState,
     PartialResultMetadata,
     PressureMetadata,
     ProgressMetadata,
     ResultDropReasonCode,
     ResultDropReasonMetadata,
     RuntimeRole,
+    SchedulingMetadata,
     TraceContextMetadata,
 )
 from nnrp.server.native import (
@@ -115,22 +117,29 @@ def _run_server_scenarios(
     ready_path: Path | None,
     timeout_seconds: float,
 ) -> None:
-    ready_events = [threading.Event() for _ in scenarios]
+    scenario_groups = _group_server_scenarios(scenarios)
+    ready_events = [threading.Event() for _ in scenario_groups]
     errors: list[BaseException] = []
     error_lock = threading.Lock()
 
-    def worker(scenario: LiveWireScenario, ready_event: threading.Event) -> None:
+    def worker(group: Sequence[LiveWireScenario], ready_event: threading.Event) -> None:
         try:
-            _run_server_scenario(scenario, ready_event=ready_event, timeout_seconds=timeout_seconds)
+            _run_server_scenario_group(group, ready_event=ready_event, timeout_seconds=timeout_seconds)
         except BaseException as error:
             with error_lock:
-                errors.append(RuntimeError(f"live wire scenario failed: {scenario.id}"))
+                scenario_ids = ", ".join(scenario.id for scenario in group)
+                errors.append(RuntimeError(f"live wire scenario group failed: {scenario_ids}"))
                 errors[-1].__cause__ = error
             ready_event.set()
 
     threads = [
-        threading.Thread(target=worker, args=(scenario, ready_event), name=scenario.id, daemon=False)
-        for scenario, ready_event in zip(scenarios, ready_events, strict=True)
+        threading.Thread(
+            target=worker,
+            args=(group, ready_event),
+            name=_server_thread_name(group),
+            daemon=False,
+        )
+        for group, ready_event in zip(scenario_groups, ready_events, strict=True)
     ]
     for thread in threads:
         thread.start()
@@ -143,6 +152,7 @@ def _run_server_scenarios(
         raise errors[0]
     if ready_path is not None:
         _write_ready_file(ready_path)
+    deadline = time.monotonic() + timeout_seconds * len(scenarios)
     for thread in threads:
         remaining = deadline - time.monotonic()
         thread.join(max(0.0, remaining))
@@ -152,43 +162,78 @@ def _run_server_scenarios(
         raise errors[0]
 
 
-def _run_server_scenario(
-    scenario: LiveWireScenario,
+def _group_server_scenarios(scenarios: Sequence[LiveWireScenario]) -> list[tuple[LiveWireScenario, ...]]:
+    groups: list[tuple[LiveWireTransport, list[LiveWireScenario]]] = []
+    for scenario in scenarios:
+        for transport, group in groups:
+            if scenario.transport == transport:
+                group.append(scenario)
+                break
+        else:
+            groups.append((scenario.transport, [scenario]))
+    return [tuple(group) for _transport, group in groups]
+
+
+def _server_thread_name(group: Sequence[LiveWireScenario]) -> str:
+    first = group[0]
+    return f"wire-{first.transport.name}-{first.id}"
+
+
+def _run_server_scenario_group(
+    scenarios: Sequence[LiveWireScenario],
     *,
     ready_event: threading.Event,
     timeout_seconds: float,
 ) -> None:
+    if not scenarios:
+        raise ValueError("live wire server scenario group cannot be empty")
+    transport = scenarios[0].transport
+    if any(scenario.transport != transport for scenario in scenarios[1:]):
+        raise ValueError("live wire server scenario group must share one transport endpoint")
     with listen_native_server(
         NativeServerBootstrapOptions(
             endpoint=_APPLICATION_ENDPOINT,
             provider_routes={
-                scenario.transport.name: NativeServerProviderRoute(
-                    provider_endpoint=scenario.transport.endpoint,
-                    security=scenario.transport.server_security,
+                transport.name: NativeServerProviderRoute(
+                    provider_endpoint=transport.endpoint,
+                    security=transport.server_security,
                 )
             },
-            transport_policy=TransportPolicy[f"FORCE_{scenario.transport.name.upper()}"],
+            transport_policy=TransportPolicy[f"FORCE_{transport.name.upper()}"],
         )
     ) as server:
         ready_event.set()
-        session = server.accept(NativeServerAcceptOptions(timeout_ms=max(1, int(timeout_seconds * 1000))))
-        if scenario.id in {
-            "wire.control.cancel-abort.client",
-            "wire.control.cancel-abort.ipc-client",
-        }:
-            _handle_cancel_server(session, timeout_seconds=timeout_seconds)
-        elif scenario.id == "wire.control.priority-deadline.proxy":
-            _handle_priority_server(session, timeout_seconds=timeout_seconds)
-        elif scenario.id == "wire.control.capability-route-cache.client":
-            _handle_cache_server(session, timeout_seconds=timeout_seconds)
-        else:
-            raise ValueError(f"unsupported live server scenario: {scenario.id}")
-        server.close()
+        for scenario in scenarios:
+            session = asyncio.run(
+                server.accept(NativeServerAcceptOptions(timeout_ms=max(1, int(timeout_seconds * 1000))))
+            )
+            _dispatch_server_scenario(scenario, session, timeout_seconds=timeout_seconds)
+
+
+def _dispatch_server_scenario(
+    scenario: LiveWireScenario,
+    session: Any,
+    *,
+    timeout_seconds: float,
+) -> None:
+    if scenario.id in {
+        "wire.control.cancel-abort.client",
+        "wire.control.cancel-abort.ipc-client",
+    }:
+        _handle_cancel_server(session, timeout_seconds=timeout_seconds)
+    elif scenario.id == "wire.control.deadline-before-submit.client":
+        _handle_deadline_before_submit_server(session, timeout_seconds=timeout_seconds)
+    elif scenario.id == "wire.control.priority-deadline.proxy":
+        _handle_priority_server(session, timeout_seconds=timeout_seconds)
+    elif scenario.id == "wire.control.capability-route-cache.client":
+        _handle_cache_server(session, timeout_seconds=timeout_seconds)
+    else:
+        raise ValueError(f"unsupported live server scenario: {scenario.id}")
 
 
 def _handle_cancel_server(session: Any, *, timeout_seconds: float) -> None:
-    operation = session.receive_submit(timeout_ms=max(1, int(timeout_seconds * 1000)))
-    _await_runtime_frames(session, [MessageType.CANCEL], timeout_seconds=timeout_seconds)
+    operation = asyncio.run(session.receive_submit(timeout=timeout_seconds))
+    _await_server_runtime_frames(session, [MessageType.CANCEL], timeout_seconds=timeout_seconds)
     session.send_trace_context(
         TraceContextMetadata(
             trace_id=0x1234,
@@ -200,24 +245,72 @@ def _handle_cancel_server(session: Any, *, timeout_seconds: float) -> None:
         ),
         _TRACE_BODY,
     )
-    session.send_result_drop_reason(_drop_reason(operation.operation_id))
-    _await_peer_close(session, timeout_seconds=timeout_seconds)
+    asyncio.run(
+        operation.send_result_drop(
+            _drop_reason(operation.operation_id, ResultDropReasonCode.PEER_CANCELLED)
+        )
+    )
+    _await_server_lifecycle(
+        session,
+        operation.operation_id,
+        OperationState.CANCELLED,
+        timeout_seconds=timeout_seconds,
+    )
+    _finish_peer_close(session, timeout_seconds=timeout_seconds)
+
+
+def _handle_deadline_before_submit_server(
+    session: Any,
+    *,
+    timeout_seconds: float,
+) -> None:
+    deadline_event = asyncio.run(session.next_event(timeout=timeout_seconds))
+    deadline = deadline_event.as_runtime()
+    if deadline is None or deadline.header.message_type is not MessageType.DEADLINE:
+        raise RuntimeError("deadline-before-submit target expected DEADLINE before FRAME_SUBMIT")
+    metadata = deadline.metadata.value
+    if not isinstance(metadata, SchedulingMetadata):
+        raise RuntimeError("deadline-before-submit target expected scheduling metadata")
+    submit_event = asyncio.run(session.next_event(timeout=timeout_seconds))
+    operation = submit_event.as_submit()
+    if operation is None:
+        raise RuntimeError("deadline-before-submit target expected FRAME_SUBMIT after DEADLINE")
+    if operation.operation_id != metadata.operation_id or operation.frame_id != deadline.header.frame_id:
+        raise RuntimeError("deadline-before-submit target received mismatched submit correlation")
+    asyncio.run(operation.send_result(_canonical_result(), _RESPONSE_BODY))
+    _await_server_lifecycle(
+        session,
+        operation.operation_id,
+        OperationState.COMPLETED,
+        timeout_seconds=timeout_seconds,
+    )
+    _finish_peer_close(session, timeout_seconds=timeout_seconds)
 
 
 def _handle_priority_server(session: Any, *, timeout_seconds: float) -> None:
-    operation = session.receive_submit(timeout_ms=max(1, int(timeout_seconds * 1000)))
-    _await_runtime_frames(
+    operation = asyncio.run(session.receive_submit(timeout=timeout_seconds))
+    _await_server_runtime_frames(
         session,
         [MessageType.PRIORITY_UPDATE, MessageType.EXPIRE_AT],
         timeout_seconds=timeout_seconds,
     )
-    session.send_result_drop_reason(_drop_reason(operation.operation_id))
-    _await_peer_close(session, timeout_seconds=timeout_seconds)
+    asyncio.run(
+        operation.send_result_drop(
+            _drop_reason(operation.operation_id, ResultDropReasonCode.SUPERSEDED)
+        )
+    )
+    _await_server_lifecycle(
+        session,
+        operation.operation_id,
+        OperationState.SUPERSEDED,
+        timeout_seconds=timeout_seconds,
+    )
+    _finish_peer_close(session, timeout_seconds=timeout_seconds)
 
 
 def _handle_cache_server(session: Any, *, timeout_seconds: float) -> None:
-    operation = session.receive_submit(timeout_ms=max(1, int(timeout_seconds * 1000)))
-    frames = _await_runtime_frames(
+    operation = asyncio.run(session.receive_submit(timeout=timeout_seconds))
+    frames = _await_server_runtime_frames(
         session,
         [MessageType.CAPABILITY_NEGOTIATION, MessageType.ROUTE_HINT, MessageType.CACHE_REFERENCE],
         timeout_seconds=timeout_seconds,
@@ -235,8 +328,14 @@ def _handle_cache_server(session: Any, *, timeout_seconds: float) -> None:
             diagnostic_bytes=0,
         )
     )
-    operation.send_result(_canonical_result(), _RESPONSE_BODY)
-    _await_peer_close(session, timeout_seconds=timeout_seconds)
+    asyncio.run(operation.send_result(_canonical_result(), _RESPONSE_BODY))
+    _await_server_lifecycle(
+        session,
+        operation.operation_id,
+        OperationState.COMPLETED,
+        timeout_seconds=timeout_seconds,
+    )
+    _finish_peer_close(session, timeout_seconds=timeout_seconds)
 
 
 def _run_progress_client(scenario: LiveWireScenario, *, timeout_seconds: float) -> None:
@@ -314,6 +413,48 @@ def _await_runtime_frames(
     return observed
 
 
+def _await_server_runtime_frames(
+    session: Any,
+    expected_types: Sequence[MessageType],
+    *,
+    timeout_seconds: float,
+) -> list[NativeRuntimeEvent]:
+    deadline = time.monotonic() + timeout_seconds
+    observed: list[NativeRuntimeEvent] = []
+    while len(observed) < len(expected_types):
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise TimeoutError("wire target did not receive the expected runtime frames before the deadline")
+        event = asyncio.run(session.next_event(timeout=remaining))
+        runtime = event.as_runtime()
+        if runtime is not None:
+            observed.append(runtime)
+    observed_types = [frame.header.message_type for frame in observed]
+    if observed_types != list(expected_types):
+        names = ", ".join(frame.name for frame in observed_types)
+        expected = ", ".join(frame.name for frame in expected_types)
+        raise RuntimeError(f"wire target expected runtime frames [{expected}], got [{names}]")
+    return observed
+
+
+def _await_server_lifecycle(
+    session: Any,
+    operation_id: int,
+    state: OperationState,
+    *,
+    timeout_seconds: float,
+) -> None:
+    event = asyncio.run(session.next_event(timeout=timeout_seconds))
+    lifecycle = event.as_lifecycle()
+    if lifecycle is None:
+        raise RuntimeError("wire target expected an operation lifecycle event")
+    if lifecycle.operation_id != operation_id or lifecycle.state is not state:
+        raise RuntimeError(
+            f"wire target expected operation {operation_id} lifecycle {state.name}, "
+            f"got operation {lifecycle.operation_id} lifecycle {lifecycle.state.name}"
+        )
+
+
 def _poll_result(session: Any, operation: Any, *, deadline: float) -> Any:
     last_error: NativeWouldBlockError | None = None
     while time.monotonic() < deadline:
@@ -330,11 +471,16 @@ def _await_peer_close(session: NativeRuntimeServerSession, *, timeout_seconds: f
     while time.monotonic() < deadline:
         events = session.poll_events(max_events=16, timeout_ms=25)
         if any(
-            isinstance(event, NativeRuntimeEvent) and event.header.message_type is MessageType.SESSION_CLOSE
+            event.as_runtime() is not None and event.as_runtime().header.message_type is MessageType.SESSION_CLOSE
             for event in events
         ):
             return
     raise TimeoutError("wire target did not receive SESSION_CLOSE before the deadline")
+
+
+def _finish_peer_close(session: NativeRuntimeServerSession, *, timeout_seconds: float) -> None:
+    _await_peer_close(session, timeout_seconds=timeout_seconds)
+    session.close()
 
 
 def _validate_progress_frames(frames: Sequence[NativeRuntimeEvent]) -> None:
@@ -351,11 +497,14 @@ def _validate_progress_frames(frames: Sequence[NativeRuntimeEvent]) -> None:
         raise RuntimeError("wire target received non-canonical PARTIAL_RESULT body")
 
 
-def _drop_reason(operation_id: int) -> ResultDropReasonMetadata:
+def _drop_reason(
+    operation_id: int,
+    reason_code: ResultDropReasonCode,
+) -> ResultDropReasonMetadata:
     return ResultDropReasonMetadata(
         operation_id=operation_id,
         result_sequence=1,
-        drop_reason_code=ResultDropReasonCode.DEADLINE_EXPIRED,
+        drop_reason_code=reason_code,
         source_role=RuntimeRole.SERVER,
         flags=0,
         diagnostic_bytes=0,

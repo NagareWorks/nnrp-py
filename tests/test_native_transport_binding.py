@@ -5,6 +5,7 @@ from pathlib import Path
 
 import pytest
 
+from nnrp.core.messages.control import TransportId
 from nnrp.native import (
     FFI_STATUS_OK,
     HANDLE_KIND_BUFFER,
@@ -18,6 +19,7 @@ from nnrp.native import (
     NativeTransportClientSecurity,
     NativeTransportProvider,
     NativeTransportProviderCost,
+    NativeTransportProviderKind,
     NativeTransportProviderLimitation,
     NativeTransportProviderLimits,
     NativeTransportProviderMetadata,
@@ -143,14 +145,12 @@ def _write_handle(pointer, handle: _NnrpHandle) -> None:
 
 def _provider(name: str = "websocket") -> NativeTransportProvider:
     return NativeTransportProvider(
-        name=name,
-        artifact_path=Path("native") / name / "nnrp_ffi.dll",
-        manifest_path=Path("native") / name / "manifest.json",
-        transport_slots=(name,),
-        enabled_features=(f"transport-{name}",),
-        package=f"nnrp-ffi-transport-{name}",
-        transport_scope=name,
-        platform_tag="windows-x86_64",
+        name=f"nnrp-ffi-transport-{name}",
+        version="4.4.0",
+        transport_id=TransportId[name.upper()],
+        kind=NativeTransportProviderKind.NATIVE_DYNAMIC,
+        available=True,
+        library_path=str(Path("native") / name / "nnrp_ffi.dll"),
         metadata=NativeTransportProviderMetadata(
             id=f"org.nnrp.transport.{name}",
             cost=NativeTransportProviderCost(model_id=1, units=1),

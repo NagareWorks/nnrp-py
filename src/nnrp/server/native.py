@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import atexit
+import threading
 import time
 from collections.abc import Iterator, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
@@ -27,7 +28,6 @@ from nnrp._native_routes import (
 from nnrp.core import SessionOpenMetadata, TransportPolicy
 from nnrp.native import (
     FFI_STATUS_WOULD_BLOCK,
-    NATIVE_TRANSPORT_ID_BY_NAME,
     NativeArtifactError,
     NativeRuntimeServer,
     NativeRuntimeServerSession,
@@ -201,8 +201,16 @@ class NativeServer:
     _sessions: list[NativeRuntimeServerSession] = field(default_factory=list, init=False, repr=False)
     _accept_session_handle_ids: list[int | None] = field(default_factory=list, init=False, repr=False)
     _closed: bool = field(default=False, init=False, repr=False)
+    _accept_lock: threading.Lock = field(default_factory=threading.Lock, init=False, repr=False)
 
-    def accept(self, options: NativeServerAcceptOptions | None = None) -> NativeRuntimeServerSession:
+    async def accept(self, options: NativeServerAcceptOptions | None = None) -> NativeRuntimeServerSession:
+        return await asyncio.to_thread(self._accept, options)
+
+    def _accept(self, options: NativeServerAcceptOptions | None = None) -> NativeRuntimeServerSession:
+        with self._accept_lock:
+            return self._accept_serialized(options)
+
+    def _accept_serialized(self, options: NativeServerAcceptOptions | None = None) -> NativeRuntimeServerSession:
         self._ensure_open()
         resolved = options or NativeServerAcceptOptions()
         timeout_ms = resolved.timeout_ms or _DEFAULT_ACCEPT_TIMEOUT_MS
@@ -302,8 +310,7 @@ def _server_route_security_satisfied(
 
 def _base_server_candidate(binding: NativeTransportBinding) -> NativeTransportCandidateDiagnostic:
     return NativeTransportCandidateDiagnostic(
-        transport_name=binding.provider.name,
-        transport_id=NATIVE_TRANSPORT_ID_BY_NAME[binding.provider.name],
+        transport_id=binding.provider.transport_id,
         provider=binding.provider.metadata,
         local_available=binding.local_available,
         peer_supported=True,
@@ -323,7 +330,7 @@ def _resolve_server_routes(
     normalized_routes = normalize_provider_routes(provider_routes, NativeServerProviderRoute)
     bindings = _resolve_server_transport_bindings(transports)
     providers = tuple(binding.provider for binding in bindings)
-    providers_by_name = {provider.name: provider for provider in providers}
+    providers_by_name = {provider.transport_name: provider for provider in providers}
     bindings_by_name = {binding.kind: binding for binding in bindings}
     transport_names = set(providers_by_name) | set(normalized_routes)
     forced_transport = forced_transport_name(policy)
@@ -391,7 +398,7 @@ def _resolve_server_transport_bindings(
 ) -> tuple[NativeTransportBinding, ...]:
     if transports is None:
         bindings = tuple(
-            load_native_transport_binding(provider.name) for provider in discover_native_transport_providers()
+            load_native_transport_binding(provider.transport_name) for provider in discover_native_transport_providers()
         )
     else:
         bindings = tuple(transports)

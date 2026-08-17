@@ -149,6 +149,7 @@ from nnrp.native import (
     NativeCacheLeaseBackend,
     NativeCacheLeaseHandle,
     NativeCallbackRejectedError,
+    NativeClientEvent,
     NativeConnectionHandle,
     NativeCreditUpdateCallback,
     NativeCreditUpdateEvent,
@@ -215,6 +216,7 @@ from nnrp.native import (
     NativeTransportProbeState,
     NativeTransportProvider,
     NativeTransportProviderCost,
+    NativeTransportProviderKind,
     NativeTransportProviderLimitation,
     NativeTransportProviderLimits,
     NativeTransportProviderMetadata,
@@ -222,6 +224,7 @@ from nnrp.native import (
     NativeTransportSelection,
     NativeTransportSelectionError,
     NativeTransportSelectionErrorCode,
+    NativeTransportSelectionOptions,
     NativeTransportServerSecurity,
     NativeWouldBlockError,
     NnrpEndpoint,
@@ -407,6 +410,7 @@ __all__ = [
     "NativeCacheLeaseBackend",
     "NativeCacheLeaseHandle",
     "NativeCallbackRejectedError",
+    "NativeClientEvent",
     "NativeConnectionHandle",
     "NativeCreditUpdateCallback",
     "NativeCreditUpdateEvent",
@@ -480,6 +484,7 @@ __all__ = [
     "NativeTransportProbeState",
     "NativeTransportProvider",
     "NativeTransportProviderCost",
+    "NativeTransportProviderKind",
     "NativeTransportProviderLimitation",
     "NativeTransportProviderLimits",
     "NativeTransportProviderMetadata",
@@ -487,6 +492,7 @@ __all__ = [
     "NativeTransportSelection",
     "NativeTransportSelectionError",
     "NativeTransportSelectionErrorCode",
+    "NativeTransportSelectionOptions",
     "NativeTransportServerSecurity",
     "NativeWouldBlockError",
     "diagnose_nnrp_endpoint_support",
@@ -579,4 +585,4 @@ __all__ = [
     "unpack_tile_index_block",
 ]
 
-__version__ = "1.0.0rc4.post14"
+__version__ = "1.0.0rc4.post15"

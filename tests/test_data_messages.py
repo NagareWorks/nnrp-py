@@ -74,6 +74,16 @@ def test_body_region_prelude_roundtrip() -> None:
 
 
 def test_body_region_prelude_rejects_misaligned_descriptor_tables() -> None:
+    with pytest.raises(ValueError, match="object_reference_bytes must be a multiple"):
+        BodyRegionPrelude(
+            inline_object_bytes=0,
+            object_reference_bytes=16,
+            typed_payload_descriptor_bytes=0,
+            typed_payload_frame_bytes=0,
+            extension_descriptor_bytes=0,
+            extension_payload_bytes=0,
+        )
+
     with pytest.raises(ValueError, match="typed_payload_descriptor_bytes must be a multiple"):
         BodyRegionPrelude(
             inline_object_bytes=0,
@@ -81,6 +91,16 @@ def test_body_region_prelude_rejects_misaligned_descriptor_tables() -> None:
             typed_payload_descriptor_bytes=4,
             typed_payload_frame_bytes=0,
             extension_descriptor_bytes=0,
+            extension_payload_bytes=0,
+        )
+
+    with pytest.raises(ValueError, match="extension_descriptor_bytes must be a multiple"):
+        BodyRegionPrelude(
+            inline_object_bytes=0,
+            object_reference_bytes=0,
+            typed_payload_descriptor_bytes=0,
+            typed_payload_frame_bytes=0,
+            extension_descriptor_bytes=8,
             extension_payload_bytes=0,
         )
 
@@ -331,7 +351,7 @@ def test_current_frame_submit_metadata_rejects_tensor_fields_for_non_tensor_payl
 def test_current_result_push_metadata_roundtrip() -> None:
     metadata = ResultPushMetadata(
         status_code=0,
-        result_flags=ResultFlags.PARTIAL,
+        result_flags=ResultFlags.STALE | ResultFlags.PARTIAL,
         section_count=1,
         tile_count=84,
         active_profile_id=2,
@@ -358,6 +378,42 @@ def test_current_result_push_metadata_roundtrip() -> None:
     decoded = ResultPushMetadata.unpack(payload)
     assert decoded == metadata
     assert decoded.result_class is ResultClass.PARTIAL
+
+
+def test_current_result_push_metadata_enforces_partial_stale_reuse_contract() -> None:
+    fields = dict(
+        status_code=0,
+        result_flags=ResultFlags.STALE | ResultFlags.PARTIAL,
+        section_count=1,
+        tile_count=4,
+        active_profile_id=1,
+        reserved0=0,
+        inference_ms=1,
+        queue_ms=0,
+        server_total_ms=1,
+        reserved1=0,
+        tile_base_id=0,
+        tile_index_bytes=0,
+        result_class=ResultClass.PARTIAL,
+        applied_budget_policy=BudgetPolicy.ALLOW_PARTIAL | BudgetPolicy.ALLOW_STALE_REUSE,
+        reused_frame_id=9,
+        covered_tile_count=3,
+        dropped_tile_count=1,
+        payload_kind_bitmap=PayloadKind.TENSOR,
+        payload_frame_count=1,
+    )
+    assert ResultPushMetadata(**fields).pack()
+
+    with pytest.raises(ValueError, match="stale semantics"):
+        ResultPushMetadata(**{**fields, "result_flags": ResultFlags.PARTIAL})
+    with pytest.raises(ValueError, match="stale semantics"):
+        ResultPushMetadata(**{**fields, "reused_frame_id": 0})
+    with pytest.raises(ValueError, match="dropped_tile_count"):
+        ResultPushMetadata(**{**fields, "dropped_tile_count": 0})
+    with pytest.raises(ValueError, match="must equal tile_count"):
+        ResultPushMetadata(**{**fields, "covered_tile_count": 2})
+    with pytest.raises(ValueError, match="must not exceed tile_count"):
+        ResultPushMetadata(**{**fields, "covered_tile_count": 5})
 
 
 def test_current_result_push_metadata_rejects_unknown_payload_kind_bits() -> None:

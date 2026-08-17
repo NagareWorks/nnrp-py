@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "nnrp-py"
-version = "1.0.0rc4.post14"
+version = "1.0.0rc4.post15"
 description = "Python SDK for NNRP protocol primitives and adapters"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -26,6 +26,7 @@ classifiers = [
 ]
 dependencies = [
   "aioquic>=1.2.0",
+  "cryptography>=42.0.0",
 ]
 
 [project.urls]
@@ -46,6 +47,7 @@ dev = [
   "pytest>=8.3.0",
   "pytest-asyncio>=0.24.0",
   "pytest-cov>=7.0.0",
+  "jsonschema>=4.23.0",
   "ruff>=0.6.0",
   "setuptools>=82.0.1",
 ]
@@ -55,6 +57,8 @@ packages = ["src/nnrp"]
 
 [tool.hatch.build.targets.sdist]
 exclude = [
+  "/.venv*",
+  "/.uv-cache",
   "/artifacts",
   "/dist",
   "/src/nnrp/native_artifacts",

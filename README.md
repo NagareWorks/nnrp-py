@@ -145,37 +145,52 @@ async def configure_session() -> None:
 asyncio.run(configure_session())
 ```
 
-Server helpers expose the same runtime-control frame family from `ServerSession` without forcing callers to manually build packets:
+The accepted server operation owns progress, partial, terminal, and drop replies. The server session retains
+session-scoped controls such as pressure and credit updates:
 
 ```python
-from nnrp.runtime import ResultDropReasonCode
+from nnrp.runtime import (
+    PartialResultMetadata,
+    PressureMetadata,
+    ProgressMetadata,
+    ResultDropReasonCode,
+    ResultDropReasonMetadata,
+    RuntimeRole,
+)
 
-await session.send_progress(
-	operation_id=1001,
-	progress_sequence=1,
-	stage_code=2,
-	percent_x100=2500,
-	body=b"tile pass 1/4",
-	trace_id=77,
-)
-await session.send_partial_result(
-	operation_id=1001,
-	result_sequence=2,
-	object_id=33,
-	body=b"partial payload snapshot",
-)
-await session.send_result_drop_reason(
-	operation_id=1001,
-	result_sequence=3,
-	drop_reason_code=ResultDropReasonCode.DEADLINE_EXPIRED,
-	diagnostic=b"expired before delivery",
-)
-await session.send_backpressure(
-	scope_id=session.session_id,
-	credit_window=8,
-	pressure_level=2,
-	pressure_reason=5,
-)
+async def handle_next_operation(session):
+    operation = await session.receive_submit()
+    await operation.send_progress(
+        ProgressMetadata(operation.operation_id, 1, 2, 2500, 0, len(b"tile pass 1/4")),
+        b"tile pass 1/4",
+    )
+    await operation.send_partial_result(
+        PartialResultMetadata(operation.operation_id, 2, 33, 1, len(b"partial payload snapshot"), 0),
+        b"partial payload snapshot",
+    )
+    await operation.send_result_drop(
+        ResultDropReasonMetadata(
+            operation.operation_id,
+            3,
+            ResultDropReasonCode.DEADLINE_EXPIRED,
+            RuntimeRole.RUNTIME,
+            0,
+            len(b"expired before delivery"),
+        ),
+        b"expired before delivery",
+    )
+
+    # Scope 0 applies connection-wide; use an operation id for operation-scoped pressure.
+    session.send_backpressure(
+        PressureMetadata(
+            scope_id=0,
+            credit_window=8,
+            pressure_level=2,
+            pressure_reason=5,
+            retry_after_ms=0,
+            flags=0,
+        )
+    )
 ```
 
 These helpers are runtime-control API conveniences, not a pure-Python runtime replacement. Public host APIs require the packaged native artifacts; packet builders under `nnrp.core` remain for fixtures, diagnostics, and conformance tooling.
@@ -187,23 +202,39 @@ manifests and rejects names that are not advertised by the artifact tree:
 
 ```python
 from nnrp import (
+	NativeTransportCandidateReadiness,
+	NativeTransportSelectionOptions,
+	TransportId,
+	TransportPolicy,
 	diagnose_nnrp_endpoint_support,
 	discover_native_transport_providers,
 	select_native_transport_provider,
 )
 
 providers = discover_native_transport_providers()
-selection = select_native_transport_provider("auto")
+selection = select_native_transport_provider(
+	NativeTransportSelectionOptions(
+		peer_supported_transports=(TransportId.TCP,),
+		policy=TransportPolicy.AUTO,
+		requested_max_frame_bytes=None,
+		candidate_readiness=tuple(
+			NativeTransportCandidateReadiness.ready(provider) for provider in providers
+		),
+		probe_observations=(),
+	)
+)
 support = diagnose_nnrp_endpoint_support("nnrps://runtime.example/session/default")
 
-print([provider.name for provider in providers])
+print([(provider.name, provider.transport_name) for provider in providers])
 print(selection.selected_transport_name, selection.diagnostic)
 print(support.endpoint.authority, support.available)
 ```
 
-Installations with a single provider select it directly. Multi-provider installations can use `auto`, `probe`,
-or an explicit transport name. Provider metadata reports transport slots, cost/preference hints, platform limitations,
-and enabled native features; it is not a configuration flag over hidden shared transport logic.
+Installations with a single eligible provider select it directly. Multi-provider selection uses a `TransportPolicy`
+together with complete readiness and probe evidence. A provider descriptor keeps package identity (`name`) separate from
+the canonical carrier identity (`transport_name` / `transport_id`) and reports availability, owned library path,
+cost/preference hints, limits, and platform limitations. It is not a configuration flag over hidden shared transport
+logic.
 
 Application-facing endpoints use `nnrp://` or `nnrps://`. Provider-local locators such as `unix://`, `npipe://`,
 `ws://`, and `wss://` are lower-level diagnostics, conformance fixture inputs, or explicit provider overrides.

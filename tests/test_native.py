@@ -7,9 +7,11 @@ import struct
 import threading
 import time
 from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 
 import pytest
 
@@ -57,6 +59,7 @@ from nnrp.native import (
     ERROR_FAMILY_SESSION,
     EVENT_KIND_CONTROL,
     EVENT_KIND_FLOW_UPDATED,
+    EVENT_KIND_OPERATION_LIFECYCLE,
     EVENT_KIND_RESULT_HINT,
     EVENT_KIND_RESULT_PUSHED,
     EVENT_KIND_RUNTIME_FRAME,
@@ -135,6 +138,7 @@ from nnrp.native import (
     NativeSchemaCodec,
     NativeSchemaRegistry,
     NativeSchemaRegistryHandle,
+    NativeServerEvent,
     NativeSessionHandle,
     NativeSessionPriorityClass,
     NativeSessionRecoveryOutcome,
@@ -218,6 +222,7 @@ from nnrp.runtime import (
     CacheReuseScope,
     CapabilityMetadata,
     ControlRequestMetadata,
+    InFlightPolicy,
     MemoryLocationHint,
     NativeRuntimeEvent,
     NativeTerminalEvent,
@@ -244,6 +249,8 @@ from nnrp.runtime import (
     RuntimeObjectKind,
     RuntimeRole,
     SchedulingMetadata,
+    SessionCloseMetadata,
+    SessionCloseReason,
     SupersedeMetadata,
     TraceContextMetadata,
     decode_runtime_control_metadata,
@@ -567,7 +574,17 @@ class FakeRuntimeLibrary(FakeEntrypointLibrary):
         return self.status
 
     def _runtime_frame_send(self, request: _NnrpRuntimeFrameSendRequest) -> _NnrpFfiStatus:
-        if request.handle.kind not in {HANDLE_KIND_SESSION, HANDLE_KIND_CONNECTION}:
+        operation_message_types = {
+            int(MessageType.RESULT_DROP_REASON),
+            int(MessageType.PROGRESS),
+            int(MessageType.PARTIAL_RESULT),
+        }
+        expected_handle_kinds = (
+            {HANDLE_KIND_OPERATION}
+            if int(request.message_type) in operation_message_types
+            else {HANDLE_KIND_SESSION, HANDLE_KIND_CONNECTION}
+        )
+        if request.handle.kind not in expected_handle_kinds:
             return _NnrpFfiStatus(FFI_STATUS_INVALID_HANDLE, 0, 0, 0)
         self.runtime_frames.append(
             (int(request.message_type), int(request.frame_id), _read_buffer_view(request.payload))
@@ -1027,6 +1044,48 @@ class BatchControlRuntimeLibrary(FakeRuntimeLibrary):
         return self.status
 
 
+class ServerEventBatchRuntimeLibrary(FakeRuntimeLibrary):
+    def __init__(self, events: list[tuple[int, MessageType, int, int, bytes]]) -> None:
+        super().__init__()
+        self._server_events = events
+        self._server_event_owners = [
+            ctypes.create_string_buffer(payload, len(payload)) for *_context, payload in events
+        ]
+
+    def _await_events(
+        self,
+        request: _NnrpRoleEventPollRequest,
+        out_events: object,
+        event_capacity: int,
+        out_event_count: object,
+    ) -> _NnrpFfiStatus:
+        count_target = getattr(out_event_count, "_obj", None)
+        if count_target is None:
+            count_target = ctypes.cast(out_event_count, ctypes.POINTER(ctypes.c_size_t)).contents
+        emitted = min(event_capacity, len(self._server_events))
+        if emitted == 0:
+            count_target.value = 0
+            return _NnrpFfiStatus(FFI_STATUS_WOULD_BLOCK, 0, 0, 0)
+
+        events = ctypes.cast(out_events, ctypes.POINTER(_NnrpEvent))
+        for index, (kind, message_type, operation_id, frame_id, payload) in enumerate(self._server_events[:emitted]):
+            owner = self._server_event_owners[index]
+            events[index].kind = kind
+            _write_event_header(events[index], message_type=int(message_type), frame_id=frame_id)
+            events[index].connection = _NnrpHandle(HANDLE_KIND_CONNECTION, 12, 2, 0)
+            events[index].session = request.scope
+            events[index].operation = _NnrpHandle(HANDLE_KIND_OPERATION, operation_id, 1, 0)
+            events[index].payload_owner = _NnrpHandle()
+            events[index].payload = _NnrpBufferView(ctypes.cast(owner, ctypes.c_void_p), len(payload))
+            events[index].diagnostic.status = NativeStatus.ok().to_ffi()
+            events[index].diagnostic.related_operation_id = operation_id
+            events[index].diagnostic.related_frame_id = frame_id
+        del self._server_events[:emitted]
+        del self._server_event_owners[:emitted]
+        count_target.value = emitted
+        return self.status
+
+
 class OwnedBatchRuntimeLibrary(FakeRuntimeLibrary):
     def __init__(self, events: list[tuple[int, int, int, int, bytes]]) -> None:
         super().__init__()
@@ -1416,6 +1475,15 @@ def _test_transport_endpoint(name: str) -> NativeTransportEndpoint:
     )
 
 
+def _test_transport_provider(name: str, artifact_path: Path | None = None) -> SimpleNamespace:
+    return SimpleNamespace(
+        name=name,
+        transport_name=name,
+        transport_id=native_module.NATIVE_TRANSPORT_ID_BY_NAME[name],
+        _artifact_path=artifact_path,
+    )
+
+
 def _test_server_role_options() -> dict[str, object]:
     return {
         "supported_profiles": (int(StandardProfile.TOKEN),),
@@ -1443,7 +1511,7 @@ class _TestNativeRuntimeClient(NativeRuntimeClient):
         name = _test_transport_name(transport_id)
         carrier = NativeTransportConnection(
             SimpleNamespace(),
-            SimpleNamespace(name=name),
+            _test_transport_provider(name),
             _test_transport_endpoint(name),
             NativeHandle(HANDLE_KIND_TRANSPORT_CONNECTION, 800, 1, 0),
         )
@@ -1463,7 +1531,7 @@ class _TestNativeRuntimeClient(NativeRuntimeClient):
         name = _test_transport_name(transport_id)
         listener = NativeTransportListener(
             SimpleNamespace(),
-            SimpleNamespace(name=name),
+            _test_transport_provider(name),
             _test_transport_endpoint(name),
             NativeHandle(HANDLE_KIND_TRANSPORT_LISTENER, 801, 1, 0),
         )
@@ -1484,7 +1552,7 @@ def test_native_transport_connection_transfers_ownership_only_after_client_role_
     role_library = FakeRuntimeLibrary()
     carrier = NativeTransportConnection(
         transport_entrypoints,
-        SimpleNamespace(name="tcp"),
+        _test_transport_provider("tcp"),
         _test_transport_endpoint("tcp"),
         NativeHandle(HANDLE_KIND_TRANSPORT_CONNECTION, 800, 1, 0),
     )
@@ -1510,7 +1578,7 @@ def test_native_transport_connection_transfers_ownership_only_after_client_role_
 def test_native_transport_binding_adopts_only_its_own_client_carrier() -> None:
     transport_entrypoints = SimpleNamespace(close=FakeFunction(NativeStatus.ok().to_ffi()))
     role_entrypoints = NativeRuntimeEntrypoints(FakeRuntimeLibrary())
-    provider = SimpleNamespace(name="tcp", transport_slots=("tcp",))
+    provider = _test_transport_provider("tcp")
     binding = NativeTransportBinding(transport_entrypoints, provider, role_entrypoints)
     carrier = NativeTransportConnection(
         transport_entrypoints,
@@ -1534,7 +1602,7 @@ def test_native_transport_binding_adopts_only_its_own_client_carrier() -> None:
 
 def test_native_transport_binding_requires_client_role_entrypoints() -> None:
     transport_entrypoints = SimpleNamespace(close=FakeFunction(NativeStatus.ok().to_ffi()))
-    provider = SimpleNamespace(name="tcp", transport_slots=("tcp",))
+    provider = _test_transport_provider("tcp")
     binding = NativeTransportBinding(transport_entrypoints, provider)
     carrier = NativeTransportConnection(
         transport_entrypoints,
@@ -1572,7 +1640,7 @@ def test_native_transport_connection_remains_owned_when_client_role_adoption_fai
     role_library = FakeRuntimeLibrary(status=_NnrpFfiStatus(FFI_STATUS_INTERNAL_ERROR, 0, 0, 0))
     carrier = NativeTransportConnection(
         transport_entrypoints,
-        SimpleNamespace(name="tcp"),
+        _test_transport_provider("tcp"),
         _test_transport_endpoint("tcp"),
         NativeHandle(HANDLE_KIND_TRANSPORT_CONNECTION, 800, 1, 0),
     )
@@ -1594,7 +1662,7 @@ def test_native_transport_listener_transfers_ownership_only_after_server_role_ad
     role_library = FakeRuntimeLibrary()
     listener = NativeTransportListener(
         transport_entrypoints,
-        SimpleNamespace(name="ipc"),
+        _test_transport_provider("ipc"),
         _test_transport_endpoint("ipc"),
         NativeHandle(HANDLE_KIND_TRANSPORT_LISTENER, 801, 1, 0),
     )
@@ -1621,7 +1689,7 @@ def test_native_transport_listener_transfers_ownership_only_after_server_role_ad
 def test_native_transport_binding_adopts_only_its_own_server_listener() -> None:
     transport_entrypoints = SimpleNamespace(close=FakeFunction(NativeStatus.ok().to_ffi()))
     role_entrypoints = NativeRuntimeEntrypoints(FakeRuntimeLibrary())
-    provider = SimpleNamespace(name="ipc", transport_slots=("ipc",))
+    provider = _test_transport_provider("ipc")
     binding = NativeTransportBinding(transport_entrypoints, provider, role_entrypoints)
     listener = NativeTransportListener(
         transport_entrypoints,
@@ -1655,7 +1723,7 @@ def test_native_transport_binding_adopts_only_its_own_server_listener() -> None:
 
 def test_native_transport_binding_requires_server_role_entrypoints() -> None:
     transport_entrypoints = SimpleNamespace(close=FakeFunction(NativeStatus.ok().to_ffi()))
-    provider = SimpleNamespace(name="ipc", transport_slots=("ipc",))
+    provider = _test_transport_provider("ipc")
     binding = NativeTransportBinding(transport_entrypoints, provider)
     listener = NativeTransportListener(
         transport_entrypoints,
@@ -1678,7 +1746,7 @@ def test_native_transport_listener_remains_owned_when_server_role_adoption_fails
     role_library = FakeRuntimeLibrary(status=_NnrpFfiStatus(FFI_STATUS_INTERNAL_ERROR, 0, 0, 0))
     listener = NativeTransportListener(
         transport_entrypoints,
-        SimpleNamespace(name="ipc"),
+        _test_transport_provider("ipc"),
         _test_transport_endpoint("ipc"),
         NativeHandle(HANDLE_KIND_TRANSPORT_LISTENER, 801, 1, 0),
     )
@@ -1701,7 +1769,7 @@ def test_native_server_policy_callback_receives_exact_session_open_metadata() ->
     role_library = FakeRuntimeLibrary()
     listener = NativeTransportListener(
         transport_entrypoints,
-        SimpleNamespace(name="ipc"),
+        _test_transport_provider("ipc"),
         _test_transport_endpoint("ipc"),
         NativeHandle(HANDLE_KIND_TRANSPORT_LISTENER, 801, 1, 0),
     )
@@ -1763,7 +1831,7 @@ def test_native_server_policy_callback_rejects_application_exceptions() -> None:
     role_library = FakeRuntimeLibrary()
     listener = NativeTransportListener(
         transport_entrypoints,
-        SimpleNamespace(name="ipc"),
+        _test_transport_provider("ipc"),
         _test_transport_endpoint("ipc"),
         NativeHandle(HANDLE_KIND_TRANSPORT_LISTENER, 801, 1, 0),
     )
@@ -1801,7 +1869,7 @@ def test_native_server_policy_dispatcher_rejects_invalid_metadata_and_stopped_ex
     role_library = FakeRuntimeLibrary()
     listener = NativeTransportListener(
         transport_entrypoints,
-        SimpleNamespace(name="ipc"),
+        _test_transport_provider("ipc"),
         _test_transport_endpoint("ipc"),
         NativeHandle(HANDLE_KIND_TRANSPORT_LISTENER, 801, 1, 0),
     )
@@ -1851,7 +1919,7 @@ def test_native_server_policy_worker_does_not_convert_fatal_exception_to_rejecti
     role_library = FakeRuntimeLibrary()
     listener = NativeTransportListener(
         transport_entrypoints,
-        SimpleNamespace(name="ipc"),
+        _test_transport_provider("ipc"),
         _test_transport_endpoint("ipc"),
         NativeHandle(HANDLE_KIND_TRANSPORT_LISTENER, 801, 1, 0),
     )
@@ -1886,7 +1954,7 @@ def test_native_server_policy_completion_failure_surfaces_from_server_close() ->
     role_library = FakeRuntimeLibrary()
     listener = NativeTransportListener(
         transport_entrypoints,
-        SimpleNamespace(name="ipc"),
+        _test_transport_provider("ipc"),
         _test_transport_endpoint("ipc"),
         NativeHandle(HANDLE_KIND_TRANSPORT_LISTENER, 801, 1, 0),
     )
@@ -1921,7 +1989,7 @@ def test_native_server_close_preserves_policy_failure_when_ticket_release_also_f
     )
     listener = NativeTransportListener(
         transport_entrypoints,
-        SimpleNamespace(name="ipc"),
+        _test_transport_provider("ipc"),
         _test_transport_endpoint("ipc"),
         NativeHandle(HANDLE_KIND_TRANSPORT_LISTENER, 801, 1, 0),
     )
@@ -1967,7 +2035,7 @@ def test_native_server_close_waits_for_pending_policy_completion() -> None:
     role_library = FakeRuntimeLibrary()
     listener = NativeTransportListener(
         transport_entrypoints,
-        SimpleNamespace(name="ipc"),
+        _test_transport_provider("ipc"),
         _test_transport_endpoint("ipc"),
         NativeHandle(HANDLE_KIND_TRANSPORT_LISTENER, 801, 1, 0),
     )
@@ -2009,12 +2077,10 @@ def test_native_server_close_waits_for_pending_policy_completion() -> None:
 def test_native_server_bind_failure_closes_policy_dispatcher() -> None:
     transport_entrypoints = SimpleNamespace(close=FakeFunction(NativeStatus.ok().to_ffi()))
     role_library = FakeRuntimeLibrary()
-    role_library.nnrp_server_bind.handler = lambda _request, _output: _NnrpFfiStatus(
-        FFI_STATUS_INVALID_STATE, 0, 0, 0
-    )
+    role_library.nnrp_server_bind.handler = lambda _request, _output: _NnrpFfiStatus(FFI_STATUS_INVALID_STATE, 0, 0, 0)
     listener = NativeTransportListener(
         transport_entrypoints,
-        SimpleNamespace(name="ipc"),
+        _test_transport_provider("ipc"),
         _test_transport_endpoint("ipc"),
         NativeHandle(HANDLE_KIND_TRANSPORT_LISTENER, 801, 1, 0),
     )
@@ -2134,6 +2200,7 @@ def _write_provider_artifact(root: Path, scope: str, *, slots: list[str] | None 
         json.dumps(
             {
                 "package": f"nnrp-ffi-transport-{scope}",
+                "abi_version": "4.4.0",
                 "transport_scope": scope,
                 "transport_slots": slots or [scope],
                 "enabled_features": [f"transport-{scope}"],
@@ -2182,6 +2249,7 @@ def _provider_metadata(scope: str) -> native_module.NativeTransportProviderMetad
 def _provider_artifact_manifest(scope: str) -> dict[str, object]:
     return {
         "package": f"nnrp-ffi-transport-{scope}",
+        "abi_version": "4.4.0",
         "transport_scope": scope,
         "transport_slots": [scope],
         "enabled_features": [f"transport-{scope}"],
@@ -2200,8 +2268,8 @@ def _probe_sample(
     failed: bool = False,
 ) -> NativeTransportProbeSample:
     return NativeTransportProbeSample(
+        transport_id=native_module.NATIVE_TRANSPORT_ID_BY_NAME[scope],
         provider_id=str(_provider_manifest(scope)["id"]),
-        transport_name=scope,
         elapsed_us=elapsed_us,
         rtt_us=rtt_us,
         bytes_sent=bytes_sent,
@@ -2227,7 +2295,7 @@ def _probe_observations(
         matching = [
             sample
             for sample in samples
-            if sample.provider_id == provider.metadata.id and sample.transport_name == provider.name
+            if sample.provider_id == provider.metadata.id and sample.transport_name == provider.transport_name
         ]
         if not matching:
             continue
@@ -2237,6 +2305,36 @@ def _probe_observations(
         else:
             observations.append(native_module.NativeTransportProbeObservation.succeeded(provider, metrics))
     return observations
+
+
+def _select_transport(
+    policy: TransportPolicy = TransportPolicy.AUTO,
+    *,
+    root: Path,
+    native_platform: NativePlatform,
+    supported_transports: tuple[TransportId, ...] | None = None,
+    requested_max_frame_bytes: int | None = None,
+    candidate_readiness: list[native_module.NativeTransportCandidateReadiness] | None = None,
+    probe_observations: list[native_module.NativeTransportProbeObservation] | None = None,
+) -> native_module.NativeTransportSelection:
+    providers = discover_native_transport_providers(root, native_platform)
+    peer_supported_transports = supported_transports
+    if peer_supported_transports is None:
+        peer_supported_transports = tuple(provider.transport_id for provider in providers)
+    readiness = candidate_readiness
+    if readiness is None:
+        readiness = [native_module.NativeTransportCandidateReadiness.ready(provider) for provider in providers]
+    return select_native_transport_provider(
+        native_module.NativeTransportSelectionOptions(
+            peer_supported_transports=peer_supported_transports,
+            policy=policy,
+            requested_max_frame_bytes=requested_max_frame_bytes,
+            candidate_readiness=tuple(readiness),
+            probe_observations=tuple(probe_observations or ()),
+        ),
+        root=root,
+        native_platform=native_platform,
+    )
 
 
 def _write_provider_artifact_with_manifest(root: Path, scope: str, manifest: object) -> Path:
@@ -2257,39 +2355,81 @@ def test_discover_native_transport_providers_reports_preview4_artifact_metadata(
 
     assert providers == (
         NativeTransportProvider(
-            name="tcp",
-            artifact_path=tcp_artifact,
-            manifest_path=tcp_artifact.with_name("manifest.json"),
-            transport_slots=("tcp",),
-            enabled_features=("transport-tcp",),
-            package="nnrp-ffi-transport-tcp",
-            transport_scope="tcp",
-            platform_tag="linux-x86_64",
+            name="nnrp-ffi-transport-tcp",
+            version="4.4.0",
+            transport_id=TransportId.TCP,
+            kind=native_module.NativeTransportProviderKind.NATIVE_DYNAMIC,
+            available=True,
+            library_path=str(tcp_artifact),
             metadata=_provider_metadata("tcp"),
         ),
         NativeTransportProvider(
-            name="ipc",
-            artifact_path=ipc_artifact,
-            manifest_path=ipc_artifact.with_name("manifest.json"),
-            transport_slots=("ipc",),
-            enabled_features=("transport-ipc",),
-            package="nnrp-ffi-transport-ipc",
-            transport_scope="ipc",
-            platform_tag="linux-x86_64",
+            name="nnrp-ffi-transport-ipc",
+            version="4.4.0",
+            transport_id=TransportId.IPC,
+            kind=native_module.NativeTransportProviderKind.NATIVE_DYNAMIC,
+            available=True,
+            library_path=str(ipc_artifact),
             metadata=_provider_metadata("ipc"),
         ),
         NativeTransportProvider(
-            name="websocket",
-            artifact_path=websocket_artifact,
-            manifest_path=websocket_artifact.with_name("manifest.json"),
-            transport_slots=("websocket",),
-            enabled_features=("transport-websocket",),
-            package="nnrp-ffi-transport-websocket",
-            transport_scope="websocket",
-            platform_tag="linux-x86_64",
+            name="nnrp-ffi-transport-websocket",
+            version="4.4.0",
+            transport_id=TransportId.WEBSOCKET,
+            kind=native_module.NativeTransportProviderKind.NATIVE_DYNAMIC,
+            available=True,
+            library_path=str(websocket_artifact),
             metadata=_provider_metadata("websocket"),
         ),
     )
+
+
+@pytest.mark.parametrize(
+    ("override", "match"),
+    [
+        ({"name": ""}, "name must be a non-empty string"),
+        ({"version": ""}, "version must be a non-empty string"),
+        ({"transport_id": TransportId.UNSPECIFIED}, "transport_id must identify a selectable transport"),
+        ({"kind": "native-dynamic"}, "kind must be a NativeTransportProviderKind"),
+        ({"available": 1}, "available must be a bool"),
+        ({"library_path": Path("provider.so")}, "library_path must be a string or None"),
+        ({"metadata": object()}, "metadata must be a NativeTransportProviderMetadata"),
+        ({"diagnostic": 1}, "diagnostic must be a string or None"),
+    ],
+)
+def test_native_transport_provider_rejects_invalid_frozen_descriptor_fields(
+    override: dict[str, Any],
+    match: str,
+) -> None:
+    values: dict[str, Any] = {
+        "name": "nnrp-ffi-transport-tcp",
+        "version": "4.4.0",
+        "transport_id": TransportId.TCP,
+        "kind": native_module.NativeTransportProviderKind.NATIVE_DYNAMIC,
+        "available": True,
+        "library_path": "libnnrp_ffi.so",
+        "metadata": _provider_metadata("tcp"),
+        "diagnostic": None,
+    }
+    values.update(override)
+
+    with pytest.raises(ValueError, match=match):
+        NativeTransportProvider(**values)
+
+
+def test_native_transport_provider_name_is_not_the_transport_identity() -> None:
+    provider = NativeTransportProvider(
+        name="provider-package-with-an-independent-name",
+        version="4.4.0",
+        transport_id=TransportId.TCP,
+        kind=native_module.NativeTransportProviderKind.NATIVE_DYNAMIC,
+        available=True,
+        library_path="libnnrp_ffi.so",
+        metadata=_provider_metadata("tcp"),
+    )
+
+    assert provider.name == "provider-package-with-an-independent-name"
+    assert provider.transport_name == "tcp"
 
 
 def test_discover_native_transport_provider_ignores_removed_aggregate_artifact(tmp_path: Path) -> None:
@@ -2313,7 +2453,7 @@ def test_resolve_native_transport_provider_rejects_unadvertised_provider(tmp_pat
         native_platform=NativePlatform("linux", "x86_64"),
     )
 
-    assert provider.name == "tcp"
+    assert provider.transport_name == "tcp"
     with pytest.raises(NativeArtifactError, match="not advertised"):
         resolve_native_transport_provider("ipc", root=tmp_path, native_platform=NativePlatform("linux", "x86_64"))
 
@@ -2543,7 +2683,7 @@ def test_diagnose_nnrp_endpoint_support_selects_installed_provider(tmp_path: Pat
     )
     assert support.available is True
     assert support.selection is not None
-    assert support.selection.selected_provider.artifact_path == tcp_artifact
+    assert support.selection.selected_provider.library_path == str(tcp_artifact)
     assert support.selection.selected_transport_id is TransportId.TCP
     assert support.diagnostic == "NNRP endpoint nnrps://runtime.example/session/default selected tcp carrier"
 
@@ -2593,14 +2733,12 @@ def test_diagnose_native_transport_endpoint_support_reports_available_provider(t
             secure=True,
         ),
         provider=NativeTransportProvider(
-            name="websocket",
-            artifact_path=websocket_artifact,
-            manifest_path=websocket_artifact.with_name("manifest.json"),
-            transport_slots=("websocket",),
-            enabled_features=("transport-websocket",),
-            package="nnrp-ffi-transport-websocket",
-            transport_scope="websocket",
-            platform_tag="linux-x86_64",
+            name="nnrp-ffi-transport-websocket",
+            version="4.4.0",
+            transport_id=TransportId.WEBSOCKET,
+            kind=native_module.NativeTransportProviderKind.NATIVE_DYNAMIC,
+            available=True,
+            library_path=str(websocket_artifact),
             metadata=_provider_metadata("websocket"),
         ),
         available=True,
@@ -2638,13 +2776,12 @@ def test_diagnose_native_transport_endpoint_support_skips_missing_provider(
 def test_select_native_transport_provider_selects_single_installed_transport(tmp_path: Path) -> None:
     tcp_artifact = _write_provider_artifact(tmp_path, "tcp")
 
-    selection = select_native_transport_provider(
+    selection = _select_transport(
         root=tmp_path,
         native_platform=NativePlatform("linux", "x86_64"),
-        candidate_readiness=_candidate_readiness(tmp_path),
     )
 
-    assert selection.selected_provider.artifact_path == tcp_artifact
+    assert selection.selected_provider.library_path == str(tcp_artifact)
     assert selection.selected_transport_name == "tcp"
     assert selection.selected_transport_id is TransportId.TCP
     assert selection.policy is TransportPolicy.AUTO
@@ -2660,24 +2797,21 @@ def test_select_native_transport_provider_applies_preview4_policy_order(tmp_path
     _write_provider_artifact(tmp_path, "websocket")
 
     samples = [_probe_sample(scope) for scope in ("tcp", "quic", "ipc", "websocket")]
-    auto = select_native_transport_provider(
+    auto = _select_transport(
         root=tmp_path,
         native_platform=NativePlatform("linux", "x86_64"),
-        candidate_readiness=_candidate_readiness(tmp_path),
         probe_observations=_probe_observations(tmp_path, samples),
     )
-    preferred_websocket = select_native_transport_provider(
+    preferred_websocket = _select_transport(
         TransportPolicy.PREFER_WEBSOCKET,
         root=tmp_path,
         native_platform=NativePlatform("linux", "x86_64"),
-        candidate_readiness=_candidate_readiness(tmp_path),
         probe_observations=_probe_observations(tmp_path, samples),
     )
-    preferred_tcp = select_native_transport_provider(
-        "prefer-tcp",
+    preferred_tcp = _select_transport(
+        TransportPolicy.PREFER_TCP,
         root=tmp_path,
         native_platform=NativePlatform("linux", "x86_64"),
-        candidate_readiness=_candidate_readiness(tmp_path),
         probe_observations=_probe_observations(tmp_path, samples),
     )
 
@@ -2689,13 +2823,17 @@ def test_select_native_transport_provider_applies_preview4_policy_order(tmp_path
 def test_select_native_transport_provider_rejects_missing_forced_transport(tmp_path: Path) -> None:
     _write_provider_artifact(tmp_path, "tcp")
 
-    with pytest.raises(NativeArtifactError, match="forced native transport is not available: ipc"):
-        select_native_transport_provider(
+    with pytest.raises(
+        native_module.NativeTransportSelectionError,
+        match="forced native transport is not available: ipc",
+    ) as caught:
+        _select_transport(
             TransportPolicy.FORCE_IPC,
             root=tmp_path,
             native_platform=NativePlatform("linux", "x86_64"),
-            candidate_readiness=_candidate_readiness(tmp_path),
         )
+
+    assert caught.value.transport_id is TransportId.IPC
 
 
 def test_select_native_transport_provider_reports_forced_transport_rejection(tmp_path: Path) -> None:
@@ -2705,69 +2843,124 @@ def test_select_native_transport_provider_reports_forced_transport_rejection(tmp
         NativeArtifactError,
         match="forced native transport tcp rejected: peer-unsupported",
     ) as caught:
-        select_native_transport_provider(
+        _select_transport(
             TransportPolicy.FORCE_TCP,
             root=tmp_path,
             native_platform=NativePlatform("linux", "x86_64"),
             supported_transports=(TransportId.QUIC,),
-            candidate_readiness=_candidate_readiness(tmp_path),
         )
 
     assert caught.value.candidates[0].rejection_reason is (
         native_module.NativeTransportRejectionReason.PEER_UNSUPPORTED
     )
+    assert caught.value.transport_id is TransportId.TCP
 
 
 def test_select_native_transport_provider_rejects_empty_provider_registry(tmp_path: Path) -> None:
     with pytest.raises(NativeArtifactError, match="no viable native transport provider"):
-        select_native_transport_provider(
+        _select_transport(
             root=tmp_path,
             native_platform=NativePlatform("linux", "x86_64"),
-            candidate_readiness=[],
         )
 
 
-def test_select_native_transport_provider_accepts_integer_and_auto_string_policy(tmp_path: Path) -> None:
-    _write_provider_artifact(tmp_path, "websocket")
-
-    auto = select_native_transport_provider(
-        "auto",
-        root=tmp_path,
-        native_platform=NativePlatform("linux", "x86_64"),
-        candidate_readiness=_candidate_readiness(tmp_path),
-    )
-    forced = select_native_transport_provider(
-        int(TransportPolicy.FORCE_WEBSOCKET),
-        root=tmp_path,
-        native_platform=NativePlatform("linux", "x86_64"),
-        candidate_readiness=_candidate_readiness(tmp_path),
-    )
-
-    assert auto.selected_transport_id is TransportId.WEBSOCKET
-    assert forced.selected_transport_id is TransportId.WEBSOCKET
+def test_native_transport_selection_options_rejects_non_enum_policy() -> None:
+    with pytest.raises(ValueError, match="policy must be a TransportPolicy"):
+        native_module.NativeTransportSelectionOptions(
+            peer_supported_transports=(TransportId.TCP,),
+            policy="auto",  # type: ignore[arg-type]
+            requested_max_frame_bytes=None,
+            candidate_readiness=(),
+            probe_observations=(),
+        )
 
 
-def test_select_native_transport_provider_rejects_invalid_policy(tmp_path: Path) -> None:
+def test_native_transport_selection_options_rejects_bare_integer_transport_id() -> None:
+    with pytest.raises(ValueError, match="selectable transport IDs"):
+        native_module.NativeTransportSelectionOptions(
+            peer_supported_transports=(int(TransportId.TCP),),  # type: ignore[arg-type]
+            policy=TransportPolicy.AUTO,
+            requested_max_frame_bytes=None,
+            candidate_readiness=(),
+            probe_observations=(),
+        )
+
+
+@pytest.mark.parametrize(
+    ("candidate_readiness", "probe_observations", "match"),
+    [
+        ((object(),), (), "candidate_readiness must contain"),
+        ((), (object(),), "probe_observations must contain"),
+    ],
+)
+def test_native_transport_selection_options_rejects_untyped_evidence(
+    candidate_readiness: tuple[object, ...],
+    probe_observations: tuple[object, ...],
+    match: str,
+) -> None:
+    with pytest.raises(ValueError, match=match):
+        native_module.NativeTransportSelectionOptions(
+            peer_supported_transports=(TransportId.TCP,),
+            policy=TransportPolicy.AUTO,
+            requested_max_frame_bytes=None,
+            candidate_readiness=candidate_readiness,  # type: ignore[arg-type]
+            probe_observations=probe_observations,  # type: ignore[arg-type]
+        )
+
+
+@pytest.mark.parametrize(
+    ("override", "match"),
+    [
+        ({"code": "invalid-evidence"}, "code must be a NativeTransportSelectionErrorCode"),
+        ({"policy": "auto"}, "policy must be a TransportPolicy or None"),
+        ({"transport_id": TransportId.UNSPECIFIED}, "transport_id must identify a selectable transport or be None"),
+        ({"candidates": []}, "candidates must contain NativeTransportCandidateDiagnostic values"),
+        ({"diagnostic": object()}, "diagnostic must be a string"),
+    ],
+)
+def test_native_transport_selection_error_rejects_untyped_frozen_fields(
+    override: dict[str, Any],
+    match: str,
+) -> None:
+    values: dict[str, Any] = {
+        "code": native_module.NativeTransportSelectionErrorCode.INVALID_EVIDENCE,
+        "diagnostic": "invalid evidence",
+        "policy": TransportPolicy.AUTO,
+        "transport_id": None,
+        "candidates": (),
+    }
+    values.update(override)
+
+    with pytest.raises(ValueError, match=match):
+        native_module.NativeTransportSelectionError(**values)
+
+
+def test_native_transport_selection_accepts_zero_frame_request_and_duplicate_peer_ids(
+    tmp_path: Path,
+) -> None:
     _write_provider_artifact(tmp_path, "tcp")
 
-    with pytest.raises(NativeArtifactError, match="unsupported native transport policy"):
-        select_native_transport_provider(
-            "prefer-stdio",
-            root=tmp_path,
-            native_platform=NativePlatform("linux", "x86_64"),
-            candidate_readiness=_candidate_readiness(tmp_path),
-        )
+    selection = _select_transport(
+        root=tmp_path,
+        native_platform=NativePlatform("linux", "x86_64"),
+        supported_transports=(TransportId.TCP, TransportId.TCP),
+        requested_max_frame_bytes=0,
+    )
+
+    assert selection.selected_transport_id is TransportId.TCP
+    assert selection.candidates[0].within_limits is True
 
 
 def test_select_native_transport_provider_rejects_unspecified_supported_transport(tmp_path: Path) -> None:
     _write_provider_artifact(tmp_path, "tcp")
 
-    with pytest.raises(NativeArtifactError, match="unsupported native transport id"):
-        select_native_transport_provider(
-            root=tmp_path,
-            native_platform=NativePlatform("linux", "x86_64"),
-            supported_transports=(TransportId.UNSPECIFIED,),
-            candidate_readiness=_candidate_readiness(tmp_path),
+    with pytest.raises(ValueError, match="selectable transport IDs"):
+        native_module.NativeTransportSelectionOptions(
+            peer_supported_transports=(TransportId.UNSPECIFIED,),
+            policy=TransportPolicy.AUTO,
+            requested_max_frame_bytes=None,
+            candidate_readiness=tuple(_candidate_readiness(tmp_path)),
+            probe_observations=(),
         )
 
 
@@ -2776,11 +2969,10 @@ def test_select_native_transport_provider_reports_remote_unsupported_transport(t
     _write_provider_artifact(tmp_path, "ipc")
     _write_provider_artifact(tmp_path, "quic")
 
-    selection = select_native_transport_provider(
+    selection = _select_transport(
         root=tmp_path,
         native_platform=NativePlatform("linux", "x86_64"),
         supported_transports=(TransportId.TCP, TransportId.QUIC),
-        candidate_readiness=_candidate_readiness(tmp_path),
         probe_observations=_probe_observations(
             tmp_path,
             [_probe_sample("tcp"), _probe_sample("quic")],
@@ -2823,10 +3015,9 @@ def test_select_native_transport_provider_uses_deterministic_probe_metrics(tmp_p
             failed=True,
         ),
     ]
-    selection = select_native_transport_provider(
+    selection = _select_transport(
         root=tmp_path,
         native_platform=NativePlatform("linux", "x86_64"),
-        candidate_readiness=_candidate_readiness(tmp_path),
         probe_observations=_probe_observations(tmp_path, samples),
     )
 
@@ -2843,10 +3034,9 @@ def test_select_native_transport_provider_requires_probe_observations_for_probe_
     _write_provider_artifact(tmp_path, "quic")
 
     with pytest.raises(NativeArtifactError, match="no viable native transport provider") as caught:
-        select_native_transport_provider(
+        _select_transport(
             root=tmp_path,
             native_platform=NativePlatform("linux", "x86_64"),
-            candidate_readiness=_candidate_readiness(tmp_path),
             probe_observations=[],
         )
     assert all(
@@ -2861,12 +3051,12 @@ def test_select_native_transport_provider_distinguishes_failed_and_missing_probe
     _write_provider_artifact(tmp_path, "tcp")
     _write_provider_artifact(tmp_path, "quic")
     providers = discover_native_transport_providers(tmp_path, NativePlatform("linux", "x86_64"))
-    tcp = next(provider for provider in providers if provider.name == "tcp")
-    quic = next(provider for provider in providers if provider.name == "quic")
+    tcp = next(provider for provider in providers if provider.transport_name == "tcp")
+    quic = next(provider for provider in providers if provider.transport_name == "quic")
     quic_metrics = native_module.summarize_native_provider_probe(quic, [_probe_sample("quic")])
     assert quic_metrics is not None
 
-    selection = select_native_transport_provider(
+    selection = _select_transport(
         root=tmp_path,
         native_platform=NativePlatform("linux", "x86_64"),
         candidate_readiness=[native_module.NativeTransportCandidateReadiness.ready(provider) for provider in providers],
@@ -2919,7 +3109,7 @@ def test_select_native_transport_provider_rejects_invalid_evidence(
             observations *= 2
 
     with pytest.raises(native_module.NativeTransportSelectionError) as caught:
-        select_native_transport_provider(
+        _select_transport(
             root=tmp_path,
             native_platform=NativePlatform("linux", "x86_64"),
             candidate_readiness=readiness,
@@ -3011,7 +3201,7 @@ def test_select_native_transport_provider_applies_candidate_readiness(
     provider = discover_native_transport_providers(tmp_path, NativePlatform("linux", "x86_64"))[0]
 
     with pytest.raises(native_module.NativeTransportSelectionError) as caught:
-        select_native_transport_provider(
+        _select_transport(
             root=tmp_path,
             native_platform=NativePlatform("linux", "x86_64"),
             candidate_readiness=[readiness_factory(provider)],
@@ -3052,11 +3242,10 @@ def test_select_native_transport_provider_enforces_requested_frame_limit(tmp_pat
     _write_provider_artifact(tmp_path, "tcp")
 
     with pytest.raises(NativeArtifactError, match="no viable native transport provider") as caught:
-        select_native_transport_provider(
+        _select_transport(
             root=tmp_path,
             native_platform=NativePlatform("linux", "x86_64"),
             requested_max_frame_bytes=67108865,
-            candidate_readiness=_candidate_readiness(tmp_path),
         )
 
     assert len(caught.value.candidates) == 1
@@ -3069,11 +3258,12 @@ def test_select_native_transport_provider_rejects_invalid_requested_frame_limit(
     _write_provider_artifact(tmp_path, "tcp")
 
     with pytest.raises(ValueError, match="requested_max_frame_bytes"):
-        select_native_transport_provider(
-            root=tmp_path,
-            native_platform=NativePlatform("linux", "x86_64"),
+        native_module.NativeTransportSelectionOptions(
+            peer_supported_transports=(TransportId.TCP,),
+            policy=TransportPolicy.AUTO,
             requested_max_frame_bytes=True,
-            candidate_readiness=_candidate_readiness(tmp_path),
+            candidate_readiness=tuple(_candidate_readiness(tmp_path)),
+            probe_observations=(),
         )
 
 
@@ -3111,10 +3301,9 @@ def test_select_native_transport_provider_compares_shared_cost_model_before_pref
     _write_provider_artifact_with_manifest(tmp_path, "ipc", ipc_manifest)
 
     samples = [_probe_sample("tcp"), _probe_sample("ipc")]
-    selection = select_native_transport_provider(
+    selection = _select_transport(
         root=tmp_path,
         native_platform=NativePlatform("linux", "x86_64"),
-        candidate_readiness=_candidate_readiness(tmp_path),
         probe_observations=_probe_observations(tmp_path, samples),
     )
 
@@ -3160,16 +3349,16 @@ def test_select_native_transport_provider_compares_shared_cost_model_before_pref
         ),
         (
             lambda: NativeTransportProbeSample(
+                transport_id=TransportId.TCP,
                 provider_id="",
-                transport_name="tcp",
                 elapsed_us=1,
             ),
             "provider_id",
         ),
         (
             lambda: NativeTransportProbeSample(
+                transport_id=TransportId.TCP,
                 provider_id="provider-\u8f93\u5165",
-                transport_name="tcp",
                 elapsed_us=1,
             ),
             "provider_id",
@@ -3193,11 +3382,11 @@ def test_select_native_transport_provider_compares_shared_cost_model_before_pref
         ),
         (
             lambda: NativeTransportProbeSample(
+                transport_id=TransportId.UNSPECIFIED,
                 provider_id="provider",
-                transport_name="auto",
                 elapsed_us=1,
             ),
-            "transport_name",
+            "transport_id",
         ),
     ],
 )
@@ -3439,7 +3628,7 @@ def test_load_native_transport_binding_registers_runtime_shutdown(
 ) -> None:
     artifact = tmp_path / "nnrp_ffi.dll"
     artifact.write_bytes(b"fake")
-    provider = SimpleNamespace(name="tcp", artifact_path=artifact)
+    provider = _test_transport_provider("tcp", artifact)
     library = object()
     registrations: list[tuple[object, Path]] = []
 
@@ -3945,7 +4134,7 @@ def test_native_runtime_client_binds_native_ipc_and_websocket_servers(tmp_path: 
         generation=4,
         timeout_ms=25,
     )
-    operation = session.receive_submit(timeout_ms=30)
+    operation = asyncio.run(session.receive_submit(timeout=0.03))
     result_metadata = ResultPushMetadata(
         status_code=200,
         result_flags=ResultFlags.NONE,
@@ -3964,7 +4153,7 @@ def test_native_runtime_client_binds_native_ipc_and_websocket_servers(tmp_path: 
         payload_kind_bitmap=PayloadKind.TOKEN_CHUNK,
         payload_frame_count=1,
     )
-    operation.send_result(result_metadata, b"server-result")
+    asyncio.run(operation.send_result(result_metadata, b"server-result"))
     session.send_trace_context(TraceContextMetadata(1, 2, 0, 3, 0, 0))
     event = session.poll_event(timeout_ms=1)
     session.close()
@@ -3975,18 +4164,17 @@ def test_native_runtime_client_binds_native_ipc_and_websocket_servers(tmp_path: 
     assert isinstance(session, NativeRuntimeServerSession)
     assert isinstance(operation, NativeRuntimeServerOperation)
     assert event is not None
-    assert isinstance(event, NativeRuntimeEvent)
-    assert event.header.session_id == 41
+    assert isinstance(event, NativeServerEvent)
+    assert event.as_submit() is not None
+    assert event.as_submit().submit.header.session_id == 41
     assert ipc_server.handle.handle.id == 21
     assert websocket_server.handle.handle.id == 22
     assert session.server.handle.id == 21
     assert session.handle.handle.id == 41
-    assert operation.session.handle.id == 41
-    assert operation.handle.handle.id == 99
     assert operation.operation_id == 99
     assert operation.frame_id == 7
-    assert operation.metadata == submit_metadata
-    assert operation.body == b"server-submit"
+    assert operation.submit.metadata.value == submit_metadata
+    assert operation.submit.tail.body == b"server-submit"
     assert library.nnrp_server_bind.calls[0][0].transport_listener.kind == HANDLE_KIND_TRANSPORT_LISTENER
     assert library.nnrp_server_bind.calls[1][0].transport_listener.kind == HANDLE_KIND_TRANSPORT_LISTENER
     assert library.nnrp_server_accept_begin.calls[0][0].server.id == 21
@@ -3994,9 +4182,9 @@ def test_native_runtime_client_binds_native_ipc_and_websocket_servers(tmp_path: 
     assert library.nnrp_server_accept_wait.calls[0][0].accept.id == 41
     assert library.nnrp_server_accept_wait.calls[0][0].timeout_ms == 25
     assert library.nnrp_server_accept_claim.calls[0][0].session_handle_id == 41
-    assert library.nnrp_server_await_events.calls[0][0].timeout_ms == 30
-    assert library.nnrp_server_await_events.calls[1][0].timeout_ms == 1
-    assert library.nnrp_server_await_events.calls[1][0].max_events == 1
+    assert library.nnrp_server_await_events.calls[0][0].timeout_ms in {30, 31}
+    assert len(library.nnrp_server_await_events.calls) == 1
+    assert library.nnrp_server_await_events.calls[0][0].max_events == 64
     assert _read_buffer_view(library.nnrp_server_send_result.calls[0][0].payload) == (
         result_metadata.pack() + b"server-result"
     )
@@ -4005,7 +4193,7 @@ def test_native_runtime_client_binds_native_ipc_and_websocket_servers(tmp_path: 
     assert library.nnrp_client_close_connection.calls[0][0].id == 22
 
     with pytest.raises(NativeInvalidStateError):
-        session.receive_submit()
+        asyncio.run(session.receive_submit())
     with pytest.raises(NativeInvalidStateError):
         websocket_server.accept_session(
             session_handle_id=42,
@@ -4788,14 +4976,7 @@ def test_native_runtime_server_frame_poll_preserves_lifecycle_events() -> None:
         "tcp",
     )
     session = server.accept_session(session_handle_id=41, generation=3)
-    lifecycle = NativeLifecycleEvent(
-        EVENT_KIND_CONTROL,
-        NativeHandle.invalid(),
-        NativeHandle.invalid(),
-        NativeHandle.invalid(),
-        b"lifecycle",
-        _NATIVE_RUNTIME_DIAGNOSTIC_OK,
-    )
+    lifecycle = OperationLifecycleEvent(42, OperationState.RUNNING)
     runtime = _decode_test_wire_event(
         MessageType.PROGRESS,
         encode_runtime_control_metadata(
@@ -4803,14 +4984,18 @@ def test_native_runtime_server_frame_poll_preserves_lifecycle_events() -> None:
             ProgressMetadata(42, 7, 3, 2500, 11, 0),
         ),
     )
-    session._pending_events.extend((lifecycle, runtime))
+    lifecycle_event = NativeServerEvent.lifecycle(lifecycle)
+    session._pending_events.extend((lifecycle_event, NativeServerEvent.runtime(runtime)))
 
     assert session.poll_runtime_frames(max_events=1) == (runtime,)
-    assert session.poll_event() is lifecycle
+    assert session.poll_event() is lifecycle_event
 
 
 def test_native_runtime_server_frame_poll_preserves_native_lifecycle_event() -> None:
-    library = FakeRuntimeLibrary(event_payload=b"lifecycle", event_kind=EVENT_KIND_CONTROL)
+    library = FakeRuntimeLibrary(
+        event_payload=bytes((OperationState.COMPLETED,)),
+        event_kind=EVENT_KIND_OPERATION_LIFECYCLE,
+    )
     server = NativeRuntimeServer(
         NativeRuntimeEntrypoints(library),
         NativeConnectionHandle.from_ffi(_NnrpHandle(HANDLE_KIND_CONNECTION, 21, 1, 0)),
@@ -4821,8 +5006,95 @@ def test_native_runtime_server_frame_poll_preserves_native_lifecycle_event() -> 
     assert session.poll_runtime_frames(max_events=0) == ()
     assert session.poll_runtime_frames(max_events=1) == ()
     lifecycle = session.poll_event()
-    assert isinstance(lifecycle, NativeLifecycleEvent)
-    assert lifecycle.payload == b"lifecycle"
+    assert isinstance(lifecycle, NativeServerEvent)
+    assert lifecycle.as_lifecycle() == OperationLifecycleEvent(99, OperationState.COMPLETED)
+
+
+@pytest.mark.parametrize("state", list(OperationState))
+def test_operation_lifecycle_native_projection_decodes_one_state_byte(state: OperationState) -> None:
+    event = NativeLifecycleEvent(
+        EVENT_KIND_OPERATION_LIFECYCLE,
+        NativeHandle.invalid(),
+        NativeHandle(HANDLE_KIND_SESSION, 41, 3),
+        NativeHandle(HANDLE_KIND_OPERATION, 99, 1),
+        bytes((state,)),
+        NativeRuntimeDiagnostic(NativeStatus.ok(), 0, 41, 99, 0),
+    )
+
+    assert native_module._operation_lifecycle_from_native_event(event) == OperationLifecycleEvent(99, state)
+
+
+@pytest.mark.parametrize(
+    ("kind", "operation_id", "payload", "message"),
+    [
+        (EVENT_KIND_RESULT_PUSHED, 99, bytes((OperationState.COMPLETED,)), "is not an operation lifecycle"),
+        (EVENT_KIND_OPERATION_LIFECYCLE, 0, bytes((OperationState.RUNNING,)), "has no operation identity"),
+        (EVENT_KIND_OPERATION_LIFECYCLE, 99, b"", "exactly one OperationState byte"),
+        (EVENT_KIND_OPERATION_LIFECYCLE, 99, b"\x01\x02", "exactly one OperationState byte"),
+        (EVENT_KIND_OPERATION_LIFECYCLE, 99, b"\xff", "unknown OperationState 255"),
+    ],
+)
+def test_operation_lifecycle_native_projection_rejects_malformed_events(
+    kind: int,
+    operation_id: int,
+    payload: bytes,
+    message: str,
+) -> None:
+    event = NativeLifecycleEvent(
+        kind,
+        NativeHandle.invalid(),
+        NativeHandle(HANDLE_KIND_SESSION, 41, 3),
+        NativeHandle(HANDLE_KIND_OPERATION, operation_id, 1) if operation_id else NativeHandle.invalid(),
+        payload,
+        NativeRuntimeDiagnostic(NativeStatus.ok(), 0, 41, operation_id, 0),
+    )
+
+    with pytest.raises(NativeProtocolError, match=message):
+        native_module._operation_lifecycle_from_native_event(event)
+
+
+def test_native_runtime_client_next_event_projects_only_contract_lifecycle() -> None:
+    library = FakeRuntimeLibrary(
+        event_payload=bytes((OperationState.RUNNING,)),
+        event_kind=EVENT_KIND_OPERATION_LIFECYCLE,
+    )
+    session = _open_event_session(
+        NativeRuntimeConnection(
+            NativeRuntimeEntrypoints(library),
+            NativeConnectionHandle.from_ffi(_NnrpHandle(HANDLE_KIND_CONNECTION, 12, 2, 0)),
+        )
+    )
+
+    assert asyncio.run(session.next_event(timeout=0.1)) == OperationLifecycleEvent(99, OperationState.RUNNING)
+
+
+def test_native_runtime_client_next_event_returns_runtime_frames_and_times_out() -> None:
+    metadata = ProgressMetadata(99, 1, 2, 2500, 3, 0)
+    library = FakeRuntimeLibrary(
+        event_payload=encode_runtime_control_metadata(MessageType.PROGRESS, metadata),
+        event_kind=EVENT_KIND_RUNTIME_FRAME,
+        event_message_type=int(MessageType.PROGRESS),
+    )
+    session = _open_event_session(
+        NativeRuntimeConnection(
+            NativeRuntimeEntrypoints(library),
+            NativeConnectionHandle.from_ffi(_NnrpHandle(HANDLE_KIND_CONNECTION, 12, 2, 0)),
+        )
+    )
+
+    runtime = asyncio.run(session.next_event(timeout=0.1))
+
+    assert isinstance(runtime, NativeRuntimeEvent)
+    assert runtime.metadata.value == metadata
+
+    empty_session = _open_event_session(
+        NativeRuntimeConnection(
+            NativeRuntimeEntrypoints(FakeRuntimeLibrary()),
+            NativeConnectionHandle.from_ffi(_NnrpHandle(HANDLE_KIND_CONNECTION, 13, 2, 0)),
+        )
+    )
+    with pytest.raises(NativeWouldBlockError):
+        asyncio.run(empty_session.next_event(timeout=0))
 
 
 def test_native_runtime_server_frame_poll_reads_native_runtime_event() -> None:
@@ -4844,6 +5116,222 @@ def test_native_runtime_server_frame_poll_reads_native_runtime_event() -> None:
     assert len(frames) == 1
     assert frames[0].header.message_type is MessageType.PROGRESS
     assert frames[0].metadata.value == metadata
+
+
+def test_native_runtime_server_receive_submit_retains_prior_event_from_same_ffi_batch() -> None:
+    progress = ProgressMetadata(77, 1, 3, 2500, 0, 0)
+    submit = FrameSubmitMetadata(
+        src_width=1,
+        src_height=1,
+        tile_width=1,
+        tile_height=1,
+        tile_count=1,
+        section_count=0,
+        frame_class=0,
+        input_profile=InputProfile.DENSE_LUMA_FRAME,
+        tile_index_mode=TileIndexMode.DENSE_RANGE,
+        reserved0=0,
+        latency_budget_ms=0,
+        target_fps_x100=0,
+        retry_of_frame=0,
+        tile_base_id=0,
+        camera_bytes=0,
+        tile_index_bytes=0,
+        operation_id=99,
+        submit_mode=SubmitMode.INLINE,
+        budget_policy=BudgetPolicy.NONE,
+        payload_kind_bitmap=PayloadKind.TENSOR,
+        payload_frame_count=0,
+    )
+    library = ServerEventBatchRuntimeLibrary(
+        [
+            (
+                EVENT_KIND_RUNTIME_FRAME,
+                MessageType.PROGRESS,
+                77,
+                8,
+                encode_runtime_control_metadata(MessageType.PROGRESS, progress),
+            ),
+            (EVENT_KIND_SUBMIT_ACCEPTED, MessageType.FRAME_SUBMIT, 99, 9, submit.pack() + b"frame"),
+        ]
+    )
+    server = NativeRuntimeServer(
+        NativeRuntimeEntrypoints(library),
+        NativeConnectionHandle.from_ffi(_NnrpHandle(HANDLE_KIND_CONNECTION, 21, 1, 0)),
+        "tcp",
+    )
+    session = server.accept_session(session_handle_id=41, generation=3)
+
+    operation = asyncio.run(session.receive_submit(timeout=0.1))
+    retained = asyncio.run(session.next_event(timeout=0.1))
+
+    assert operation.operation_id == 99
+    assert operation.frame_id == 9
+    assert operation.submit.metadata.value == submit
+    assert operation.submit.tail.body == b"frame"
+    assert retained.as_runtime() is not None
+    assert retained.as_runtime().metadata.value == progress
+    assert len(library.nnrp_server_await_events.calls) == 1
+    assert library.nnrp_server_await_events.calls[0][0].max_events == 64
+
+
+def test_native_runtime_server_operation_enforces_submit_identity_and_routes_named_events(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    submit_metadata = FrameSubmitMetadata(
+        src_width=1,
+        src_height=1,
+        tile_width=1,
+        tile_height=1,
+        tile_count=1,
+        section_count=0,
+        frame_class=0,
+        input_profile=InputProfile.DENSE_LUMA_FRAME,
+        tile_index_mode=TileIndexMode.DENSE_RANGE,
+        reserved0=0,
+        latency_budget_ms=0,
+        target_fps_x100=0,
+        retry_of_frame=0,
+        tile_base_id=0,
+        camera_bytes=0,
+        tile_index_bytes=0,
+        operation_id=42,
+        submit_mode=SubmitMode.INLINE,
+        budget_policy=BudgetPolicy.NONE,
+        payload_kind_bitmap=PayloadKind.TENSOR,
+        payload_frame_count=0,
+    )
+    submit = _decode_test_wire_event(
+        MessageType.FRAME_SUBMIT,
+        submit_metadata.pack() + b"frame",
+        kind=EVENT_KIND_SUBMIT_ACCEPTED,
+        frame_id=9,
+    )
+    library = FakeRuntimeLibrary()
+    server = NativeRuntimeServer(
+        NativeRuntimeEntrypoints(library),
+        NativeConnectionHandle.from_ffi(_NnrpHandle(HANDLE_KIND_CONNECTION, 21, 1, 0)),
+        "tcp",
+    )
+    session = server.accept_session(session_handle_id=41, generation=3)
+    operation = session._server_event_from_polled(submit).as_submit()
+    assert operation is not None
+
+    wrong_message = replace(submit, header=replace(submit.header, message_type=MessageType.PROGRESS))
+    with pytest.raises(ValueError, match="FRAME_SUBMIT"):
+        replace(operation, submit=wrong_message)
+
+    wrong_metadata = replace(
+        submit,
+        metadata=RuntimeEventMetadata(
+            RuntimeEventMetadataKind.PROGRESS,
+            ProgressMetadata(42, 1, 2, 2500, 3, 0),
+        ),
+    )
+    with pytest.raises(TypeError, match="FrameSubmitMetadata"):
+        replace(operation, submit=wrong_metadata)
+    with pytest.raises(ValueError, match="operation_id"):
+        replace(operation, operation_id=43)
+    with pytest.raises(ValueError, match="frame_id"):
+        replace(operation, frame_id=10)
+
+    mutable_tails = [bytearray(b"progress"), bytearray(b"partial"), bytearray(b"drop")]
+    pending_mutations = list(mutable_tails)
+
+    async def mutate_original_before_worker_call(function: Callable[..., object], *args: object) -> object:
+        original = pending_mutations.pop(0)
+        original[:] = b"x" * len(original)
+        return function(*args)
+
+    monkeypatch.setattr(asyncio, "to_thread", mutate_original_before_worker_call)
+
+    with pytest.raises(ValueError, match="operation_id"):
+        asyncio.run(operation.send_progress(ProgressMetadata(43, 4, 5, 2500, 6, 0)))
+
+    asyncio.run(operation.send_progress(ProgressMetadata(42, 2, 3, 2500, 4, 8), mutable_tails[0]))
+    asyncio.run(operation.send_partial_result(PartialResultMetadata(42, 3, 4, 1, 7, 0), mutable_tails[1]))
+    asyncio.run(
+        operation.send_result_drop(
+            ResultDropReasonMetadata(42, 1, ResultDropReasonCode.PEER_CANCELLED, RuntimeRole.RUNTIME, 0, 4),
+            mutable_tails[2],
+        )
+    )
+
+    assert [message_type for message_type, _frame_id, _payload in library.runtime_frames] == [
+        int(MessageType.PROGRESS),
+        int(MessageType.PARTIAL_RESULT),
+        int(MessageType.RESULT_DROP_REASON),
+    ]
+    assert [
+        payload[-tail_length:]
+        for (_message_type, _frame_id, payload), tail_length in zip(
+            library.runtime_frames,
+            (8, 7, 4),
+            strict=True,
+        )
+    ] == [b"progress", b"partial", b"drop"]
+    assert session._operation_frames == {}
+    with pytest.raises(NativeInvalidStateError, match="incremental reply"):
+        asyncio.run(operation.send_progress(ProgressMetadata(42, 4, 5, 2500, 6, 0)))
+    with pytest.raises(NativeInvalidStateError, match="terminal reply"):
+        asyncio.run(
+            operation.send_result_drop(
+                ResultDropReasonMetadata(42, 4, ResultDropReasonCode.PEER_CANCELLED, RuntimeRole.RUNTIME, 0, 0)
+            )
+        )
+
+
+def test_native_runtime_server_event_stream_polls_retains_and_times_out() -> None:
+    progress = ProgressMetadata(77, 1, 3, 2500, 0, 0)
+    library = ServerEventBatchRuntimeLibrary(
+        [
+            (
+                EVENT_KIND_RUNTIME_FRAME,
+                MessageType.PROGRESS,
+                77,
+                8,
+                encode_runtime_control_metadata(MessageType.PROGRESS, progress),
+            )
+        ]
+    )
+    server = NativeRuntimeServer(
+        NativeRuntimeEntrypoints(library),
+        NativeConnectionHandle.from_ffi(_NnrpHandle(HANDLE_KIND_CONNECTION, 21, 1, 0)),
+        "tcp",
+    )
+    session = server.accept_session(session_handle_id=41, generation=3)
+
+    runtime_event = asyncio.run(session.next_event(timeout=0.1))
+
+    assert runtime_event.as_runtime() is not None
+    assert runtime_event.as_runtime().metadata.value == progress
+    with pytest.raises(NativeWouldBlockError):
+        asyncio.run(session.next_event(timeout=0))
+    with pytest.raises(NativeWouldBlockError):
+        asyncio.run(session.receive_submit(timeout=0))
+
+    with pytest.raises(TypeError, match="runtime server event"):
+        NativeServerEvent("runtime", OperationLifecycleEvent(77, OperationState.RUNNING))
+
+
+def test_native_runtime_event_timeout_helpers_validate_and_bound_deadlines(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(native_module.time, "monotonic", lambda: 10.0)
+
+    assert native_module._event_deadline(None) is None
+    assert native_module._event_deadline(0.25) == 10.25
+    assert native_module._event_poll_timeout_ms(None) == 100
+    assert native_module._event_poll_timeout_ms(9.0) == 1
+    assert native_module._event_poll_timeout_ms(10.1) == 100
+    assert native_module._event_poll_timeout_ms(10.0 + 0xFFFFFFFF + 1) == 0xFFFFFFFF
+    native_module._raise_if_event_deadline_expired(None)
+
+    for timeout in (True, "1", float("nan"), float("inf")):
+        with pytest.raises(TypeError, match="finite number"):
+            native_module._event_deadline(timeout)
+    with pytest.raises(ValueError, match="non-negative"):
+        native_module._event_deadline(-0.1)
+    with pytest.raises(NativeWouldBlockError):
+        native_module._raise_if_event_deadline_expired(10.0)
 
 
 def test_local_lifecycle_event_has_no_fabricated_runtime_header() -> None:
@@ -4883,11 +5371,8 @@ def test_native_runtime_sessions_expose_named_preview4_methods_without_raw_frame
         "invalidate_cache",
     }
     server_methods = {
-        "send_progress",
-        "send_partial_result",
         "send_backpressure",
         "send_credit_update",
-        "send_result_drop_reason",
         "send_trace_context",
         "send_recoverable_error",
         "send_retry_after",
@@ -4903,6 +5388,17 @@ def test_native_runtime_sessions_expose_named_preview4_methods_without_raw_frame
 
     assert all(callable(getattr(NativeRuntimeSession, name, None)) for name in client_methods)
     assert all(callable(getattr(NativeRuntimeServerSession, name, None)) for name in server_methods)
+    operation_methods = {
+        "send_result",
+        "send_result_drop",
+        "send_progress",
+        "send_partial_result",
+    }
+    assert all(
+        asyncio.iscoroutinefunction(getattr(NativeRuntimeServerOperation, name, None)) for name in operation_methods
+    )
+    assert all(not hasattr(NativeRuntimeServerSession, name) for name in operation_methods)
+    assert not hasattr(NativeRuntimeServerSession, "send_result_drop_reason")
     assert not hasattr(NativeRuntimeSession, "control")
     assert not hasattr(NativeRuntimeSession, "send_runtime_frame")
     assert not hasattr(NativeRuntimeServerSession, "control")
@@ -4927,9 +5423,10 @@ def test_native_runtime_client_named_methods_share_one_coarse_frame_abi(tmp_path
             schema_version=0,
         )
     )
-    control = ControlRequestMetadata(10, 1, 0, RuntimeRole.CLIENT, 0, 2)
+    cancel = ControlRequestMetadata(10, 1, 0, RuntimeRole.CLIENT, 0, 2)
+    abort = ControlRequestMetadata(13, 4, 0, RuntimeRole.CLIENT, 0, 2)
     scheduling = SchedulingMetadata(10, 2, 4, -1, 1000, 0)
-    supersede = SupersedeMetadata(10, 11, 3, ResultDropReasonCode.SUPERSEDED, 0, 2)
+    supersede = SupersedeMetadata(12, 11, 3, ResultDropReasonCode.SUPERSEDED, 0, 2)
     budget = BudgetMetadata(10, 20, 30, 40, 50, 0)
     capability = CapabilityMetadata(3, 1, 4, 2, 99, 88, 2, 0)
     route = RouteHintMetadata(10, 20, 2, 3, 1000, 2, 0)
@@ -4954,21 +5451,24 @@ def test_native_runtime_client_named_methods_share_one_coarse_frame_abi(tmp_path
     cache_miss = CacheMissMetadata(7, 1, 2, CacheMissReason.UNKNOWN, 3, 2)
     invalidate = CacheInvalidateMetadata(CacheInvalidateScope.OBJECT_KEY, 3, 4, 5, 6)
 
-    session.cancel_operation(control, b"no")
-    session.abort_operation(control, b"no")
+    session.submit_operation(_native_submit_request(10, 110, b""))
+    session.submit_operation(_native_submit_request(12, 112, b""))
+    session.submit_operation(_native_submit_request(13, 113, b""))
     session.update_priority(scheduling)
     session.update_deadline(scheduling)
     session.expire_at(scheduling)
-    session.supersede(supersede, b"no")
     session.update_budget(budget)
-    session.negotiate_capabilities(capability, b"{}")
-    session.degrade_profile(capability, b"{}")
     session.send_route_hint(route, b"rt")
     session.send_execution_hint(route, b"rt")
-    session.send_trace_context(trace, b"tr")
-    session.declare_object(descriptor, b"md")
     session.reference_object(object_ref, b"md")
     session.release_object(release, b"ok")
+    session.cancel_operation(cancel, b"no")
+    session.supersede(supersede, b"no")
+    session.abort_operation(abort, b"no")
+    session.negotiate_capabilities(capability, b"{}")
+    session.degrade_profile(capability, b"{}")
+    session.send_trace_context(trace, b"tr")
+    session.declare_object(descriptor, b"md")
     session.patch_object(delta, b"data", b"md")
     session.send_object_delta(delta, b"data", b"md")
     session.reference_cache(cache_ref, b"md")
@@ -4976,21 +5476,21 @@ def test_native_runtime_client_named_methods_share_one_coarse_frame_abi(tmp_path
     session.invalidate_cache(invalidate)
 
     expected_types = [
-        MessageType.CANCEL,
-        MessageType.ABORT,
         MessageType.PRIORITY_UPDATE,
         MessageType.DEADLINE,
         MessageType.EXPIRE_AT,
-        MessageType.SUPERSEDE,
         MessageType.BUDGET_UPDATE,
-        MessageType.CAPABILITY_NEGOTIATION,
-        MessageType.DEGRADE_PROFILE,
         MessageType.ROUTE_HINT,
         MessageType.EXECUTION_HINT,
-        MessageType.TRACE_CONTEXT,
-        MessageType.OBJECT_DECLARE,
         MessageType.OBJECT_REF,
         MessageType.OBJECT_RELEASE,
+        MessageType.CANCEL,
+        MessageType.SUPERSEDE,
+        MessageType.ABORT,
+        MessageType.CAPABILITY_NEGOTIATION,
+        MessageType.DEGRADE_PROFILE,
+        MessageType.TRACE_CONTEXT,
+        MessageType.OBJECT_DECLARE,
         MessageType.OBJECT_PATCH,
         MessageType.OBJECT_DELTA,
         MessageType.CACHE_REFERENCE,
@@ -5000,9 +5500,124 @@ def test_native_runtime_client_named_methods_share_one_coarse_frame_abi(tmp_path
     assert [message_type for message_type, _frame_id, _payload in library.runtime_frames] == [
         int(message_type) for message_type in expected_types
     ]
-    assert [frame_id for _message_type, frame_id, _payload in library.runtime_frames] == list(range(1, 21))
-    assert decode_runtime_control_metadata(MessageType.CANCEL, library.runtime_frames[0][2]).tail == b"no"
+    assert [frame_id for _message_type, frame_id, _payload in library.runtime_frames] == [
+        *([110] * 9),
+        112,
+        113,
+        *range(1, 10),
+    ]
+    assert decode_runtime_control_metadata(MessageType.CANCEL, library.runtime_frames[8][2]).tail == b"no"
     assert decode_runtime_object_metadata(MessageType.OBJECT_PATCH, library.runtime_frames[15][2]).tail == b"mddata"
+
+
+def test_native_runtime_client_uses_frame_zero_for_session_scoped_messages(tmp_path: Path) -> None:
+    artifact = tmp_path / "nnrp_ffi.dll"
+    artifact.write_bytes(b"fake")
+    library = FakeRuntimeLibrary()
+    session = _open_event_session(
+        load_native_client(artifact, library=library).connect(
+            connection_id=12,
+            generation=2,
+            transport_id=TRANSPORT_SLOT_TCP,
+        )
+    )
+
+    session.cancel_operation(ControlRequestMetadata(0, 1, 0, RuntimeRole.CLIENT, 0, 0))
+    session.abort_operation(ControlRequestMetadata(0, 2, 0, RuntimeRole.CLIENT, 0, 0))
+    session.update_budget(BudgetMetadata(0, 1, 2, 3, 4, 0))
+    session.reference_object(ObjectReferenceMetadata(9, 0, 1, 0, 8, 0, 0))
+    session.release_object(ObjectReleaseMetadata(9, 0, ObjectReleaseReason.COMPLETED, RuntimeRole.CLIENT, 0, 0))
+
+    assert [frame_id for _message_type, frame_id, _payload in library.runtime_frames] == [0, 0, 0, 0, 0]
+
+
+def test_native_runtime_client_rejects_unbound_operation_controls(tmp_path: Path) -> None:
+    artifact = tmp_path / "nnrp_ffi.dll"
+    artifact.write_bytes(b"fake")
+    library = FakeRuntimeLibrary()
+    session = _open_event_session(
+        load_native_client(artifact, library=library).connect(
+            connection_id=12,
+            generation=2,
+            transport_id=TRANSPORT_SLOT_TCP,
+        )
+    )
+
+    with pytest.raises(NativeInvalidStateError, match="inactive operation 77"):
+        session.update_priority(SchedulingMetadata(77, 1, 2, 0, 0, 0))
+    with pytest.raises(NativeInvalidStateError, match="non-zero operation_id"):
+        session.update_deadline(SchedulingMetadata(0, 2, 0, 0, 1000, 0))
+
+    assert library.runtime_frames == []
+
+
+def test_native_runtime_client_forgets_superseded_operation_correlation(tmp_path: Path) -> None:
+    artifact = tmp_path / "nnrp_ffi.dll"
+    artifact.write_bytes(b"fake")
+    library = FakeRuntimeLibrary()
+    session = _open_event_session(
+        load_native_client(artifact, library=library).connect(
+            connection_id=12,
+            generation=2,
+            transport_id=TRANSPORT_SLOT_TCP,
+        )
+    )
+    session.submit_operation(_native_submit_request(99, 7))
+    supersede = _decode_test_wire_event(
+        MessageType.SUPERSEDE,
+        SupersedeMetadata(99, 100, 1, ResultDropReasonCode.SUPERSEDED, 0, 0).pack(),
+        kind=EVENT_KIND_CONTROL,
+        frame_id=7,
+    )
+    supersede = replace(
+        supersede,
+        _native_context=replace(native_module._runtime_event_context(supersede), session=session.handle.handle),
+    )
+
+    session._observe_polled_event(supersede)
+
+    with pytest.raises(NativeInvalidStateError, match="inactive operation 99"):
+        session.update_priority(SchedulingMetadata(99, 2, 0, 0, 0, 0))
+
+
+def test_native_runtime_client_observes_peer_session_close_before_local_close(tmp_path: Path) -> None:
+    artifact = tmp_path / "nnrp_ffi.dll"
+    artifact.write_bytes(b"fake")
+    library = FakeRuntimeLibrary()
+    session = _open_event_session(
+        load_native_client(artifact, library=library).connect(
+            connection_id=12,
+            generation=2,
+            transport_id=TRANSPORT_SLOT_TCP,
+        )
+    )
+    session.submit_operation(_native_submit_request(99, 7))
+    close = _decode_test_wire_event(
+        MessageType.SESSION_CLOSE,
+        SessionCloseMetadata(
+            SessionCloseReason.NORMAL,
+            InFlightPolicy.DRAIN,
+            0,
+            99,
+            0,
+            1,
+        ).pack(),
+        kind=EVENT_KIND_RUNTIME_FRAME,
+        frame_id=0,
+    )
+    close = replace(
+        close,
+        _native_context=replace(native_module._runtime_event_context(close), session=session.handle.handle),
+    )
+
+    session._observe_polled_event(close)
+
+    assert session._closed is False
+    with pytest.raises(NativeInvalidStateError, match="inactive operation 99"):
+        session.update_priority(SchedulingMetadata(99, 2, 0, 0, 0, 0))
+    session.close()
+    session.close()
+    assert len(library.nnrp_client_close.calls) == 1
 
 
 def test_native_runtime_server_named_methods_share_one_coarse_frame_abi(tmp_path: Path) -> None:
@@ -5021,10 +5636,7 @@ def test_native_runtime_server_named_methods_share_one_coarse_frame_abi(tmp_path
             generation=3,
         )
     )
-    progress = ProgressMetadata(10, 1, 2, 2500, 20, 4)
-    partial = PartialResultMetadata(10, 2, 20, 1, 4, 0)
     pressure = PressureMetadata(10, 4, 2, 1, 5, 0)
-    drop = ResultDropReasonMetadata(10, 1, ResultDropReasonCode.PEER_CANCELLED, RuntimeRole.RUNTIME, 0, 2)
     trace = TraceContextMetadata(1, 2, 0, 3, 0, 2)
     recoverable = RecoverableErrorMetadata(20, 21, 22, RuntimeRole.RUNTIME, 0, 23, 24, 25, 26, 2)
     retry = RetryAfterMetadata(10, 1, 100, 10, 2, RuntimeRole.RUNTIME, 0, 2)
@@ -5041,18 +5653,15 @@ def test_native_runtime_server_named_methods_share_one_coarse_frame_abi(tmp_path
         1000,
         2,
     )
-    object_ref = ObjectReferenceMetadata(9, 10, 2, 0, 4096, 0, 2)
-    release = ObjectReleaseMetadata(9, 10, ObjectReleaseReason.COMPLETED, RuntimeRole.RUNTIME, 0, 2)
+    object_ref = ObjectReferenceMetadata(9, 0, 2, 0, 4096, 0, 2)
+    release = ObjectReleaseMetadata(9, 0, ObjectReleaseReason.COMPLETED, RuntimeRole.RUNTIME, 0, 2)
     delta = ObjectDeltaMetadata(9, 2, 128, 64, 4, 0x03, 2)
     cache_ref = CacheReferenceMetadata(7, 1, 2, 3, CacheReuseScope.SESSION, 4, 5, 1000, 2, 0)
     cache_miss = CacheMissMetadata(7, 1, 2, CacheMissReason.UNKNOWN, 3, 2)
     invalidate = CacheInvalidateMetadata(CacheInvalidateScope.OBJECT_KEY, 3, 4, 5, 6)
 
-    session.send_progress(progress, b"step")
-    session.send_partial_result(partial, b"part")
     session.send_backpressure(pressure)
     session.send_credit_update(pressure)
-    session.send_result_drop_reason(drop, b"no")
     session.send_trace_context(trace, b"tr")
     session.send_recoverable_error(recoverable, b"er")
     session.send_retry_after(retry, b"ra")
@@ -5066,11 +5675,8 @@ def test_native_runtime_server_named_methods_share_one_coarse_frame_abi(tmp_path
     session.invalidate_cache(invalidate)
 
     expected_types = [
-        MessageType.PROGRESS,
-        MessageType.PARTIAL_RESULT,
         MessageType.BACKPRESSURE,
         MessageType.CREDIT_UPDATE,
-        MessageType.RESULT_DROP_REASON,
         MessageType.TRACE_CONTEXT,
         MessageType.ERROR_RECOVERABLE,
         MessageType.RETRY_AFTER,
@@ -5086,9 +5692,299 @@ def test_native_runtime_server_named_methods_share_one_coarse_frame_abi(tmp_path
     assert [message_type for message_type, _frame_id, _payload in library.runtime_frames] == [
         int(message_type) for message_type in expected_types
     ]
-    assert [frame_id for _message_type, frame_id, _payload in library.runtime_frames] == list(range(1, 17))
-    assert decode_runtime_control_metadata(MessageType.PROGRESS, library.runtime_frames[0][2]).tail == b"step"
-    assert decode_runtime_object_metadata(MessageType.OBJECT_DELTA, library.runtime_frames[12][2]).tail == b"mddata"
+    assert [frame_id for _message_type, frame_id, _payload in library.runtime_frames] == [
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        0,
+        0,
+        7,
+        8,
+        9,
+        10,
+        11,
+    ]
+    assert decode_runtime_object_metadata(MessageType.OBJECT_DELTA, library.runtime_frames[9][2]).tail == b"mddata"
+
+
+def test_native_runtime_server_correlates_operation_object_messages(tmp_path: Path) -> None:
+    artifact = tmp_path / "nnrp_ffi.dll"
+    artifact.write_bytes(b"fake")
+    library = FakeRuntimeLibrary()
+    server = NativeRuntimeServer(
+        NativeRuntimeEntrypoints(library),
+        NativeConnectionHandle.from_ffi(_NnrpHandle(HANDLE_KIND_CONNECTION, 21, 1, 0)),
+        "tcp",
+    )
+    session = server.accept_session(session_handle_id=41, generation=3)
+    submit_metadata = _native_submit_request(42, 9).metadata
+    submit = _decode_test_wire_event(
+        MessageType.FRAME_SUBMIT,
+        submit_metadata.pack() + b"frame",
+        kind=EVENT_KIND_SUBMIT_ACCEPTED,
+        frame_id=9,
+    )
+
+    assert session._server_event_from_polled(submit).as_submit() is not None
+    session.reference_object(ObjectReferenceMetadata(8, 42, 1, 0, 16, 0, 0))
+    session.release_object(ObjectReleaseMetadata(8, 42, ObjectReleaseReason.COMPLETED, RuntimeRole.RUNTIME, 0, 0))
+
+    assert [frame_id for _message_type, frame_id, _payload in library.runtime_frames] == [9, 9]
+
+
+def test_native_runtime_server_retains_superseded_operation_until_terminal_reply(tmp_path: Path) -> None:
+    library = FakeRuntimeLibrary()
+    server = NativeRuntimeServer(
+        NativeRuntimeEntrypoints(library),
+        NativeConnectionHandle.from_ffi(_NnrpHandle(HANDLE_KIND_CONNECTION, 21, 1, 0)),
+        "tcp",
+    )
+    session = server.accept_session(session_handle_id=41, generation=3)
+    submit = _decode_test_wire_event(
+        MessageType.FRAME_SUBMIT,
+        _native_submit_request(42, 9).metadata.pack() + b"frame",
+        kind=EVENT_KIND_SUBMIT_ACCEPTED,
+        frame_id=9,
+    )
+    operation = session._server_event_from_polled(submit).as_submit()
+    assert operation is not None
+    supersede = _decode_test_wire_event(
+        MessageType.SUPERSEDE,
+        SupersedeMetadata(42, 43, 1, ResultDropReasonCode.SUPERSEDED, 0, 0).pack(),
+        kind=EVENT_KIND_CONTROL,
+        frame_id=9,
+    )
+    supersede = replace(
+        supersede,
+        _native_context=replace(native_module._runtime_event_context(supersede), session=session.handle.handle),
+    )
+
+    session._server_event_from_polled(supersede)
+
+    session.reference_object(ObjectReferenceMetadata(8, 42, 1, 0, 16, 0, 0))
+    asyncio.run(
+        operation.send_result_drop(
+            ResultDropReasonMetadata(42, 2, ResultDropReasonCode.SUPERSEDED, RuntimeRole.RUNTIME, 0, 0)
+        )
+    )
+
+    with pytest.raises(NativeInvalidStateError, match="inactive operation 42"):
+        session.reference_object(ObjectReferenceMetadata(8, 42, 1, 0, 16, 0, 0))
+
+
+def test_native_runtime_server_terminal_reply_failure_remains_retryable() -> None:
+    library = FakeRuntimeLibrary()
+    original_send = library._runtime_frame_send
+    attempts = 0
+
+    def fail_first_terminal_reply(request: _NnrpRuntimeFrameSendRequest) -> _NnrpFfiStatus:
+        nonlocal attempts
+        if int(request.message_type) == int(MessageType.RESULT_DROP_REASON):
+            attempts += 1
+            if attempts == 1:
+                return _NnrpFfiStatus(FFI_STATUS_INVALID_STATE, 0, 0, 0)
+        return original_send(request)
+
+    library.nnrp_runtime_frame_send.handler = fail_first_terminal_reply
+    server = NativeRuntimeServer(
+        NativeRuntimeEntrypoints(library),
+        NativeConnectionHandle.from_ffi(_NnrpHandle(HANDLE_KIND_CONNECTION, 21, 1, 0)),
+        "tcp",
+    )
+    session = server.accept_session(session_handle_id=41, generation=3)
+    submit = _decode_test_wire_event(
+        MessageType.FRAME_SUBMIT,
+        _native_submit_request(42, 9).metadata.pack() + b"frame",
+        kind=EVENT_KIND_SUBMIT_ACCEPTED,
+        frame_id=9,
+    )
+    operation = session._server_event_from_polled(submit).as_submit()
+    assert operation is not None
+    drop = ResultDropReasonMetadata(42, 1, ResultDropReasonCode.PEER_CANCELLED, RuntimeRole.RUNTIME, 0, 0)
+
+    with pytest.raises(NativeInvalidStateError):
+        asyncio.run(operation.send_result_drop(drop))
+    assert session._operation_frames == {42: 9}
+
+    asyncio.run(operation.send_result_drop(drop))
+    assert attempts == 2
+    assert session._operation_frames == {}
+    with pytest.raises(NativeInvalidStateError, match="terminal reply"):
+        asyncio.run(operation.send_result_drop(drop))
+
+
+def test_native_runtime_server_terminal_reply_cancellation_waits_for_native_outcome() -> None:
+    library = FakeRuntimeLibrary()
+    original_send = library._runtime_frame_send
+    send_started = threading.Event()
+    release_send = threading.Event()
+
+    def block_terminal_reply(request: _NnrpRuntimeFrameSendRequest) -> _NnrpFfiStatus:
+        if int(request.message_type) == int(MessageType.RESULT_DROP_REASON):
+            send_started.set()
+            assert release_send.wait(timeout=5)
+        return original_send(request)
+
+    library.nnrp_runtime_frame_send.handler = block_terminal_reply
+    server = NativeRuntimeServer(
+        NativeRuntimeEntrypoints(library),
+        NativeConnectionHandle.from_ffi(_NnrpHandle(HANDLE_KIND_CONNECTION, 21, 1, 0)),
+        "tcp",
+    )
+    session = server.accept_session(session_handle_id=41, generation=3)
+    submit = _decode_test_wire_event(
+        MessageType.FRAME_SUBMIT,
+        _native_submit_request(42, 9).metadata.pack() + b"frame",
+        kind=EVENT_KIND_SUBMIT_ACCEPTED,
+        frame_id=9,
+    )
+    operation = session._server_event_from_polled(submit).as_submit()
+    assert operation is not None
+    drop = ResultDropReasonMetadata(42, 1, ResultDropReasonCode.PEER_CANCELLED, RuntimeRole.RUNTIME, 0, 0)
+
+    async def cancel_while_native_send_is_active() -> None:
+        send_task = asyncio.create_task(operation.send_result_drop(drop))
+        assert await asyncio.to_thread(send_started.wait, 5)
+        send_task.cancel()
+        await asyncio.sleep(0)
+        send_task.cancel()
+        await asyncio.sleep(0)
+        assert not send_task.done()
+        release_send.set()
+        with pytest.raises(asyncio.CancelledError):
+            await send_task
+
+    asyncio.run(cancel_while_native_send_is_active())
+
+    assert session._operation_frames == {}
+    assert len(library.runtime_frames) == 1
+    with pytest.raises(NativeInvalidStateError, match="terminal reply"):
+        asyncio.run(operation.send_result_drop(drop))
+
+
+def test_native_runtime_server_observes_peer_session_close_before_local_close() -> None:
+    library = FakeRuntimeLibrary()
+    server = NativeRuntimeServer(
+        NativeRuntimeEntrypoints(library),
+        NativeConnectionHandle.from_ffi(_NnrpHandle(HANDLE_KIND_CONNECTION, 21, 1, 0)),
+        "tcp",
+    )
+    session = server.accept_session(session_handle_id=41, generation=3)
+    session._remember_operation_frame(42, 9)
+    close = _decode_test_wire_event(
+        MessageType.SESSION_CLOSE,
+        SessionCloseMetadata(
+            SessionCloseReason.NORMAL,
+            InFlightPolicy.DRAIN,
+            0,
+            42,
+            0,
+            1,
+        ).pack(),
+        kind=EVENT_KIND_RUNTIME_FRAME,
+        frame_id=0,
+    )
+
+    event = session._server_event_from_polled(close)
+
+    runtime_event = event.as_runtime()
+    assert runtime_event is not None
+    assert runtime_event.header.message_type is MessageType.SESSION_CLOSE
+    assert session._closed is False
+    assert session._operation_frames == {}
+    session.close()
+    session.close()
+    assert len(library.nnrp_server_close.calls) == 1
+
+
+@pytest.mark.parametrize("role", ["client", "server"])
+def test_native_runtime_session_close_waits_for_active_poll(role: str, tmp_path: Path) -> None:
+    class BlockingPollRuntimeLibrary(FakeRuntimeLibrary):
+        def __init__(self, close_symbol: str) -> None:
+            super().__init__()
+            self.poll_started = threading.Event()
+            self.poll_active = threading.Event()
+            self.release_poll = threading.Event()
+            self.close_called = threading.Event()
+            self.close_during_poll = False
+            getattr(self, close_symbol).handler = self._close_after_poll
+
+        def _await_events(
+            self,
+            request: _NnrpRoleEventPollRequest,
+            out_events: object,
+            event_capacity: int,
+            out_event_count: object,
+        ) -> _NnrpFfiStatus:
+            del request, out_events, event_capacity
+            self.poll_started.set()
+            self.poll_active.set()
+            try:
+                assert self.release_poll.wait(timeout=2)
+            finally:
+                self.poll_active.clear()
+            count_target = getattr(out_event_count, "_obj", None)
+            if count_target is None:
+                count_target = ctypes.cast(out_event_count, ctypes.POINTER(ctypes.c_size_t)).contents
+            count_target.value = 0
+            return _NnrpFfiStatus(FFI_STATUS_WOULD_BLOCK, 0, 0, 0)
+
+        def _close_after_poll(self, handle: _NnrpHandle) -> _NnrpFfiStatus:
+            self.close_during_poll = self.poll_active.is_set()
+            self.close_called.set()
+            return super()._close(handle)
+
+    close_symbol = "nnrp_client_close" if role == "client" else "nnrp_server_close"
+    library = BlockingPollRuntimeLibrary(close_symbol)
+    if role == "client":
+        artifact = tmp_path / "nnrp_ffi.dll"
+        artifact.write_bytes(b"fake")
+        session = _open_event_session(
+            load_native_client(artifact, library=library).connect(
+                connection_id=12,
+                generation=2,
+                transport_id=TRANSPORT_SLOT_TCP,
+            )
+        )
+    else:
+        server = NativeRuntimeServer(
+            NativeRuntimeEntrypoints(library),
+            NativeConnectionHandle.from_ffi(_NnrpHandle(HANDLE_KIND_CONNECTION, 21, 1, 0)),
+            "tcp",
+        )
+        session = server.accept_session(session_handle_id=41, generation=3)
+
+    errors: list[BaseException] = []
+    close_started = threading.Event()
+
+    def capture(call: Callable[[], object]) -> None:
+        try:
+            call()
+        except BaseException as error:
+            errors.append(error)
+
+    poll_thread = threading.Thread(target=lambda: capture(lambda: session.poll_event(timeout_ms=1)))
+    close_thread = threading.Thread(target=lambda: (close_started.set(), capture(session.close)))
+    poll_thread.start()
+    assert library.poll_started.wait(timeout=1)
+    close_thread.start()
+    assert close_started.wait(timeout=1)
+    time.sleep(0.05)
+    assert close_thread.is_alive()
+    assert not library.close_called.is_set()
+
+    library.release_poll.set()
+    poll_thread.join(timeout=1)
+    close_thread.join(timeout=1)
+
+    assert not poll_thread.is_alive()
+    assert not close_thread.is_alive()
+    assert errors == []
+    assert library.close_called.is_set()
+    assert library.close_during_poll is False
 
 
 def test_native_submit_payload_boundary_snapshots_mutable_inputs(tmp_path: Path) -> None:
@@ -5131,8 +6027,11 @@ def test_native_submit_rejects_metadata_operation_identity_mismatch(tmp_path: Pa
 
     with pytest.raises(ValueError, match="metadata.operation_id must equal"):
         session.submit_operation(request)
+    with pytest.raises(ValueError, match="metadata.operation_id must equal"):
+        session.submit_and_poll_result(request, max_events=1, timeout_ms=25)
 
     assert library.nnrp_client_submit.calls == []
+    assert library.runtime_frames == []
 
 
 def test_native_result_keeps_wire_operation_identity_separate_from_handle_identity(tmp_path: Path) -> None:
@@ -5955,7 +6854,7 @@ def test_native_runtime_session_submits_and_polls_result(tmp_path: Path) -> None
     result = session.submit_and_poll_result(
         request,
         max_events=1,
-        timeout_ms=25,
+        timeout_ms=250,
     )
     async_result = asyncio.run(
         session.async_submit_and_poll_result(
@@ -5977,9 +6876,342 @@ def test_native_runtime_session_submits_and_polls_result(tmp_path: Path) -> None
         request.metadata.pack() + request.body,
         request.metadata.pack() + request.body,
     ]
-    assert library.nnrp_client_await_events.calls[0][0].timeout_ms == 25
+    assert 1 <= library.nnrp_client_await_events.calls[0][0].timeout_ms <= 250
     assert library.nnrp_client_await_events.calls[1][0].timeout_ms == 1
     assert len(library.nnrp_client_await_events.calls) == 2
+    with pytest.raises(NativeInvalidStateError, match="inactive operation 99"):
+        session.update_priority(SchedulingMetadata(99, 2, 0, 0, 0, 0))
+
+
+def test_native_runtime_submit_wait_accepts_terminal_lifecycle_evidence(tmp_path: Path) -> None:
+    artifact = tmp_path / "nnrp_ffi.dll"
+    artifact.write_bytes(b"fake")
+    library = FakeRuntimeLibrary(
+        event_payload=bytes((OperationState.CANCELLED,)),
+        event_kind=EVENT_KIND_OPERATION_LIFECYCLE,
+    )
+    session = _open_event_session(
+        load_native_client(artifact, library=library).connect(
+            connection_id=12,
+            generation=2,
+            transport_id=TRANSPORT_SLOT_TCP,
+        )
+    )
+
+    result = session.submit_and_poll_result(_native_submit_request(), max_events=1)
+
+    assert result.terminal_state is ResultTerminalState.CANCELLED
+    assert result.event.as_lifecycle() == OperationLifecycleEvent(99, OperationState.CANCELLED)
+    with pytest.raises(NativeInvalidStateError, match="inactive operation 99"):
+        session.update_priority(SchedulingMetadata(99, 2, 0, 0, 0, 0))
+
+
+def test_native_runtime_submit_wait_keeps_running_lifecycle_observable(tmp_path: Path) -> None:
+    artifact = tmp_path / "nnrp_ffi.dll"
+    artifact.write_bytes(b"fake")
+    library = FakeRuntimeLibrary(
+        event_payload=bytes((OperationState.RUNNING,)),
+        event_kind=EVENT_KIND_OPERATION_LIFECYCLE,
+    )
+    session = _open_event_session(
+        load_native_client(artifact, library=library).connect(
+            connection_id=12,
+            generation=2,
+            transport_id=TRANSPORT_SLOT_TCP,
+        )
+    )
+    operation = session.submit_operation(_native_submit_request())
+
+    with pytest.raises(NativeWouldBlockError):
+        session.poll_result(operation, max_events=1)
+
+    session.update_priority(SchedulingMetadata(99, 2, 0, 0, 0, 0))
+    assert library.runtime_frames[-1][1] == 7
+
+
+@pytest.mark.parametrize("use_async", [False, True])
+def test_native_runtime_submit_wait_continues_after_running_lifecycle(
+    tmp_path: Path,
+    use_async: bool,
+) -> None:
+    class SequencedRuntimeLibrary(FakeRuntimeLibrary):
+        def __init__(self) -> None:
+            super().__init__()
+            self.events = [
+                (
+                    EVENT_KIND_OPERATION_LIFECYCLE,
+                    0,
+                    bytes((OperationState.RUNNING,)),
+                ),
+                (
+                    EVENT_KIND_RESULT_PUSHED,
+                    int(MessageType.RESULT_PUSH),
+                    _native_token_result_payload(),
+                ),
+            ]
+            self.owners = [ctypes.create_string_buffer(payload, len(payload)) for _, _, payload in self.events]
+
+        def _await_events(
+            self,
+            request: _NnrpRoleEventPollRequest,
+            out_events: object,
+            event_capacity: int,
+            out_event_count: object,
+        ) -> _NnrpFfiStatus:
+            count_target = getattr(out_event_count, "_obj", None)
+            if count_target is None:
+                count_target = ctypes.cast(out_event_count, ctypes.POINTER(ctypes.c_size_t)).contents
+            count_target.value = 0
+            if not self.events:
+                return _NnrpFfiStatus(FFI_STATUS_WOULD_BLOCK, 0, 0, 0)
+            kind, message_type, payload = self.events.pop(0)
+            owner = self.owners.pop(0)
+            event = ctypes.cast(out_events, ctypes.POINTER(_NnrpEvent))[0]
+            event.kind = kind
+            _write_event_header(event, message_type=message_type, frame_id=7)
+            event.connection = _NnrpHandle(HANDLE_KIND_CONNECTION, 12, 2, 0)
+            event.session = request.scope
+            event.operation = _NnrpHandle(HANDLE_KIND_OPERATION, 99, 1, 0)
+            event.payload_owner = _NnrpHandle()
+            event.payload = _NnrpBufferView(ctypes.cast(owner, ctypes.c_void_p), len(payload))
+            event.diagnostic.status = NativeStatus.ok().to_ffi()
+            event.diagnostic.related_operation_id = 99
+            event.diagnostic.related_frame_id = 7
+            count_target.value = min(1, event_capacity)
+            return self.status
+
+    artifact = tmp_path / "nnrp_ffi.dll"
+    artifact.write_bytes(b"fake")
+    library = SequencedRuntimeLibrary()
+    session = _open_event_session(
+        load_native_client(artifact, library=library).connect(
+            connection_id=12,
+            generation=2,
+            transport_id=TRANSPORT_SLOT_TCP,
+        )
+    )
+
+    if use_async:
+        result = asyncio.run(
+            session.async_submit_and_poll_result(
+                _native_submit_request(),
+                max_events=1,
+                timeout_ms=250,
+            )
+        )
+    else:
+        result = session.submit_and_poll_result(
+            _native_submit_request(),
+            max_events=1,
+            timeout_ms=250,
+        )
+
+    assert result.terminal_state is ResultTerminalState.SUCCESS
+    assert result.event.as_runtime().tail.body == b"result"
+    running = session.poll_event()
+    assert isinstance(running, NativeLifecycleEvent)
+    assert native_module._operation_lifecycle_from_native_event(running) == OperationLifecycleEvent(
+        99,
+        OperationState.RUNNING,
+    )
+    assert library.nnrp_client_cancel.calls == []
+
+
+def test_native_runtime_submit_wait_sends_deadline_before_submit_and_cancels_on_expiry(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class OrderedRuntimeLibrary(FakeRuntimeLibrary):
+        def __init__(self) -> None:
+            super().__init__()
+            self.call_order: list[tuple[str, int, int]] = []
+
+        def _runtime_frame_send(self, request: _NnrpRuntimeFrameSendRequest) -> _NnrpFfiStatus:
+            self.call_order.append(("runtime", int(request.message_type), int(request.frame_id)))
+            return super()._runtime_frame_send(request)
+
+        def _submit(self, request: _NnrpSubmitRequest, out_handle: object) -> _NnrpFfiStatus:
+            self.call_order.append(("submit", int(request.operation_id), int(request.frame_id)))
+            return super()._submit(request, out_handle)
+
+        def _cancel(self, request: _NnrpClientCancelRequest) -> _NnrpFfiStatus:
+            self.call_order.append(("cancel", 0, int(request.frame_id)))
+            return super()._cancel(request)
+
+    monkeypatch.setattr(native_module.time, "time", lambda: 1000.0)
+    artifact = tmp_path / "nnrp_ffi.dll"
+    artifact.write_bytes(b"fake")
+    library = OrderedRuntimeLibrary()
+    session = _open_event_session(
+        load_native_client(artifact, library=library).connect(
+            connection_id=12,
+            generation=2,
+            transport_id=TRANSPORT_SLOT_TCP,
+        )
+    )
+
+    with pytest.raises(TimeoutError, match="operation 99"):
+        session.submit_and_poll_result(_native_submit_request(), max_events=1, timeout_ms=25)
+
+    assert library.call_order == [
+        ("runtime", int(MessageType.DEADLINE), 7),
+        ("submit", 99, 7),
+        ("cancel", 0, 7),
+    ]
+    deadline = decode_runtime_control_metadata(MessageType.DEADLINE, library.runtime_frames[0][2])
+    assert deadline.metadata == SchedulingMetadata(99, 1, 0, 0, 1_000_025, 0)
+
+
+def test_native_runtime_async_submit_wait_sends_deadline_and_cancels_on_expiry(tmp_path: Path) -> None:
+    artifact = tmp_path / "nnrp_ffi.dll"
+    artifact.write_bytes(b"fake")
+    library = FakeRuntimeLibrary()
+    session = _open_event_session(
+        load_native_client(artifact, library=library).connect(
+            connection_id=12,
+            generation=2,
+            transport_id=TRANSPORT_SLOT_TCP,
+        )
+    )
+
+    with pytest.raises(TimeoutError, match="operation 99"):
+        asyncio.run(
+            session.async_submit_and_poll_result(
+                _native_submit_request(),
+                max_events=1,
+                timeout_ms=25,
+            )
+        )
+
+    assert [message_type for message_type, _frame_id, _payload in library.runtime_frames] == [int(MessageType.DEADLINE)]
+    assert len(library.nnrp_client_cancel.calls) == 1
+
+
+def test_native_runtime_async_submit_cancelled_before_dispatch_emits_no_frames(tmp_path: Path) -> None:
+    artifact = tmp_path / "nnrp_ffi.dll"
+    artifact.write_bytes(b"fake")
+    library = FakeRuntimeLibrary()
+    session = _open_event_session(
+        load_native_client(artifact, library=library).connect(
+            connection_id=12,
+            generation=2,
+            transport_id=TRANSPORT_SLOT_TCP,
+        )
+    )
+
+    asyncio.run(_cancel_async_submit_before_dispatch(session))
+
+    assert library.nnrp_client_submit.calls == []
+    assert library.nnrp_client_cancel.calls == []
+
+
+def test_native_runtime_async_submit_cancelled_while_executor_work_is_queued_emits_no_frames(tmp_path: Path) -> None:
+    artifact = tmp_path / "nnrp_ffi.dll"
+    artifact.write_bytes(b"fake")
+    library = FakeRuntimeLibrary()
+    session = _open_event_session(
+        load_native_client(artifact, library=library).connect(
+            connection_id=12,
+            generation=2,
+            transport_id=TRANSPORT_SLOT_TCP,
+        )
+    )
+
+    asyncio.run(_cancel_async_submit_while_executor_work_is_queued(session))
+
+    assert library.nnrp_client_submit.calls == []
+    assert library.nnrp_client_cancel.calls == []
+
+
+def test_native_runtime_async_submit_wait_cancelled_before_dispatch_emits_no_frames(tmp_path: Path) -> None:
+    artifact = tmp_path / "nnrp_ffi.dll"
+    artifact.write_bytes(b"fake")
+    library = FakeRuntimeLibrary()
+    session = _open_event_session(
+        load_native_client(artifact, library=library).connect(
+            connection_id=12,
+            generation=2,
+            transport_id=TRANSPORT_SLOT_TCP,
+        )
+    )
+
+    asyncio.run(_cancel_async_submit_wait_before_dispatch(session))
+
+    assert library.runtime_frames == []
+    assert library.nnrp_client_submit.calls == []
+    assert library.nnrp_client_cancel.calls == []
+
+
+def test_native_runtime_async_submit_wait_cancels_after_dispatch(tmp_path: Path) -> None:
+    class BlockingPollRuntimeLibrary(FakeRuntimeLibrary):
+        def __init__(self) -> None:
+            super().__init__()
+            self.poll_started = threading.Event()
+            self.poll_active = threading.Event()
+            self.release_poll = threading.Event()
+            self.cancel_called = threading.Event()
+            self.cancel_during_poll = False
+
+        def _await_events(
+            self,
+            request: _NnrpRoleEventPollRequest,
+            out_events: object,
+            event_capacity: int,
+            out_event_count: object,
+        ) -> _NnrpFfiStatus:
+            self.poll_started.set()
+            self.poll_active.set()
+            try:
+                if not self.release_poll.wait(timeout=2):
+                    return _NnrpFfiStatus(FFI_STATUS_INTERNAL_ERROR, 0, 0, 0)
+                return super()._await_events(request, out_events, event_capacity, out_event_count)
+            finally:
+                self.poll_active.clear()
+
+        def _cancel(self, request: _NnrpClientCancelRequest) -> _NnrpFfiStatus:
+            self.cancel_during_poll = self.poll_active.is_set()
+            self.cancel_called.set()
+            return super()._cancel(request)
+
+    artifact = tmp_path / "nnrp_ffi.dll"
+    artifact.write_bytes(b"fake")
+    library = BlockingPollRuntimeLibrary()
+    session = _open_event_session(
+        load_native_client(artifact, library=library).connect(
+            connection_id=12,
+            generation=2,
+            transport_id=TRANSPORT_SLOT_TCP,
+        )
+    )
+
+    asyncio.run(_cancel_async_submit_wait_after_dispatch(session, library))
+
+    assert len(library.nnrp_client_submit.calls) == 1
+    assert len(library.nnrp_client_cancel.calls) == 1
+    assert library.nnrp_client_cancel.calls[0][0].frame_id == 7
+    assert library.cancel_called.is_set()
+    assert library.cancel_during_poll is False
+    with pytest.raises(NativeInvalidStateError, match="inactive operation 99"):
+        session.update_priority(SchedulingMetadata(99, 2, 0, 0, 0, 0))
+
+
+def test_native_runtime_operation_cancel_releases_frame_binding(tmp_path: Path) -> None:
+    artifact = tmp_path / "nnrp_ffi.dll"
+    artifact.write_bytes(b"fake")
+    library = FakeRuntimeLibrary()
+    session = _open_event_session(
+        load_native_client(artifact, library=library).connect(
+            connection_id=12,
+            generation=2,
+            transport_id=TRANSPORT_SLOT_TCP,
+        )
+    )
+    operation = session.submit_operation(_native_submit_request())
+
+    operation.cancel()
+
+    with pytest.raises(NativeInvalidStateError, match="inactive operation 99"):
+        session.update_priority(SchedulingMetadata(99, 2, 0, 0, 0, 0))
 
 
 def test_native_runtime_session_polls_result_with_batch_when_event_budget_allows(tmp_path: Path) -> None:
@@ -6025,8 +7257,74 @@ def test_native_runtime_session_submit_result_reports_would_block_when_no_event(
     with pytest.raises(NativeWouldBlockError):
         session.submit_and_poll_result(_native_submit_request(), max_events=1)
 
+    submit_count = len(library.nnrp_client_submit.calls)
     with pytest.raises(ValueError, match="max_events"):
-        session.submit_and_poll_result(_native_submit_request(body=b""), max_events=-1)
+        session.submit_and_poll_result(_native_submit_request(body=b""), max_events=-1, timeout_ms=25)
+    assert len(library.nnrp_client_submit.calls) == submit_count
+    assert library.runtime_frames == []
+
+
+def test_native_runtime_submit_wait_with_zero_event_budget_does_not_report_timeout(tmp_path: Path) -> None:
+    artifact = tmp_path / "nnrp_ffi.dll"
+    artifact.write_bytes(b"fake")
+    library = FakeRuntimeLibrary()
+    session = _open_event_session(
+        load_native_client(artifact, library=library).connect(
+            connection_id=12,
+            generation=2,
+            transport_id=TRANSPORT_SLOT_TCP,
+        )
+    )
+
+    with pytest.raises(NativeWouldBlockError):
+        session.submit_and_poll_result(_native_submit_request(99, 7), max_events=0, timeout_ms=25)
+    with pytest.raises(NativeWouldBlockError):
+        asyncio.run(
+            session.async_submit_and_poll_result(
+                _native_submit_request(100, 8),
+                max_events=0,
+                timeout_ms=25,
+            )
+        )
+
+    assert library.nnrp_client_await_events.calls == []
+    assert library.nnrp_client_cancel.calls == []
+
+
+def test_native_runtime_submit_wait_validates_scheduling_before_deadline_side_effects(tmp_path: Path) -> None:
+    artifact = tmp_path / "nnrp_ffi.dll"
+    artifact.write_bytes(b"fake")
+    library = FakeRuntimeLibrary()
+    session = _open_event_session(
+        load_native_client(artifact, library=library).connect(
+            connection_id=12,
+            generation=2,
+            transport_id=TRANSPORT_SLOT_TCP,
+        )
+    )
+    hint = NativeOperationSchedulingHint(parent_operation_id=10, operation_group_id=20)
+
+    with pytest.raises(NativeHandleError, match="parent_operation_id conflicts"):
+        session.submit_and_poll_result(
+            _native_submit_request(99, 7),
+            parent_operation_id=11,
+            scheduling_hint=hint,
+            max_events=1,
+            timeout_ms=25,
+        )
+    with pytest.raises(NativeHandleError, match="operation_group_id conflicts"):
+        asyncio.run(
+            session.async_submit_and_poll_result(
+                _native_submit_request(100, 8),
+                operation_group_id=21,
+                scheduling_hint=hint,
+                max_events=1,
+                timeout_ms=25,
+            )
+        )
+
+    assert library.runtime_frames == []
+    assert library.nnrp_client_submit.calls == []
 
 
 def test_native_runtime_session_submit_result_preserves_related_diagnostic_ids(tmp_path: Path) -> None:
@@ -6173,6 +7471,9 @@ def test_native_runtime_session_batch_poll_skips_mismatched_events(tmp_path: Pat
 
     with pytest.raises(NativeWouldBlockError):
         session.poll_result(operation, max_events=2)
+
+    session.update_priority(SchedulingMetadata(99, 2, 0, 0, 0, 0))
+    assert library.runtime_frames[-1][1] == 7
 
 
 def test_native_runtime_session_batch_poll_skips_submit_accepted_events(tmp_path: Path) -> None:
@@ -6353,8 +7654,8 @@ def test_native_runtime_session_rejects_use_after_close(tmp_path: Path) -> None:
         session.cancel(frame_id=7)
     with pytest.raises(NativeInvalidStateError, match="closed"):
         session.cancel_operation(ControlRequestMetadata(99, 1, 0, RuntimeRole.CLIENT, 0, 0))
-    with pytest.raises(NativeInvalidStateError, match="closed"):
-        session.close()
+    session.close()
+    assert len(library.nnrp_client_close.calls) == 1
 
 
 def test_native_runtime_async_submit_cancels_native_frame(tmp_path: Path) -> None:
@@ -6436,6 +7737,61 @@ async def _cancel_async_submit(session: NativeRuntimeSession) -> None:
     task = asyncio.create_task(session.async_submit_operation(_native_submit_request(101, 9)))
     await asyncio.sleep(0.02)
     task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+
+async def _cancel_async_submit_before_dispatch(session: NativeRuntimeSession) -> None:
+    task = asyncio.create_task(session.async_submit_operation(_native_submit_request(101, 9)))
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+
+async def _cancel_async_submit_while_executor_work_is_queued(session: NativeRuntimeSession) -> None:
+    loop = asyncio.get_running_loop()
+    blocker_started = threading.Event()
+    release_blocker = threading.Event()
+
+    def block_executor() -> None:
+        blocker_started.set()
+        release_blocker.wait()
+
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        loop.set_default_executor(executor)
+        blocker = loop.run_in_executor(None, block_executor)
+        assert blocker_started.wait(1)
+        task = asyncio.create_task(session.async_submit_operation(_native_submit_request(101, 9)))
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+        task.cancel()
+        try:
+            with pytest.raises(asyncio.CancelledError):
+                await task
+        finally:
+            release_blocker.set()
+            await blocker
+
+
+async def _cancel_async_submit_wait_before_dispatch(session: NativeRuntimeSession) -> None:
+    task = asyncio.create_task(
+        session.async_submit_and_poll_result(_native_submit_request(), max_events=1, timeout_ms=25)
+    )
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+
+async def _cancel_async_submit_wait_after_dispatch(
+    session: NativeRuntimeSession,
+    library: Any,
+) -> None:
+    task = asyncio.create_task(session.async_submit_and_poll_result(_native_submit_request(), max_events=1))
+    assert await asyncio.to_thread(library.poll_started.wait, 1)
+    task.cancel()
+    await asyncio.sleep(0.05)
+    assert not library.cancel_called.is_set()
+    library.release_poll.set()
     with pytest.raises(asyncio.CancelledError):
         await task
 

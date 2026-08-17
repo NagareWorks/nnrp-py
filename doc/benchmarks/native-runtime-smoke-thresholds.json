@@ -24,15 +24,17 @@
       "id": "l4.native.submit_cancel.throughput",
       "min": {
         "throughput_ops_per_sec": 1,
-        "native_ffi_calls_per_op": 4,
+        "native_ffi_calls_per_op": 5,
         "native_ffi_client_submit_calls_per_op": 1,
         "native_ffi_client_cancel_calls_per_op": 1,
+        "native_ffi_client_await_events_calls_per_op": 1,
         "native_ffi_server_await_events_calls_per_op": 2
       },
       "max": {
-        "native_ffi_calls_per_op": 4,
+        "native_ffi_calls_per_op": 5,
         "native_ffi_client_submit_calls_per_op": 1,
         "native_ffi_client_cancel_calls_per_op": 1,
+        "native_ffi_client_await_events_calls_per_op": 1,
         "native_ffi_server_await_events_calls_per_op": 2
       }
     },

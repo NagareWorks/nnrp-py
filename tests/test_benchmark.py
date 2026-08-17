@@ -1,3 +1,4 @@
+import asyncio
 import ctypes
 import json
 from concurrent.futures import ThreadPoolExecutor
@@ -23,6 +24,8 @@ from nnrp.native import NativeServerEvent
 from nnrp.runtime import (
     InFlightPolicy,
     NativeRuntimeEvent,
+    OperationLifecycleEvent,
+    OperationState,
     RuntimeEventMetadata,
     RuntimeEventMetadataKind,
     RuntimeEventTail,
@@ -568,8 +571,8 @@ def test_close_native_role_sessions_completes_session_close_handshake() -> None:
 
     class ServerSession:
         def poll_events(self, *, max_events: int, timeout_ms: int):
-            assert max_events == 8
-            assert timeout_ms == 5_000
+            assert max_events == 16
+            assert 1 <= timeout_ms <= 25
             assert close_started.wait(timeout=1)
             calls.append("server-receive-close")
             return (
@@ -597,6 +600,118 @@ def test_close_native_role_sessions_completes_session_close_handshake() -> None:
     ]
 
 
+def test_close_native_role_sessions_applies_timeout_to_client_close() -> None:
+    result_timeouts: list[float] = []
+
+    class ClientCloseFuture:
+        def done(self) -> bool:
+            return True
+
+        def result(self, timeout: float | None = None) -> None:
+            if timeout is not None:
+                result_timeouts.append(timeout)
+
+    class Executor:
+        def submit(self, callback):
+            callback()
+            return ClientCloseFuture()
+
+    server_session = SimpleNamespace(
+        poll_events=lambda **_kwargs: (
+            NativeServerEvent.runtime(
+                _runtime_event(
+                    MessageType.SESSION_CLOSE,
+                    RuntimeEventMetadataKind.SESSION_CLOSE,
+                    SessionCloseMetadata(SessionCloseReason.NORMAL, InFlightPolicy.DRAIN, 0, 0, 0, 0),
+                )
+            ),
+        ),
+        close=lambda: None,
+    )
+
+    benchmark._close_native_role_sessions(
+        SimpleNamespace(close=lambda: None),
+        server_session,
+        Executor(),
+        timeout_seconds=0.25,
+    )
+
+    assert len(result_timeouts) == 1
+    assert 0 <= result_timeouts[0] <= 0.25
+
+
+def test_close_native_role_sessions_drains_events_before_session_close() -> None:
+    close_started = Event()
+    close_acknowledged = Event()
+    poll_count = 0
+
+    class ClientSession:
+        def close(self) -> None:
+            close_started.set()
+            assert close_acknowledged.wait(timeout=1)
+
+    class ServerSession:
+        def poll_events(self, **_kwargs: object):
+            nonlocal poll_count
+            assert close_started.wait(timeout=1)
+            poll_count += 1
+            if poll_count == 1:
+                return (SimpleNamespace(as_runtime=lambda: None),)
+            return (
+                NativeServerEvent.runtime(
+                    _runtime_event(
+                        MessageType.SESSION_CLOSE,
+                        RuntimeEventMetadataKind.SESSION_CLOSE,
+                        SessionCloseMetadata(SessionCloseReason.NORMAL, InFlightPolicy.DRAIN, 0, 0, 0, 0),
+                    )
+                ),
+            )
+
+        def close(self) -> None:
+            close_acknowledged.set()
+
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        benchmark._close_native_role_sessions(ClientSession(), ServerSession(), executor)
+
+    assert poll_count == 2
+
+
+def test_close_native_role_sessions_retries_would_block() -> None:
+    close_started = Event()
+    close_acknowledged = Event()
+    poll_count = 0
+
+    class ClientSession:
+        def close(self) -> None:
+            close_started.set()
+            assert close_acknowledged.wait(timeout=1)
+
+    class ServerSession:
+        def poll_events(self, **_kwargs: object):
+            nonlocal poll_count
+            assert close_started.wait(timeout=1)
+            poll_count += 1
+            if poll_count == 1:
+                raise NativeWouldBlockError(NativeStatus(FFI_STATUS_WOULD_BLOCK))
+            return (
+                NativeServerEvent.runtime(
+                    _runtime_event(
+                        MessageType.SESSION_CLOSE,
+                        RuntimeEventMetadataKind.SESSION_CLOSE,
+                        SessionCloseMetadata(SessionCloseReason.NORMAL, InFlightPolicy.DRAIN, 0, 0, 0, 0),
+                    )
+                ),
+            )
+
+        def close(self) -> None:
+            close_acknowledged.set()
+
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        benchmark._close_native_role_sessions(ClientSession(), ServerSession(), executor)
+
+    assert poll_count == 2
+
+
 def test_close_native_role_sessions_rejects_missing_close_event() -> None:
     server_closed = Event()
 
@@ -611,9 +726,139 @@ def test_close_native_role_sessions_rejects_missing_close_event() -> None:
 
     with ThreadPoolExecutor(max_workers=1) as executor:
         with pytest.raises(RuntimeError, match="did not receive SESSION_CLOSE"):
-            benchmark._close_native_role_sessions(client_session, server_session, executor)
+            benchmark._close_native_role_sessions(
+                client_session,
+                server_session,
+                executor,
+                timeout_seconds=0.02,
+            )
 
     assert server_closed.is_set()
+
+
+def test_await_native_cancel_completion_retries_and_validates_both_roles() -> None:
+    poll_count = 0
+
+    class ServerSession:
+        def poll_events(self, **_kwargs: object):
+            nonlocal poll_count
+            poll_count += 1
+            if poll_count == 1:
+                raise NativeWouldBlockError(NativeStatus(FFI_STATUS_WOULD_BLOCK))
+            if poll_count == 2:
+                return (
+                    SimpleNamespace(
+                        as_runtime=lambda: SimpleNamespace(
+                            header=SimpleNamespace(message_type=MessageType.FRAME_CANCEL, frame_id=22)
+                        ),
+                        as_lifecycle=lambda: None,
+                    ),
+                )
+            return (
+                SimpleNamespace(
+                    as_runtime=lambda: None,
+                    as_lifecycle=lambda: OperationLifecycleEvent(11, OperationState.CANCELLED),
+                ),
+            )
+
+    class ClientSession:
+        async def next_event(self, timeout: float | None = None):
+            assert timeout is not None and timeout > 0
+            return OperationLifecycleEvent(11, OperationState.CANCELLED)
+
+    with asyncio.Runner() as runner:
+        benchmark._await_native_cancel_completion(
+            ClientSession(),
+            ServerSession(),
+            11,
+            22,
+            runner=runner,
+            timeout_seconds=0.5,
+        )
+
+    assert poll_count == 3
+
+
+def test_await_native_cancel_completion_rejects_incomplete_server_state() -> None:
+    client_session = SimpleNamespace(next_event=lambda **_kwargs: pytest.fail("client must not be polled"))
+    server_session = SimpleNamespace(poll_events=lambda **_kwargs: ())
+
+    with asyncio.Runner() as runner:
+        with pytest.raises(RuntimeError, match="server did not complete cancellation"):
+            benchmark._await_native_cancel_completion(
+                client_session,
+                server_session,
+                11,
+                22,
+                runner=runner,
+                timeout_seconds=0.02,
+            )
+
+
+def test_await_native_cancel_completion_rejects_wrong_client_state() -> None:
+    server_session = SimpleNamespace(
+        poll_events=lambda **_kwargs: (
+            SimpleNamespace(
+                as_runtime=lambda: SimpleNamespace(
+                    header=SimpleNamespace(message_type=MessageType.FRAME_CANCEL, frame_id=22)
+                ),
+                as_lifecycle=lambda: None,
+            ),
+            SimpleNamespace(
+                as_runtime=lambda: None,
+                as_lifecycle=lambda: OperationLifecycleEvent(11, OperationState.CANCELLED),
+            ),
+        )
+    )
+
+    class ClientSession:
+        async def next_event(self, timeout: float | None = None):
+            assert timeout is not None and timeout > 0
+            return OperationLifecycleEvent(11, OperationState.COMPLETED)
+
+    with asyncio.Runner() as runner:
+        with pytest.raises(RuntimeError, match="wrong cancellation lifecycle"):
+            benchmark._await_native_cancel_completion(
+                ClientSession(),
+                server_session,
+                11,
+                22,
+                runner=runner,
+                timeout_seconds=0.5,
+            )
+
+
+def test_await_native_cancel_completion_normalizes_client_timeout() -> None:
+    server_session = SimpleNamespace(
+        poll_events=lambda **_kwargs: (
+            SimpleNamespace(
+                as_runtime=lambda: SimpleNamespace(
+                    header=SimpleNamespace(message_type=MessageType.FRAME_CANCEL, frame_id=22)
+                ),
+                as_lifecycle=lambda: None,
+            ),
+            SimpleNamespace(
+                as_runtime=lambda: None,
+                as_lifecycle=lambda: OperationLifecycleEvent(11, OperationState.CANCELLED),
+            ),
+        )
+    )
+
+    class ClientSession:
+        async def next_event(self, timeout: float | None = None):
+            assert timeout is not None and timeout > 0
+            raise NativeWouldBlockError(NativeStatus(FFI_STATUS_WOULD_BLOCK))
+
+    with asyncio.Runner() as runner:
+        with pytest.raises(RuntimeError, match="client did not complete cancellation"):
+            benchmark._await_native_cancel_completion(
+                ClientSession(),
+                server_session,
+                11,
+                22,
+                runner=runner,
+                timeout_seconds=0.5,
+            )
 
 
 def test_benchmark_environment_records_release_candidate_identity(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -670,9 +915,10 @@ def test_build_benchmark_results_report_measures_native_scenarios_when_artifacts
     assert native_submit_cancel["outcome"] == "measured"
     assert native_submit_cancel["metrics"]["throughput_ops_per_sec"] > 0
     assert native_submit_cancel["metrics"]["completed_operations"] > 0
-    assert native_submit_cancel["metrics"]["native_ffi_calls_per_op"] == 4
+    assert native_submit_cancel["metrics"]["native_ffi_calls_per_op"] == 5
     assert native_submit_cancel["metrics"]["native_ffi_client_submit_calls_per_op"] == 1
     assert native_submit_cancel["metrics"]["native_ffi_client_cancel_calls_per_op"] == 1
+    assert native_submit_cancel["metrics"]["native_ffi_client_await_events_calls_per_op"] == 1
     assert native_submit_cancel["metrics"]["native_ffi_server_await_events_calls_per_op"] == 2
     native_progress_partial = results["l4.native.progress_partial.polling.throughput"]
     assert native_progress_partial["outcome"] == "measured"
@@ -1006,12 +1252,18 @@ class FakeNativeSession:
     def poll_events(self):
         return self.poll_events_batch(max_events=8)
 
-    def poll_events_batch(self, *, max_events: int):
-        self.entrypoints.client_await_events(max_events)
+    def poll_events_batch(self, *, max_events: int, timeout_ms: int = 0):
+        self.entrypoints.client_await_events(max_events, timeout_ms)
         self.connection.polled_batches.append(max_events)
         events = tuple(self.connection.runtime_events[:max_events])
         del self.connection.runtime_events[:max_events]
         return events
+
+    async def next_event(self, timeout: float | None = None):
+        self.entrypoints.client_await_events(timeout)
+        if not self.connection.runtime_events:
+            raise AssertionError("fake role loopback client event was not queued")
+        return self.connection.runtime_events.pop(0)
 
     def submit_operation(
         self,
@@ -1048,8 +1300,24 @@ class FakeNativeOperation:
     def cancel(self) -> None:
         self.session.entrypoints.client_cancel(self.frame_id)
         self.session.connection.cancelled_frames.append(self.frame_id)
+        self.session.connection.runtime_events.append(
+            OperationLifecycleEvent(self.operation_id, OperationState.CANCELLED)
+        )
         assert self.session.connection.server_session is not None
-        self.session.connection.server_session.control_events.append(self.frame_id)
+        self.session.connection.server_session.control_events.extend(
+            (
+                SimpleNamespace(
+                    as_runtime=lambda: SimpleNamespace(
+                        header=SimpleNamespace(message_type=MessageType.FRAME_CANCEL, frame_id=self.frame_id),
+                    ),
+                    as_lifecycle=lambda: None,
+                ),
+                SimpleNamespace(
+                    as_runtime=lambda: None,
+                    as_lifecycle=lambda: OperationLifecycleEvent(self.operation_id, OperationState.CANCELLED),
+                ),
+            )
+        )
 
 
 class FakeNativeServerOperation:
@@ -1101,7 +1369,7 @@ class FakeNativeServerSession:
         self.connection = connection
         self.entrypoints = FakeNativeEntrypoints()
         self.pending_submits: list[FakeNativeOperation] = []
-        self.control_events: list[int] = []
+        self.control_events: list[object] = []
 
     async def receive_submit(self, timeout: float | None = None) -> FakeNativeServerOperation:
         timeout_ms = 0 if timeout is None else max(0, int(timeout * 1_000))

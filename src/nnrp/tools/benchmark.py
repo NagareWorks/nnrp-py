@@ -76,6 +76,8 @@ from nnrp.runtime import (
     ObjectReferenceMetadata,
     ObjectReleaseMetadata,
     ObjectReleaseReason,
+    OperationLifecycleEvent,
+    OperationState,
     OwnershipHint,
     PartialResultMetadata,
     PressureMetadata,
@@ -495,21 +497,44 @@ def _run_native_server_accept(server: Any, options: NativeServerAcceptOptions) -
     return asyncio.run(server.accept(options))
 
 
-def _close_native_role_sessions(client_session: Any, server_session: Any, executor: ThreadPoolExecutor) -> None:
+def _close_native_role_sessions(
+    client_session: Any,
+    server_session: Any,
+    executor: ThreadPoolExecutor,
+    *,
+    timeout_seconds: float = 5.0,
+) -> None:
     client_close = executor.submit(client_session.close)
+    deadline = time.monotonic() + timeout_seconds
+    close_received = False
     try:
-        close_events = server_session.poll_events(max_events=8, timeout_ms=5_000)
-        if not any(
-            (runtime_event := event.as_runtime()) is not None
-            and runtime_event.header.message_type is MessageType.SESSION_CLOSE
-            for event in close_events
-        ):
+        while time.monotonic() < deadline:
+            remaining_ms = max(1, int((deadline - time.monotonic()) * 1_000))
+            try:
+                close_events = server_session.poll_events(max_events=16, timeout_ms=min(25, remaining_ms))
+            except NativeWouldBlockError:
+                close_events = ()
+            if any(
+                (runtime_event := event.as_runtime()) is not None
+                and runtime_event.header.message_type is MessageType.SESSION_CLOSE
+                for event in close_events
+            ):
+                close_received = True
+                break
+            time.sleep(0.005)
+        else:
             raise RuntimeError("native role loopback server did not receive SESSION_CLOSE")
     finally:
         try:
             server_session.close()
         finally:
-            client_close.result(timeout=10)
+            remaining = deadline - time.monotonic()
+            if remaining > 0:
+                client_close.result(timeout=remaining)
+            elif client_close.done():
+                client_close.result()
+            elif close_received:
+                raise TimeoutError("native role loopback client did not complete SESSION_CLOSE")
 
 
 def _run_native_event_polling(scenario_id: str, workload: dict[str, Any]) -> dict[str, Any]:
@@ -623,7 +648,14 @@ def _run_native_submit_cancel_loop(scenario_id: str, workload: dict[str, Any]) -
                 if received.frame_id != counter:
                     raise RuntimeError("native role loopback received the wrong frame")
                 submitted.cancel()
-                server_session.poll_events(max_events=2, timeout_ms=5_000)
+                _await_native_cancel_completion(
+                    session,
+                    server_session,
+                    counter,
+                    counter,
+                    runner=runner,
+                    timeout_seconds=5.0,
+                )
 
             try:
                 for _ in range(warmup_iterations):
@@ -642,6 +674,51 @@ def _run_native_submit_cancel_loop(scenario_id: str, workload: dict[str, Any]) -
                 _restore_native_role_counters(counters)
     except NativeArtifactError as error:
         return _skip_result(scenario_id, f"native IPC role loopback unavailable: {error}")
+
+
+def _await_native_cancel_completion(
+    client_session: Any,
+    server_session: Any,
+    operation_id: int,
+    frame_id: int,
+    *,
+    runner: asyncio.Runner,
+    timeout_seconds: float,
+) -> None:
+    deadline = time.monotonic() + timeout_seconds
+    saw_cancel = False
+    saw_lifecycle = False
+    while time.monotonic() < deadline and not (saw_cancel and saw_lifecycle):
+        remaining_ms = max(1, int((deadline - time.monotonic()) * 1_000))
+        try:
+            server_events = server_session.poll_events(max_events=4, timeout_ms=min(25, remaining_ms))
+        except NativeWouldBlockError:
+            server_events = ()
+        for event in server_events:
+            runtime_event = event.as_runtime()
+            lifecycle_event = event.as_lifecycle()
+            saw_cancel = saw_cancel or (
+                runtime_event is not None
+                and runtime_event.header.message_type is MessageType.FRAME_CANCEL
+                and runtime_event.header.frame_id == frame_id
+            )
+            saw_lifecycle = saw_lifecycle or (
+                lifecycle_event == OperationLifecycleEvent(operation_id, OperationState.CANCELLED)
+            )
+        if not server_events:
+            time.sleep(0.005)
+    if not saw_cancel or not saw_lifecycle:
+        raise RuntimeError("native role loopback server did not complete cancellation")
+
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise RuntimeError("native role loopback client did not complete cancellation")
+    try:
+        client_event = runner.run(client_session.next_event(timeout=remaining))
+    except NativeWouldBlockError as error:
+        raise RuntimeError("native role loopback client did not complete cancellation") from error
+    if client_event != OperationLifecycleEvent(operation_id, OperationState.CANCELLED):
+        raise RuntimeError("native role loopback client returned the wrong cancellation lifecycle")
 
 
 def _run_native_progress_partial_polling_loop(scenario_id: str, workload: dict[str, Any]) -> dict[str, Any]:

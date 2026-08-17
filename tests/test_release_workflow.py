@@ -80,6 +80,36 @@ def test_release_workflow_creates_tag_only_after_all_release_validation() -> Non
     assert workflow.index("Create git tag") < workflow.index("Publish GitHub release")
 
 
+def test_release_workflow_rejects_reused_identity_and_records_a_bom() -> None:
+    workflow = RELEASE_WORKFLOW.read_text(encoding="utf-8")
+
+    assert "Validate immutable release identity" in workflow
+    assert "scripts/check_release_identity.py" in workflow
+    assert "--expected-ref origin/main" in workflow
+    assert 'arguments+=(--check-pypi)' in workflow
+    assert "scripts/release_manifest.py build" in workflow
+    assert 'NNRP_CONFORMANCE_SOURCE_COMMIT: 685505dc0624f68ff4d660c78d24ea7e9b1b0290' in workflow
+    assert "NNRP_DOC_SOURCE_COMMIT: 3439ded0d318bd736f6485b17f2563fae77627bf" in workflow
+    assert "artifacts/release/release-manifest.json" in workflow
+    assert "prerelease: ${{ steps.version.outputs.is_prerelease }}" in workflow
+
+
+def test_release_workflow_verifies_public_pypi_bytes_and_native_runtime() -> None:
+    workflow = RELEASE_WORKFLOW.read_text(encoding="utf-8")
+
+    assert "Verify public PyPI release from a fresh environment" in workflow
+    assert "--index-url https://pypi.org/simple" in workflow
+    assert "scripts/release_manifest.py verify" in workflow
+    assert "artifacts/public-pypi-venv" in workflow
+    assert "NNRP_NATIVE_E2E=1 ../public-pypi-venv/bin/python -m pytest" in workflow
+    assert workflow.index("Publish to PyPI with API token") < workflow.index(
+        "Verify public PyPI release from a fresh environment"
+    )
+    assert workflow.index("Verify public PyPI release from a fresh environment") < workflow.index(
+        "Publish GitHub release"
+    )
+
+
 def test_release_workflow_rejects_polluted_source_distributions() -> None:
     workflow = RELEASE_WORKFLOW.read_text(encoding="utf-8")
 

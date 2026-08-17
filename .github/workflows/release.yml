@@ -51,6 +51,8 @@ jobs:
       NNRP_RS_NATIVE_VERSION: ${{ github.event_name == 'workflow_dispatch' && inputs.rust_native_version || vars.NNRP_RS_NATIVE_VERSION || '1.0.0-preview.4.23' }}
       NNRP_RS_RELEASE_RUN_ID: "32009630987"
       NNRP_RS_SOURCE_COMMIT: 00074cf3c09002de940f011e229de729aa377e88
+      NNRP_CONFORMANCE_SOURCE_COMMIT: 685505dc0624f68ff4d660c78d24ea7e9b1b0290
+      NNRP_DOC_SOURCE_COMMIT: 3439ded0d318bd736f6485b17f2563fae77627bf
       NNRP_PY_RELEASE_PYTHON_VERSION: ${{ github.event_name == 'workflow_dispatch' && inputs.python_version || vars.NNRP_PY_RELEASE_PYTHON_VERSION || '3.11' }}
 
     steps:
@@ -99,6 +101,30 @@ jobs:
             echo "Manual PyPI publishing requires create_tag=true so package publication cannot start from an untagged ref."
             exit 1
           fi
+
+      - name: Validate immutable release identity
+        env:
+          CHECK_PYPI: ${{ (github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.publish_to_pypi)) && (env.PYPI_PUBLISH_MODE == 'trusted' || (env.PYPI_PUBLISH_MODE == 'token' && env.PYPI_API_TOKEN != '')) }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          git fetch origin main --tags
+          arguments=(
+            --expected-ref origin/main
+            --tag "${{ steps.version.outputs.tag_name }}"
+            --package nnrp-py
+            --version "${{ steps.version.outputs.package_version }}"
+          )
+          if [ "$CHECK_PYPI" = "true" ]; then
+            arguments+=(--check-pypi)
+          fi
+          python scripts/check_release_identity.py "${arguments[@]}"
+
+      - name: Capture release source commit
+        id: source
+        shell: bash
+        run: echo "commit=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
 
       - name: Apply build version
         run: |
@@ -223,11 +249,30 @@ jobs:
             --results artifacts/benchmark/native-runtime-benchmark-results.json \
             --thresholds doc/benchmarks/native-runtime-smoke-thresholds.json
 
+      - name: Build release manifest
+        run: >-
+          python scripts/release_manifest.py build
+          --dist dist
+          --output artifacts/release/release-manifest.json
+          --package nnrp-py
+          --version "${{ steps.version.outputs.package_version }}"
+          --tag "${{ steps.version.outputs.tag_name }}"
+          --repository "${{ github.repository }}"
+          --source-commit "${{ steps.source.outputs.commit }}"
+          --rust-version "$NNRP_RS_NATIVE_VERSION"
+          --rust-source-commit "$NNRP_RS_SOURCE_COMMIT"
+          --rust-release-run-id "$NNRP_RS_RELEASE_RUN_ID"
+          --conformance-commit "$NNRP_CONFORMANCE_SOURCE_COMMIT"
+          --documentation-commit "$NNRP_DOC_SOURCE_COMMIT"
+
       - name: Upload workflow artifacts
         uses: actions/upload-artifact@v6
         with:
           name: nnrp-py-wheels-${{ steps.version.outputs.package_version }}
-          path: dist/*.whl
+          path: |
+            dist/*.whl
+            dist/*.tar.gz
+            artifacts/release/release-manifest.json
           if-no-files-found: error
           retention-days: 14
 
@@ -246,14 +291,6 @@ jobs:
             git push origin "$tag"
           fi
 
-      - name: Publish GitHub release
-        if: github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.create_tag && inputs.publish_github_release)
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: ${{ steps.version.outputs.tag_name }}
-          name: ${{ steps.version.outputs.release_name }}
-          files: dist/*.whl
-
       - name: Publish to PyPI with Trusted Publisher
         if: (github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.create_tag && inputs.publish_to_pypi)) && env.PYPI_PUBLISH_MODE == 'trusted'
         uses: pypa/gh-action-pypi-publish@release/v1
@@ -263,3 +300,63 @@ jobs:
         uses: pypa/gh-action-pypi-publish@release/v1
         with:
           password: ${{ env.PYPI_API_TOKEN }}
+
+      - name: Verify public PyPI release from a fresh environment
+        if: (github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.create_tag && inputs.publish_to_pypi)) && (env.PYPI_PUBLISH_MODE == 'trusted' || (env.PYPI_PUBLISH_MODE == 'token' && env.PYPI_API_TOKEN != ''))
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          mkdir -p artifacts/public-pypi-download
+          for attempt in $(seq 1 20); do
+            rm -f artifacts/public-pypi-download/*
+            if python -m pip download \
+              --no-cache-dir \
+              --no-deps \
+              --only-binary=:all: \
+              --index-url https://pypi.org/simple \
+              --dest artifacts/public-pypi-download \
+              "nnrp-py==${{ steps.version.outputs.package_version }}"; then
+              break
+            fi
+            if [ "$attempt" -eq 20 ]; then
+              echo "Published package did not become available from public PyPI."
+              exit 1
+            fi
+            sleep 15
+          done
+
+          public_wheel="$(find artifacts/public-pypi-download -maxdepth 1 -type f -name '*.whl' -print -quit)"
+          if [ -z "$public_wheel" ]; then
+            echo "Public PyPI download did not produce a wheel."
+            exit 1
+          fi
+          python scripts/release_manifest.py verify \
+            --manifest artifacts/release/release-manifest.json \
+            --distribution "$public_wheel"
+
+          python -m venv artifacts/public-pypi-venv
+          artifacts/public-pypi-venv/bin/python -m pip install --upgrade pip
+          artifacts/public-pypi-venv/bin/python -m pip install \
+            "$public_wheel" \
+            pytest \
+            pytest-asyncio \
+            cryptography
+          mkdir -p artifacts/public-pypi-e2e-case
+          cp tests/test_native_artifact_e2e.py artifacts/public-pypi-e2e-case/test_native_artifact_e2e.py
+          (
+            cd artifacts/public-pypi-e2e-case
+            NNRP_NATIVE_E2E=1 ../public-pypi-venv/bin/python -m pytest test_native_artifact_e2e.py -q
+          )
+
+      - name: Publish GitHub release
+        if: github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.create_tag && inputs.publish_github_release)
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.version.outputs.tag_name }}
+          name: ${{ steps.version.outputs.release_name }}
+          prerelease: ${{ steps.version.outputs.is_prerelease }}
+          files: |
+            dist/*.whl
+            dist/*.tar.gz
+            artifacts/release/release-manifest.json

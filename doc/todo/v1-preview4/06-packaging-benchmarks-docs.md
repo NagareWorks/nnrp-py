@@ -51,4 +51,7 @@
 - [x] Run native wheel inspection.
 - [x] Run real bidirectional complete-packet IPC and WebSocket loopbacks against packaged artifacts.
 - [x] Run benchmark smoke thresholds.
+- [x] Reject non-main release sources, conflicting tags, and reused PyPI versions before publication.
+- [x] Publish a release manifest containing source pins and SHA-256 records for every distribution.
+- [x] Download the exact public PyPI wheel into a fresh environment, verify its manifest hash, and rerun native role E2E.
 - [x] Publish only after platform wheel checks pass.

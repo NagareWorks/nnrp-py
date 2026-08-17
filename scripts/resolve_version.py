@@ -41,6 +41,10 @@ def build_release_name(package_version: str) -> str:
     return f"nnrp-py v{package_version}"
 
 
+def is_prerelease(package_version: str) -> bool:
+    return bool(re.search(r"(?:a|b|rc|\.dev)\d*", package_version))
+
+
 def write_outputs(values: dict[str, str], github_output: bool) -> None:
     lines = [f"{key}={value}" for key, value in values.items()]
     if github_output:
@@ -69,6 +73,7 @@ def cmd_show(args: argparse.Namespace) -> None:
             "package_version": package_version,
             "tag_name": build_tag_name(release_version),
             "release_name": build_release_name(package_version),
+            "is_prerelease": str(is_prerelease(package_version)).lower(),
         },
         github_output=args.github_output,
     )

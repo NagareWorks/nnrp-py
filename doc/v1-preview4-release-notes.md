@@ -14,6 +14,10 @@ benchmark documents and are not used as preview4 release criteria.
   wire validation use the same frozen Preview4 suite as the Rust release.
 - Preserves the frozen SDK contract v15 submit, terminal ownership, session-correlation, and route-selection behavior
   while consuming the transport-scoped TCP, QUIC, IPC, and WebSocket artifacts from one reviewed release source.
+- Rejects release candidates whose source is not the current `main` commit, whose tag points elsewhere, or whose package
+  version already exists on PyPI.
+- Publishes a source-pin and distribution-hash manifest, then downloads the public PyPI wheel into a fresh environment
+  and reruns the packaged native role E2E before publishing the GitHub release.
 
 ## 1.0.0rc4.post14
 

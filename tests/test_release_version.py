@@ -67,6 +67,12 @@ def test_build_release_name_uses_complete_package_version() -> None:
     assert resolve_version.build_release_name(package_version) == "nnrp-py v1.0.0rc2.dev2026051842"
 
 
+def test_is_prerelease_distinguishes_preview_and_stable_versions() -> None:
+    assert resolve_version.is_prerelease("1.0.0rc4.post15") is True
+    assert resolve_version.is_prerelease("1.0.0.dev202608171") is True
+    assert resolve_version.is_prerelease("1.0.0") is False
+
+
 def test_write_outputs_prints_values_when_github_output_disabled(capsys: pytest.CaptureFixture[str]) -> None:
     resolve_version.write_outputs(
         {"tag_name": "v1.0.0-preview.2", "release_name": "nnrp-py v1.0.0rc2"},
@@ -120,6 +126,7 @@ def test_cmd_show_writes_all_release_outputs(monkeypatch: pytest.MonkeyPatch) ->
             "package_version": "1.0.0rc2.dev2026051842",
             "tag_name": "v1.0.0-preview.2",
             "release_name": "nnrp-py v1.0.0rc2.dev2026051842",
+            "is_prerelease": "true",
         },
         "github_output": True,
     }
@@ -143,6 +150,7 @@ def test_cmd_show_uses_release_version_for_manual_or_tag_publish(monkeypatch: py
             "package_version": "1.0.0rc2",
             "tag_name": "v1.0.0-preview.2",
             "release_name": "nnrp-py v1.0.0rc2",
+            "is_prerelease": "true",
         },
         "github_output": True,
     }

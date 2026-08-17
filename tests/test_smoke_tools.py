@@ -904,7 +904,7 @@ async def _run_connect_client_control_with_probe_tcp() -> None:
                 certificate_path=certificate_path,
                 private_key_path=private_key_path,
                 ready_event=quic_ready,
-                ack_delay_seconds=(0.03, 0.03, 0.03),
+                ack_delay_seconds=(0.2, 0.2, 0.2),
                 probe_connection_count=3,
             )
         )

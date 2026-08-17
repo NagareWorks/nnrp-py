@@ -58,6 +58,7 @@ packages = ["src/nnrp"]
 [tool.hatch.build.targets.sdist]
 exclude = [
   "/.venv*",
+  "/.uv-cache",
   "/artifacts",
   "/dist",
   "/src/nnrp/native_artifacts",

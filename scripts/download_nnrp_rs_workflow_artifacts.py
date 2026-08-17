@@ -82,7 +82,9 @@ def main() -> int:
     args = parser.parse_args()
 
     verify_run(args.repo, args.workflow_run_id, args.workflow_commit)
-    with tempfile.TemporaryDirectory(prefix="nnrp-rs-workflow-") as temp_dir:
+    temp_parent = args.output.resolve().parent
+    temp_parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix=".nnrp-rs-workflow-", dir=temp_parent) as temp_dir:
         source = Path(temp_dir)
         subprocess.run(
             [

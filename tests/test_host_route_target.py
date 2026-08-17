@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 from contextlib import contextmanager
 from dataclasses import replace
@@ -12,8 +13,10 @@ import pytest
 from nnrp._native_routes import official_provider_metadata
 from nnrp.core import MessageType
 from nnrp.native import (
+    FFI_STATUS_WOULD_BLOCK,
     NATIVE_TRANSPORT_ID_BY_NAME,
     NativeArtifactError,
+    NativeStatus,
     NativeTransportBinding,
     NativeTransportCandidateDiagnostic,
     NativeTransportProbeState,
@@ -22,6 +25,7 @@ from nnrp.native import (
     NativeTransportRejectionReason,
     NativeTransportSelectionError,
     NativeTransportSelectionErrorCode,
+    NativeWouldBlockError,
 )
 from nnrp.tools import host_route_target
 
@@ -379,8 +383,11 @@ def test_run_server_case_reports_success_terminal_failure_and_rollback(
         def as_runtime(self) -> object:
             return SimpleNamespace(header=SimpleNamespace(message_type=MessageType.SESSION_CLOSE))
 
-    async def next_event() -> object:
+    event_timeouts: list[float | None] = []
+
+    async def next_event(timeout: float | None = None) -> object:
         close_calls.append("event")
+        event_timeouts.append(timeout)
         return CloseEvent()
 
     def close_session() -> None:
@@ -412,6 +419,7 @@ def test_run_server_case_reports_success_terminal_failure_and_rollback(
     assert result["terminal"] == "success"
     assert result["route_evidence"]["accepted_sessions"][0]["provider_id"] == "nnrp.transport.tcp.native"
     assert close_calls == ["event", "close"]
+    assert event_timeouts and 0 < event_timeouts[0] <= 0.05
 
     terminal_routes = (route("tcp", failures=("terminal_listener_failure",)),)
     terminal_case = scenario("server", list(terminal_routes))
@@ -514,6 +522,32 @@ def test_transport_binding_availability_state_cannot_be_ambiguous(tmp_path: Path
         NativeTransportBinding(None, tcp_provider)
     with pytest.raises(ValueError, match="must not declare"):
         NativeTransportBinding(object(), tcp_provider, unavailable_diagnostic="unexpected")  # type: ignore[arg-type]
+
+
+def test_finish_peer_close_retries_with_finite_native_poll_timeouts() -> None:
+    poll_timeouts: list[float | None] = []
+    close_calls = 0
+
+    class CloseEvent:
+        def as_runtime(self) -> object:
+            return SimpleNamespace(header=SimpleNamespace(message_type=MessageType.SESSION_CLOSE))
+
+    class Session:
+        async def next_event(self, timeout: float | None = None) -> object:
+            poll_timeouts.append(timeout)
+            if len(poll_timeouts) == 1:
+                raise NativeWouldBlockError(NativeStatus(FFI_STATUS_WOULD_BLOCK))
+            return CloseEvent()
+
+        def close(self) -> None:
+            nonlocal close_calls
+            close_calls += 1
+
+    asyncio.run(host_route_target._finish_peer_close(Session(), timeout_ms=500))
+
+    assert len(poll_timeouts) == 2
+    assert all(timeout is not None and 0 < timeout <= 0.05 for timeout in poll_timeouts)
+    assert close_calls == 1
 
 
 @pytest.mark.parametrize(

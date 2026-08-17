@@ -61,6 +61,7 @@ def test_verify_sdist_accepts_source_only_payload(tmp_path: Path) -> None:
     [
         "artifacts/native-downloads/nnrp.zip",
         "src/nnrp/native_artifacts/windows-x86_64/tcp/nnrp_ffi.dll",
+        ".uv-cache/simple-v20/pypi/example.rkyv",
         ".venv/Lib/site-packages/example.py",
     ],
 )

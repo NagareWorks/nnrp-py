@@ -8,6 +8,7 @@ DEFAULT_MAX_BYTES = 5_000_000
 REQUIRED_MEMBERS = frozenset({"LICENSE", "README.md", "pyproject.toml", "src/nnrp/__init__.py"})
 REJECTED_PREFIXES = (
     ".git",
+    ".uv-cache",
     ".venv",
     "artifacts",
     "build",

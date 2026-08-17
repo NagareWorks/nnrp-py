@@ -116,7 +116,8 @@ def test_release_workflow_rejects_polluted_source_distributions() -> None:
     assert "scripts/verify_sdist.py --dist dist --max-bytes 5000000" in workflow
 
 
-def test_source_distribution_excludes_local_virtual_environments() -> None:
+def test_source_distribution_excludes_local_build_caches() -> None:
     pyproject = (Path(__file__).resolve().parents[1] / "pyproject.toml").read_text(encoding="utf-8")
 
     assert '"/.venv*"' in pyproject
+    assert '"/.uv-cache"' in pyproject

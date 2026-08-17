@@ -23,6 +23,7 @@ from nnrp.native import (
     NativeTransportProvider,
     NativeTransportSelectionError,
     NativeTransportServerSecurity,
+    NativeWouldBlockError,
     discover_native_transport_providers,
     load_native_transport_binding,
 )
@@ -310,12 +311,19 @@ async def _accept_server_transport_names(server: Any, *, count: int, timeout_ms:
 
 
 async def _finish_peer_close(session: Any, *, timeout_ms: int) -> None:
-    async with asyncio.timeout(timeout_ms / 1_000):
-        while True:
-            event = await session.next_event()
-            runtime_event = event.as_runtime()
-            if runtime_event is not None and runtime_event.header.message_type is MessageType.SESSION_CLOSE:
-                break
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + (timeout_ms / 1_000)
+    while True:
+        remaining = deadline - loop.time()
+        if remaining <= 0:
+            raise TimeoutError("timed out waiting for the peer SESSION_CLOSE event")
+        try:
+            event = await session.next_event(timeout=min(remaining, 0.05))
+        except NativeWouldBlockError:
+            continue
+        runtime_event = event.as_runtime()
+        if runtime_event is not None and runtime_event.header.message_type is MessageType.SESSION_CLOSE:
+            break
     session.close()
 
 

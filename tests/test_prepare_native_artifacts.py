@@ -69,6 +69,31 @@ def test_prepare_native_artifacts_installs_directory_packages(tmp_path: Path) ->
     ]
 
 
+def test_prepare_native_artifacts_uses_repo_local_temp_root(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    package_dir = _write_package(
+        tmp_path,
+        "windows-x86_64",
+        os_name="windows",
+        arch="x86_64",
+        library="nnrp_ffi.dll",
+    )
+    observed: list[Path] = []
+    temporary_directory = _MODULE.tempfile.TemporaryDirectory
+
+    def tracked_temporary_directory(*args: object, **kwargs: object):
+        observed.append(Path(str(kwargs["dir"])))
+        return temporary_directory(*args, **kwargs)
+
+    monkeypatch.setattr(_MODULE.tempfile, "TemporaryDirectory", tracked_temporary_directory)
+
+    prepare_native_artifacts([package_dir], tmp_path / "out")
+
+    assert observed == [_MODULE.DEFAULT_TEMP_ROOT]
+
+
 def test_prepare_native_artifacts_keeps_split_transport_artifacts_side_by_side(tmp_path: Path) -> None:
     tcp_package = _write_package(
         tmp_path,

@@ -161,6 +161,7 @@ def test_main_downloads_verified_workflow_artifacts(tmp_path: Path, monkeypatch:
 
     def fake_run(arguments: list[str], **_kwargs: object) -> object:
         download_dir = Path(arguments[arguments.index("--dir") + 1])
+        assert download_dir.parent == output.resolve().parent
         lines: list[str] = []
         for transport in module.TRANSPORTS:
             archive = download_dir / f"nnrp-ffi-transport-{transport}-native-linux-x86_64-{version}.zip"

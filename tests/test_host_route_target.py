@@ -10,6 +10,7 @@ from typing import Any
 import pytest
 
 from nnrp._native_routes import official_provider_metadata
+from nnrp.core import MessageType
 from nnrp.native import (
     NATIVE_TRANSPORT_ID_BY_NAME,
     NativeArtifactError,
@@ -372,7 +373,24 @@ def test_run_server_case_reports_success_terminal_failure_and_rollback(
     assert isinstance(success_fixture, dict)
     routes = (route("tcp"),)
     resolved_routes = (dict(route("tcp"), locator="tcp://127.0.0.1:0"),)
-    session = SimpleNamespace(active_transport_name="tcp", close=lambda: None)
+    close_calls: list[str] = []
+
+    class CloseEvent:
+        def as_runtime(self) -> object:
+            return SimpleNamespace(header=SimpleNamespace(message_type=MessageType.SESSION_CLOSE))
+
+    async def next_event() -> object:
+        close_calls.append("event")
+        return CloseEvent()
+
+    def close_session() -> None:
+        close_calls.append("close")
+
+    session = SimpleNamespace(
+        active_transport_name="tcp",
+        next_event=next_event,
+        close=close_session,
+    )
     async def accept(_opts: object) -> object:
         return session
 
@@ -393,6 +411,7 @@ def test_run_server_case_reports_success_terminal_failure_and_rollback(
     )
     assert result["terminal"] == "success"
     assert result["route_evidence"]["accepted_sessions"][0]["provider_id"] == "nnrp.transport.tcp.native"
+    assert close_calls == ["event", "close"]
 
     terminal_routes = (route("tcp", failures=("terminal_listener_failure",)),)
     terminal_case = scenario("server", list(terminal_routes))

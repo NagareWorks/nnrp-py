@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Any
 
 from nnrp.client import NativeClientOptions, NativeClientProviderRoute, connect_native_client_connection
-from nnrp.core import TransportPolicy
+from nnrp.core import MessageType, TransportPolicy
 from nnrp.native import (
     NativeArtifactError,
     NativeRuntimeError,
@@ -305,8 +305,18 @@ async def _accept_server_transport_names(server: Any, *, count: int, timeout_ms:
     for _index in range(count):
         session = await server.accept(NativeServerAcceptOptions(timeout_ms=timeout_ms))
         accepted.append(session.active_transport_name)
-        session.close()
+        await _finish_peer_close(session, timeout_ms=timeout_ms)
     return accepted
+
+
+async def _finish_peer_close(session: Any, *, timeout_ms: int) -> None:
+    async with asyncio.timeout(timeout_ms / 1_000):
+        while True:
+            event = await session.next_event()
+            runtime_event = event.as_runtime()
+            if runtime_event is not None and runtime_event.header.message_type is MessageType.SESSION_CLOSE:
+                break
+    session.close()
 
 
 def _binding_for_route(route: Mapping[str, Any]) -> NativeTransportBinding:

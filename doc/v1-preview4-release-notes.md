@@ -10,7 +10,7 @@ benchmark documents and are not used as preview4 release criteria.
 
 - Pins the immutable Rust `1.0.0-preview.4.23` release at merge commit `00074cf3c09002de940f011e229de729aa377e88`
   and release run `32009630987`, retaining ABI `4.4.0`.
-- Pins Conformance commit `685505dc0624f68ff4d660c78d24ea7e9b1b0290` so adapter and independent-process
+- Pins Conformance commit `0167a48d0af7520358575c6bcf9833c053efc403` so adapter and independent-process
   wire validation use the same frozen Preview4 suite as the Rust release.
 - Preserves the frozen SDK contract v15 submit, terminal ownership, session-correlation, and route-selection behavior
   while consuming the transport-scoped TCP, QUIC, IPC, and WebSocket artifacts from one reviewed release source.

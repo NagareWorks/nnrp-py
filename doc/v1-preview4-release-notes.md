@@ -6,6 +6,16 @@ runtime-object, transport-provider, and wire-conformance surfaces needed by NNRP
 This document is the preview4 release note entry point. Historical preview3 performance notes remain in their own
 benchmark documents and are not used as preview4 release criteria.
 
+## Unreleased
+
+- Freezes `send_trace_context(metadata, body=b"", *, operation_id=None)` so omitted operations use session frame `0`
+  and supplied active operations reuse their `FRAME_SUBMIT` frame id on both client and server sessions.
+- Runs adapter and independent-process wire validation against Conformance commit
+  `4f1632d9deb924ce8d90d4f7212dc2310d936320`, including an exact `TRACE_CONTEXT.frame_id=1` assertion for the
+  operation-scoped cancellation scenario.
+- Pins the SDK API gate to documentation commit `4319692b4c0a697fe5d360e55bafa2b83f5bbb3d` so CI validates the same
+  trace-correlation signature and scope rules implemented by Python.
+
 ## 1.0.0rc4.post15
 
 - Pins the immutable Rust `1.0.0-preview.4.23` release at merge commit `00074cf3c09002de940f011e229de729aa377e88`

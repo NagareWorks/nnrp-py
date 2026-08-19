@@ -244,6 +244,7 @@ def _handle_cancel_server(session: Any, *, timeout_seconds: float) -> None:
             body_bytes=len(_TRACE_BODY),
         ),
         _TRACE_BODY,
+        operation_id=operation.operation_id,
     )
     asyncio.run(
         operation.send_result_drop(

@@ -46,6 +46,21 @@ EXPECTED_SERVER_EVENT_PUMP = {
         "serialized and never race the native event queue"
     ),
 }
+EXPECTED_TRACE_CONTEXT_CORRELATION = {
+    "sessionFrameId": 0,
+    "operationFrameRule": (
+        "A non-zero TRACE_CONTEXT frame_id is the FRAME_SUBMIT frame_id of an active operation and must be rejected "
+        "when unknown or mismatched."
+    ),
+    "metadataOperationId": "forbidden",
+    "headerTraceIdRule": "A non-zero common-header trace_id equals TraceContextMetadata.trace_id.",
+    "sendMethodShapes": {
+        "rust": "send_trace_context(frame_id, metadata, body)",
+        "python": 'send_trace_context(metadata, body=b"", *, operation_id=None)',
+        "javascript": "sendTraceContext(metadata, body?, operationId?)",
+        "csharp": "SendTraceContextAsync(TraceContextMetadata, ReadOnlyMemory<byte>, ulong?, CancellationToken)",
+    },
+}
 EXPECTED_SERVER_OPERATION_INVARIANTS = [
     "submit.header.message_type is frame_submit",
     "submit.metadata is the frame_submit metadata variant",
@@ -276,6 +291,22 @@ def method_return_annotation(class_node: ast.ClassDef, name: str) -> str | None:
     for node in class_node.body:
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == name:
             return None if node.returns is None else ast.unparse(node.returns)
+    raise SystemExit(f"Python SDK is missing {class_node.name}.{name}")
+
+
+def method_defaults(class_node: ast.ClassDef, name: str) -> tuple[list[str], list[str | None]]:
+    for node in class_node.body:
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == name:
+            positional = [ast.unparse(default) for default in node.args.defaults]
+            keyword_only = [None if default is None else ast.unparse(default) for default in node.args.kw_defaults]
+            return positional, keyword_only
+    raise SystemExit(f"Python SDK is missing {class_node.name}.{name}")
+
+
+def method_keyword_only_parameters(class_node: ast.ClassDef, name: str) -> list[str]:
+    for node in class_node.body:
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == name:
+            return [argument.arg for argument in node.args.kwonlyargs]
     raise SystemExit(f"Python SDK is missing {class_node.name}.{name}")
 
 
@@ -780,6 +811,14 @@ def check_contract(contract_path: Path, source_root: Path) -> None:
         server_event_pump == EXPECTED_SERVER_EVENT_PUMP,
         "server event-pump semantics drifted",
     )
+    trace_context_correlation = require_mapping(
+        role_surfaces.get("traceContextCorrelation"),
+        "trace-context correlation contract must be an object",
+    )
+    require(
+        trace_context_correlation == EXPECTED_TRACE_CONTEXT_CORRELATION,
+        "trace-context correlation semantics drifted",
+    )
 
     runtime_module = parse_module(source_root / "src" / "nnrp" / "runtime" / "types.py")
     runtime_public_module = parse_module(source_root / "src" / "nnrp" / "runtime" / "__init__.py")
@@ -1119,6 +1158,14 @@ def check_contract(contract_path: Path, source_root: Path) -> None:
         and method_return_annotation(native_server_session, "receive_submit") == "NativeRuntimeServerOperation",
         "NativeRuntimeServerSession.receive_submit drifted",
     )
+    for trace_owner in (session, native_server_session):
+        require(
+            method_parameters(trace_owner, "send_trace_context") == ["self", "metadata", "body", "operation_id"]
+            and method_keyword_only_parameters(trace_owner, "send_trace_context") == ["operation_id"]
+            and method_defaults(trace_owner, "send_trace_context") == (["b''"], ["None"])
+            and method_return_annotation(trace_owner, "send_trace_context") == "None",
+            f"Python {trace_owner.name}.send_trace_context signature drifted",
+        )
 
     client_exports = exported_names(client_public_module)
     require(

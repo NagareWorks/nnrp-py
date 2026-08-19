@@ -69,8 +69,8 @@ class _FakeSession:
         self.calls.append(("next_event", timeout))
         return self.next_events.pop(0)
 
-    def send_trace_context(self, metadata, body=b"") -> None:
-        self.calls.append(("trace", (metadata, body)))
+    def send_trace_context(self, metadata, body=b"", *, operation_id=None) -> None:
+        self.calls.append(("trace", (metadata, body, operation_id)))
 
     def report_cache_miss(self, metadata) -> None:
         self.calls.append(("cache_miss", metadata))
@@ -349,7 +349,9 @@ def test_server_handlers_exchange_typed_control_frames(monkeypatch: pytest.Monke
         [MessageType.PRIORITY_UPDATE, MessageType.EXPIRE_AT],
         [MessageType.CAPABILITY_NEGOTIATION, MessageType.ROUTE_HINT, MessageType.CACHE_REFERENCE],
     ]
-    assert any(name == "trace" for name, _ in session.calls)
+    trace_calls = [payload for name, payload in session.calls if name == "trace"]
+    assert len(trace_calls) == 1
+    assert trace_calls[0][2] == 401
     assert sum(name == "drop" for name, _ in session.calls) == 2
     drop_reasons = [metadata.drop_reason_code for name, metadata in session.calls if name == "drop"]
     assert drop_reasons == [ResultDropReasonCode.PEER_CANCELLED, ResultDropReasonCode.SUPERSEDED]

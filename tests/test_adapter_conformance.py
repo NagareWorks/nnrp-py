@@ -829,6 +829,7 @@ def test_adapter_smoke_backend_bootstrap_and_closed_session_guards() -> None:
             ),
         )
     ]
+    assert session.control_frame_ids == [None]
     assert session.cancelled_frames == [10]
     with pytest.raises(RuntimeError, match="closed"):
         session.cancel(frame_id=10)

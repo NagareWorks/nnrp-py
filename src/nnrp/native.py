@@ -5183,8 +5183,11 @@ class NativeRuntimeSession:
         self,
         metadata: TraceContextMetadata,
         body: bytes | bytearray | memoryview = b"",
+        *,
+        operation_id: int | None = None,
     ) -> None:
-        self._send_runtime_frame(MessageType.TRACE_CONTEXT, metadata, body)
+        frame_id = 0 if operation_id is None else self._operation_frame_id(operation_id, MessageType.TRACE_CONTEXT)
+        self._send_runtime_frame(MessageType.TRACE_CONTEXT, metadata, body, frame_id=frame_id)
 
     def declare_object(
         self,
@@ -5354,6 +5357,9 @@ class NativeRuntimeSession:
                     f"{message_type.name} requires an operation-scoped non-zero operation_id",
                 )
             return 0
+        return self._operation_frame_id(operation_id, message_type)
+
+    def _operation_frame_id(self, operation_id: int, message_type: MessageType) -> int:
         with self._operation_lock:
             try:
                 return self._operation_frames[operation_id]
@@ -5803,8 +5809,11 @@ class NativeRuntimeServerSession:
         self,
         metadata: TraceContextMetadata,
         body: bytes | bytearray | memoryview = b"",
+        *,
+        operation_id: int | None = None,
     ) -> None:
-        self._send_runtime_frame(MessageType.TRACE_CONTEXT, metadata, body)
+        frame_id = 0 if operation_id is None else self._operation_frame_id(operation_id, MessageType.TRACE_CONTEXT)
+        self._send_runtime_frame(MessageType.TRACE_CONTEXT, metadata, body, frame_id=frame_id)
 
     def send_recoverable_error(
         self,
@@ -5879,16 +5888,27 @@ class NativeRuntimeServerSession:
         message_type: MessageType,
         metadata: _FixedRuntimeMetadata | CacheInvalidateMetadata,
         tail: bytes | bytearray | memoryview = b"",
+        *,
+        frame_id: int | None = None,
     ) -> None:
         self._ensure_open()
         payload = _encode_native_runtime_frame(message_type, metadata, tail)
         payload_view, _payload_owner = _buffer_view_from_payload(payload)
-        frame_id = self._runtime_frame_id(message_type, metadata)
-        request = _NnrpRuntimeFrameSendRequest(self.handle.to_ffi(), int(message_type), frame_id, payload_view)
+        selected_frame_id = self._runtime_frame_id(message_type, metadata) if frame_id is None else frame_id
+        request = _NnrpRuntimeFrameSendRequest(
+            self.handle.to_ffi(),
+            int(message_type),
+            selected_frame_id,
+            payload_view,
+        )
         status = self.entrypoints.runtime_frame_send(request)
         raise_for_native_status(status)
-        if _runtime_operation_id(message_type, metadata) is None:
-            object.__setattr__(self, "_next_runtime_frame_id", 1 if frame_id == 0xFFFFFFFF else frame_id + 1)
+        if frame_id is None and _runtime_operation_id(message_type, metadata) is None:
+            object.__setattr__(
+                self,
+                "_next_runtime_frame_id",
+                1 if selected_frame_id == 0xFFFFFFFF else selected_frame_id + 1,
+            )
 
     def _send_operation_runtime_frame(
         self,
@@ -5930,6 +5950,9 @@ class NativeRuntimeServerSession:
                     f"{message_type.name} requires an operation-scoped non-zero operation_id",
                 )
             return 0
+        return self._operation_frame_id(operation_id, message_type)
+
+    def _operation_frame_id(self, operation_id: int, message_type: MessageType) -> int:
         with self._operation_lock:
             try:
                 return self._operation_frames[operation_id]

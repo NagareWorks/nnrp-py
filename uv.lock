@@ -501,7 +501,7 @@ wheels = [
 
 [[package]]
 name = "nnrp-py"
-version = "1.0.0rc4.post15"
+version = "1.0.0rc4.post16"
 source = { editable = "." }
 dependencies = [
     { name = "aioquic" },

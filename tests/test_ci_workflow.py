@@ -11,6 +11,8 @@ def _read_ci_workflow() -> str:
 def test_ci_runs_unit_tests_with_incremental_coverage_gate() -> None:
     workflow = _read_ci_workflow()
 
+    assert "ruff check src tests scripts" in workflow
+    assert "ruff check ." not in workflow
     assert "Test with coverage" in workflow
     assert "pytest @pytestArgs" in workflow
     assert "--cov=src/nnrp" in workflow
@@ -82,9 +84,9 @@ def test_ci_runs_independent_process_wire_conformance() -> None:
     workflow = _read_ci_workflow()
 
     assert "wire-conformance:" in workflow
-    assert "NNRP_DOC_SOURCE_COMMIT: 3439ded0d318bd736f6485b17f2563fae77627bf" in workflow
-    assert "NNRP_CONFORMANCE_SOURCE_COMMIT: 685505dc0624f68ff4d660c78d24ea7e9b1b0290" in workflow
-    assert "NNRP_RS_SOURCE_COMMIT: 00074cf3c09002de940f011e229de729aa377e88" in workflow
+    assert "NNRP_DOC_SOURCE_COMMIT: 4319692b4c0a697fe5d360e55bafa2b83f5bbb3d" in workflow
+    assert "NNRP_CONFORMANCE_SOURCE_COMMIT: efb0d965d5a18d0a86fd50cb69efccce0b43c089" in workflow
+    assert "NNRP_RS_SOURCE_COMMIT: 8979c5b968a159ccea2ad0106573cc384ca38dbe" in workflow
     assert workflow.count("ref: ${{ env.NNRP_DOC_SOURCE_COMMIT }}") == 1
     assert workflow.count("ref: ${{ env.NNRP_CONFORMANCE_SOURCE_COMMIT }}") == 3
     assert "Checkout pinned nnrp-rs source" in workflow

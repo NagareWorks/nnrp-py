@@ -828,9 +828,13 @@ class _AdapterCaseExecution:
 
     def _execute_runtime_cancel_abort(self) -> dict[str, Any]:
         session = self._open_session(self._connect())
+        operation = session.submit_operation(_token_submit_request(10, 101, b"trace-scope"))
+        session.send_trace_context(
+            TraceContextMetadata(100, 2, 1, 3, 0, 0),
+            operation_id=operation.operation_id,
+        )
         session.cancel_operation(ControlRequestMetadata(10, 1, 1, RuntimeRole.CLIENT, 0, 0))
         session.abort_operation(ControlRequestMetadata(10, 2, 2, RuntimeRole.SCHEDULER, 0, 0))
-        session.send_trace_context(TraceContextMetadata(100, 2, 1, 3, 0, 0))
         drop = ResultDropReasonMetadata(10, 1, ResultDropReasonCode.PEER_CANCELLED, RuntimeRole.RUNTIME, 0, 0)
         decoded = decode_runtime_control_metadata(
             MessageType.RESULT_DROP_REASON,
@@ -839,6 +843,7 @@ class _AdapterCaseExecution:
         return self._evidence(
             "runtime-cancel-abort",
             session_id=_runtime_id(session),
+            trace_frame_id=session.control_frame_ids[0],
             terminal_reason=int(decoded.metadata.drop_reason_code),
         )
 
@@ -1238,6 +1243,7 @@ class _AdapterSmokeSession:
     schema_version: int
     operations: list[_AdapterSmokeOperation] = field(default_factory=list)
     controls: list[tuple[int, bytes]] = field(default_factory=list)
+    control_frame_ids: list[int | None] = field(default_factory=list)
     cancelled_frames: list[int] = field(default_factory=list)
     closed: bool = False
 
@@ -1301,13 +1307,27 @@ class _AdapterSmokeSession:
         self._ensure_open()
         self.cancelled_frames.append(frame_id)
 
-    def _send_runtime_frame(self, message_type: MessageType, metadata: Any, tail: bytes = b"") -> None:
+    def _send_runtime_frame(
+        self,
+        message_type: MessageType,
+        metadata: Any,
+        tail: bytes = b"",
+        *,
+        frame_id: int | None = None,
+    ) -> None:
         self._ensure_open()
         if message_type in self._OBJECT_MESSAGE_TYPES:
             payload = encode_runtime_object_metadata(message_type, metadata, tail=tail)
         else:
             payload = encode_runtime_control_metadata(message_type, metadata, tail=tail)
         self.controls.append((int(message_type), payload))
+        self.control_frame_ids.append(frame_id)
+
+    def _operation_frame_id(self, operation_id: int, message_type: MessageType) -> int:
+        for operation in reversed(self.operations):
+            if operation.operation_id == operation_id:
+                return operation.frame_id
+        raise ValueError(f"{message_type.name} references inactive operation {operation_id}")
 
     def close(self) -> None:
         self._ensure_open()

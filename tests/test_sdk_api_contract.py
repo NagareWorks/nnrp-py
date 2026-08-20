@@ -297,6 +297,7 @@ def frozen_contract() -> dict[str, object]:
                     "serialized and never race the native event queue"
                 ),
             },
+            "traceContextCorrelation": copy.deepcopy(checker.EXPECTED_TRACE_CONTEXT_CORRELATION),
         },
     }
 
@@ -334,6 +335,7 @@ def test_rejects_contract_version_and_role_surface_drift() -> None:
     for surface, diagnostic in (
         ("clientSubmitWait", "client submit-wait contract must be an object"),
         ("serverEventPump", "server event-pump contract must be an object"),
+        ("traceContextCorrelation", "trace-context correlation contract must be an object"),
     ):
         contract = frozen_contract()
         contract["roleSurfaces"][surface] = None
@@ -356,6 +358,14 @@ def test_rejects_contract_version_and_role_surface_drift() -> None:
     with (
         tempfile.TemporaryDirectory() as directory,
         pytest.raises(SystemExit, match="server event-pump semantics drifted"),
+    ):
+        checker.check_contract(write_contract(Path(directory), contract), ROOT)
+
+    contract = frozen_contract()
+    contract["roleSurfaces"]["traceContextCorrelation"]["operationFrameRule"] = "allocate a fresh frame id"
+    with (
+        tempfile.TemporaryDirectory() as directory,
+        pytest.raises(SystemExit, match="trace-context correlation semantics drifted"),
     ):
         checker.check_contract(write_contract(Path(directory), contract), ROOT)
 

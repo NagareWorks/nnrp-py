@@ -4087,7 +4087,7 @@ def test_native_runtime_client_runs_connection_session_submit_close_roundtrip(tm
     assert not hasattr(connection, "control")
     assert library.nnrp_client_cancel.calls[0][0].frame_id == 8
     assert library.nnrp_client_cancel.calls[1][0].frame_id == 7
-    assert library.runtime_frames[0][:2] == (int(MessageType.TRACE_CONTEXT), 1)
+    assert library.runtime_frames[0][:2] == (int(MessageType.TRACE_CONTEXT), 0)
 
 
 def test_native_runtime_client_binds_native_ipc_and_websocket_servers(tmp_path: Path) -> None:
@@ -4188,7 +4188,7 @@ def test_native_runtime_client_binds_native_ipc_and_websocket_servers(tmp_path: 
     assert _read_buffer_view(library.nnrp_server_send_result.calls[0][0].payload) == (
         result_metadata.pack() + b"server-result"
     )
-    assert library.runtime_frames[0][:2] == (int(MessageType.TRACE_CONTEXT), 1)
+    assert library.runtime_frames[0][:2] == (int(MessageType.TRACE_CONTEXT), 0)
     assert library.nnrp_server_close.calls[0][0].kind == HANDLE_KIND_SESSION
     assert library.nnrp_client_close_connection.calls[0][0].id == 22
 
@@ -5504,10 +5504,39 @@ def test_native_runtime_client_named_methods_share_one_coarse_frame_abi(tmp_path
         *([110] * 9),
         112,
         113,
-        *range(1, 10),
+        1,
+        2,
+        0,
+        *range(3, 9),
     ]
     assert decode_runtime_control_metadata(MessageType.CANCEL, library.runtime_frames[8][2]).tail == b"no"
     assert decode_runtime_object_metadata(MessageType.OBJECT_PATCH, library.runtime_frames[15][2]).tail == b"mddata"
+
+
+def test_native_runtime_client_trace_context_resolves_session_and_operation_scope(tmp_path: Path) -> None:
+    artifact = tmp_path / "nnrp_ffi.dll"
+    artifact.write_bytes(b"fake")
+    library = FakeRuntimeLibrary()
+    session = _open_event_session(
+        load_native_client(artifact, library=library).connect(
+            connection_id=12,
+            generation=2,
+            transport_id=TRANSPORT_SLOT_TCP,
+        )
+    )
+    trace = TraceContextMetadata(1, 2, 0, 3, 0, 0)
+    session.submit_operation(_native_submit_request(77, 707, b""))
+
+    session.send_trace_context(trace, operation_id=77)
+    session.send_trace_context(trace)
+
+    assert [(message_type, frame_id) for message_type, frame_id, _payload in library.runtime_frames] == [
+        (int(MessageType.TRACE_CONTEXT), 707),
+        (int(MessageType.TRACE_CONTEXT), 0),
+    ]
+    with pytest.raises(NativeInvalidStateError, match="TRACE_CONTEXT references inactive operation 99"):
+        session.send_trace_context(trace, operation_id=99)
+    assert len(library.runtime_frames) == 2
 
 
 def test_native_runtime_client_uses_frame_zero_for_session_scoped_messages(tmp_path: Path) -> None:
@@ -5695,19 +5724,50 @@ def test_native_runtime_server_named_methods_share_one_coarse_frame_abi(tmp_path
     assert [frame_id for _message_type, frame_id, _payload in library.runtime_frames] == [
         1,
         2,
+        0,
         3,
         4,
         5,
+        0,
+        0,
         6,
-        0,
-        0,
         7,
         8,
         9,
         10,
-        11,
     ]
     assert decode_runtime_object_metadata(MessageType.OBJECT_DELTA, library.runtime_frames[9][2]).tail == b"mddata"
+
+
+def test_native_runtime_server_trace_context_resolves_session_and_operation_scope(tmp_path: Path) -> None:
+    artifact = tmp_path / "nnrp_ffi.dll"
+    artifact.write_bytes(b"fake")
+    library = FakeRuntimeLibrary()
+    session = (
+        load_native_client(artifact, library=library)
+        .bind_server(
+            server_id=21,
+            generation=2,
+            transport_id=TRANSPORT_SLOT_IPC,
+        )
+        .accept_session(
+            session_handle_id=42,
+            generation=3,
+        )
+    )
+    trace = TraceContextMetadata(1, 2, 0, 3, 0, 0)
+    session._remember_operation_frame(88, 808)
+
+    session.send_trace_context(trace, operation_id=88)
+    session.send_trace_context(trace)
+
+    assert [(message_type, frame_id) for message_type, frame_id, _payload in library.runtime_frames] == [
+        (int(MessageType.TRACE_CONTEXT), 808),
+        (int(MessageType.TRACE_CONTEXT), 0),
+    ]
+    with pytest.raises(NativeInvalidStateError, match="TRACE_CONTEXT references inactive operation 99"):
+        session.send_trace_context(trace, operation_id=99)
+    assert len(library.runtime_frames) == 2
 
 
 def test_native_runtime_server_correlates_operation_object_messages(tmp_path: Path) -> None:

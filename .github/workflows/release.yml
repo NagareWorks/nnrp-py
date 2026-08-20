@@ -13,7 +13,7 @@ on:
       rust_native_version:
         description: nnrp-rs native artifact version to embed in wheels
         required: true
-        default: 1.0.0-preview.4.23
+        default: 1.0.0-preview.4.24
       create_tag:
         description: Create and push the resolved release tag before publishing
         required: true
@@ -48,11 +48,11 @@ jobs:
     env:
       PYPI_PUBLISH_MODE: ${{ vars.PYPI_PUBLISH_MODE || 'disabled' }}
       PYPI_API_TOKEN: ${{ secrets.PYPI_API_TOKEN }}
-      NNRP_RS_NATIVE_VERSION: ${{ github.event_name == 'workflow_dispatch' && inputs.rust_native_version || vars.NNRP_RS_NATIVE_VERSION || '1.0.0-preview.4.23' }}
-      NNRP_RS_RELEASE_RUN_ID: "32009630987"
-      NNRP_RS_SOURCE_COMMIT: 00074cf3c09002de940f011e229de729aa377e88
-      NNRP_CONFORMANCE_SOURCE_COMMIT: 685505dc0624f68ff4d660c78d24ea7e9b1b0290
-      NNRP_DOC_SOURCE_COMMIT: 3439ded0d318bd736f6485b17f2563fae77627bf
+      NNRP_RS_NATIVE_VERSION: ${{ github.event_name == 'workflow_dispatch' && inputs.rust_native_version || vars.NNRP_RS_NATIVE_VERSION || '1.0.0-preview.4.24' }}
+      NNRP_RS_RELEASE_RUN_ID: "32331954684"
+      NNRP_RS_SOURCE_COMMIT: 8979c5b968a159ccea2ad0106573cc384ca38dbe
+      NNRP_CONFORMANCE_SOURCE_COMMIT: efb0d965d5a18d0a86fd50cb69efccce0b43c089
+      NNRP_DOC_SOURCE_COMMIT: 4319692b4c0a697fe5d360e55bafa2b83f5bbb3d
       NNRP_PY_RELEASE_PYTHON_VERSION: ${{ github.event_name == 'workflow_dispatch' && inputs.python_version || vars.NNRP_PY_RELEASE_PYTHON_VERSION || '3.11' }}
 
     steps:

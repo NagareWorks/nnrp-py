@@ -6,13 +6,15 @@ runtime-object, transport-provider, and wire-conformance surfaces needed by NNRP
 This document is the preview4 release note entry point. Historical preview3 performance notes remain in their own
 benchmark documents and are not used as preview4 release criteria.
 
-## Unreleased
+## 1.0.0rc4.post16
 
 - Freezes `send_trace_context(metadata, body=b"", *, operation_id=None)` so omitted operations use session frame `0`
   and supplied active operations reuse their `FRAME_SUBMIT` frame id on both client and server sessions.
+- Pins the immutable Rust `1.0.0-preview.4.24` release at merge commit `8979c5b968a159ccea2ad0106573cc384ca38dbe`
+  and release run `32331954684`, retaining ABI `4.4.0` and rejecting operation-scoped trace context after terminal.
 - Runs adapter and independent-process wire validation against Conformance commit
-  `4f1632d9deb924ce8d90d4f7212dc2310d936320`, including an exact `TRACE_CONTEXT.frame_id=1` assertion for the
-  operation-scoped cancellation scenario.
+  `efb0d965d5a18d0a86fd50cb69efccce0b43c089`, including exact operation correlation before terminal and
+  session-scoped terminal evidence afterward.
 - Pins the SDK API gate to documentation commit `4319692b4c0a697fe5d360e55bafa2b83f5bbb3d` so CI validates the same
   trace-correlation signature and scope rules implemented by Python.
 
@@ -114,7 +116,7 @@ benchmark documents and are not used as preview4 release criteria.
 ## Transport Providers
 
 - Rust preview4 artifacts are transport scoped and expose TCP, QUIC, IPC, and WebSocket capability slots.
-- Python `1.0.0rc4.post15` consumes Rust `1.0.0-preview.4.23` and exposes the frozen provider cost, preference,
+- Python `1.0.0rc4.post16` consumes Rust `1.0.0-preview.4.24` and exposes the frozen provider cost, preference,
   frame-limit, limitation, probe-metrics, and ordered candidate models without a Python-specific weighted score.
 - Multi-provider selection follows the cross-SDK deterministic comparator and reports every eligible or rejected
   candidate; probe samples bind to the stable provider id carried by the owning artifact.
@@ -137,7 +139,7 @@ benchmark documents and are not used as preview4 release criteria.
 
 ## Release Gates
 
-- Python `1.0.0rc4.post15` pins Rust `1.0.0-preview.4.23` and requires the exact ABI `4.4.0`.
+- Python `1.0.0rc4.post16` pins Rust `1.0.0-preview.4.24` and requires the exact ABI `4.4.0`.
 - The release candidate must pass the complete Python suite with at least 90% total and incremental line coverage, all
   selected adapter-conformance cases, all independent-process frame scenarios, and all native host-route scenarios
   without skips or synthesized success paths.

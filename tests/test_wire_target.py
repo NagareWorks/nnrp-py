@@ -351,7 +351,7 @@ def test_server_handlers_exchange_typed_control_frames(monkeypatch: pytest.Monke
     ]
     trace_calls = [payload for name, payload in session.calls if name == "trace"]
     assert len(trace_calls) == 1
-    assert trace_calls[0][2] == 401
+    assert trace_calls[0][2] is None
     assert sum(name == "drop" for name, _ in session.calls) == 2
     drop_reasons = [metadata.drop_reason_code for name, metadata in session.calls if name == "drop"]
     assert drop_reasons == [ResultDropReasonCode.PEER_CANCELLED, ResultDropReasonCode.SUPERSEDED]

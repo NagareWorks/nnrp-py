@@ -6,6 +6,17 @@ runtime-object, transport-provider, and wire-conformance surfaces needed by NNRP
 This document is the preview4 release note entry point. Historical preview3 performance notes remain in their own
 benchmark documents and are not used as preview4 release criteria.
 
+## 1.0.0rc4.post18
+
+- Exposes `transports: Sequence[NativeTransportBinding] | None` on both native client and server role APIs, matching the
+  frozen Preview4 provider-injection contract. An explicit sequence remains authoritative; `None` retains installed
+  official-provider discovery.
+- Updates the independent host-route target to use the public role API and covers the public client/server signatures,
+  unavailable-provider diagnostics, packaged native role exchange, and the complete wire host-route matrix.
+- Retains Rust `1.0.0-preview.4.25`, Conformance commit
+  `d1c2bc6aee489e271a75567c45f56bd966fb90cb`, and documentation commit
+  `4319692b4c0a697fe5d360e55bafa2b83f5bbb3d`; this release changes Python API exposure rather than wire or ABI behavior.
+
 ## 1.0.0rc4.post17
 
 - Pins the immutable Rust `1.0.0-preview.4.25` release at merge commit

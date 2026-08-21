@@ -52,8 +52,8 @@ def test_build_tag_name_uses_short_preview_tag_for_release_candidates() -> None:
 def test_current_release_version_tracks_preview4() -> None:
     release_version = resolve_version.read_release_version()
 
-    assert release_version == "1.0.0rc4.post17"
-    assert resolve_version.build_tag_name(release_version) == "v1.0.0-preview.4.post17"
+    assert release_version == "1.0.0rc4.post18"
+    assert resolve_version.build_tag_name(release_version) == "v1.0.0-preview.4.post18"
 
 
 def test_build_tag_name_keeps_full_version_for_non_preview_release() -> None:
@@ -68,7 +68,7 @@ def test_build_release_name_uses_complete_package_version() -> None:
 
 
 def test_is_prerelease_distinguishes_preview_and_stable_versions() -> None:
-    assert resolve_version.is_prerelease("1.0.0rc4.post17") is True
+    assert resolve_version.is_prerelease("1.0.0rc4.post18") is True
     assert resolve_version.is_prerelease("1.0.0.dev202608171") is True
     assert resolve_version.is_prerelease("1.0.0") is False
 

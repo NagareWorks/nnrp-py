@@ -198,7 +198,7 @@ def _run_client_case(
                 provider_routes=provider_routes,
                 transport_policy=TransportPolicy.AUTO,
             ),
-            _transports=tuple(bindings),
+            transports=tuple(bindings),
         )
         connection = connection_scope.__enter__()
         try:
@@ -262,7 +262,7 @@ def _run_server_case(
                 provider_routes=provider_routes,
                 transport_policy=policy,
             ),
-            _transports=tuple(bindings),
+            transports=tuple(bindings),
         ) as server:
             _write_ready_report(scenario, routes, server.bound_provider_endpoints, ready_output)
             if terminal_provider is not None:

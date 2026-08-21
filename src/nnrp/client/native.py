@@ -1080,7 +1080,7 @@ def _resolve_client_transport_bindings(
 def connect_native_client_connection(
     options: NativeClientOptions,
     *,
-    _transports: Sequence[NativeTransportBinding] | None = None,
+    transports: Sequence[NativeTransportBinding] | None = None,
     _artifact_path: Path | str | None = None,
     _root: Path | str | None = None,
     _native_platform: NativePlatform | None = None,
@@ -1098,7 +1098,7 @@ def connect_native_client_connection(
         root=_root,
         native_platform=_native_platform,
         library=_library,
-        transports=_transports,
+        transports=transports,
     )
     if route.endpoint is None:
         raise AssertionError("selected client route must have a resolved endpoint")

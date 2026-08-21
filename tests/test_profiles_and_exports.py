@@ -416,14 +416,14 @@ def test_preview4_host_runtime_api_keeps_request_options_off_packet_helpers() ->
     server_signature = inspect.signature(listen_native_server)
     assert tuple(client_signature.parameters) == (
         "options",
-        "_transports",
+        "transports",
         "_artifact_path",
         "_root",
         "_native_platform",
         "_library",
         "_fallback",
     )
-    assert tuple(server_signature.parameters) == ("options", "_transports")
+    assert tuple(server_signature.parameters) == ("options", "transports")
     assert inspect.iscoroutinefunction(NativeClientConnection.open_session)
     assert inspect.iscoroutinefunction(NativeClientConnection.resume_session)
     for removed_name in ("provider_endpoint", "transport", "security"):

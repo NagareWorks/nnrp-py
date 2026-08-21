@@ -416,7 +416,7 @@ def _resolve_server_transport_bindings(
 def listen_native_server(
     options: NativeServerBootstrapOptions,
     *,
-    _transports: Sequence[NativeTransportBinding] | None = None,
+    transports: Sequence[NativeTransportBinding] | None = None,
 ) -> Iterator[NativeServer]:
     if not isinstance(options, NativeServerBootstrapOptions):
         raise TypeError("options must be NativeServerBootstrapOptions")
@@ -425,7 +425,7 @@ def listen_native_server(
         application_endpoint,
         options.provider_routes,
         options.transport_policy,
-        _transports,
+        transports,
     )
     session_options = options.session_defaults
 

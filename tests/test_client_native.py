@@ -1346,7 +1346,7 @@ def test_explicit_client_transport_bindings_reject_duplicate_kind() -> None:
     assert caught.value.code is NativeTransportSelectionErrorCode.INVALID_EVIDENCE
 
 
-def test_unavailable_client_binding_preserves_provider_identity_without_probe() -> None:
+def test_public_client_transport_binding_preserves_unavailable_provider_identity_without_probe() -> None:
     provider_id = "example.transport.quic.uninstalled"
     binding = FakeTransportBinding(
         "quic",
@@ -1356,16 +1356,11 @@ def test_unavailable_client_binding_preserves_provider_identity_without_probe() 
     )
 
     with pytest.raises(NativeTransportSelectionError) as caught:
-        client_native_module._select_client_transport(
-            client_native_module.parse_nnrp_endpoint("nnrp://localhost"),
-            provider_routes=None,
-            transport_policy="force_quic",
-            artifact_path=None,
-            root=None,
-            native_platform=None,
-            library=None,
+        with _connect_native_client_connection(
+            NativeClientOptions("nnrp://localhost", transport_policy=TransportPolicy.FORCE_QUIC),
             transports=(binding,),
-        )
+        ):
+            pass
 
     candidate = next(value for value in caught.value.candidates if value.provider.id == provider_id)
     assert candidate.local_available is False

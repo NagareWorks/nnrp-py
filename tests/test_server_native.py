@@ -346,7 +346,7 @@ def test_unavailable_server_binding_preserves_provider_identity_without_listen()
     with pytest.raises(NativeTransportSelectionError) as caught:
         with listen_native_server(
             NativeServerBootstrapOptions("nnrp://localhost", transport_policy=TransportPolicy.FORCE_QUIC),
-            _transports=(binding,),
+            transports=(binding,),
         ):
             pass
 

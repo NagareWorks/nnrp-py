@@ -6,6 +6,15 @@ runtime-object, transport-provider, and wire-conformance surfaces needed by NNRP
 This document is the preview4 release note entry point. Historical preview3 performance notes remain in their own
 benchmark documents and are not used as preview4 release criteria.
 
+## 1.0.0rc4.post19
+
+- Exposes public server-session `negotiate_capabilities(...)` and `degrade_profile(...)` methods so applications can
+  answer Preview4 capability requests without using raw runtime-frame internals.
+- Extends the independent wire target to exchange and verify a typed `CAPABILITY_NEGOTIATION` response carrying the
+  frozen compact capability-token body.
+- Retains Rust `1.0.0-preview.4.25` and ABI `4.4.0`; this release completes the documented Python server control
+  surface without changing the wire format or native artifact graph.
+
 ## 1.0.0rc4.post18
 
 - Exposes `transports: Sequence[NativeTransportBinding] | None` on both native client and server role APIs, matching the

@@ -135,6 +135,10 @@ EXPECTED_PYTHON_PROJECTIONS = {
         "server_operation.send_progress": "send_progress",
         "server_operation.send_partial_result": "send_partial_result",
     },
+    "serverCapabilityMethods": {
+        "negotiate_capabilities": "negotiate_capabilities",
+        "degrade_profile": "degrade_profile",
+    },
     "operationLifecycleEvent": "nnrp.runtime.OperationLifecycleEvent",
     "terminalEvent": "nnrp.runtime.NativeTerminalEvent",
     "result": "nnrp.NativeRuntimeResult",
@@ -469,6 +473,14 @@ def require_python_projection_targets(projection: dict[str, Any], source_root: P
                 f"Python frozen role method {operation} -> {method} is missing",
             )
         checked_keys.add("roleMethods")
+
+        server_session = role_owners["server_session"]
+        for operation, method in projection["serverCapabilityMethods"].items():
+            require(
+                hasattr(server_session, method),
+                f"Python frozen server capability method {operation} -> {method} is missing",
+            )
+        checked_keys.add("serverCapabilityMethods")
 
         for type_name, methods in projection["baselineMetadataCodecs"].items():
             codec = resolve_public_target(f"nnrp.core.{type_name}")

@@ -34,6 +34,7 @@ from nnrp.runtime import (
     CacheMissMetadata,
     CacheMissReason,
     CacheReferenceMetadata,
+    CapabilityMetadata,
     NativeRuntimeEvent,
     OperationState,
     PartialResultMetadata,
@@ -45,6 +46,7 @@ from nnrp.runtime import (
     SchedulingMetadata,
     TraceContextMetadata,
 )
+from nnrp.schema import StandardProfile
 from nnrp.server.native import (
     NativeServerAcceptOptions,
     NativeServerBootstrapOptions,
@@ -58,6 +60,8 @@ _RESPONSE_BODY = b"wire-external-result"
 _TRACE_BODY = b"trace"
 _PROGRESS_BODY = b"stage"
 _PARTIAL_BODY = b"partial"
+_CAPABILITY_COSTS_TOKEN = b"control.capability_costs"
+_CAPABILITY_COSTS_BODY = len(_CAPABILITY_COSTS_TOKEN).to_bytes(2, "little") + _CAPABILITY_COSTS_TOKEN
 _DEFAULT_TIMEOUT_SECONDS = 10.0
 
 
@@ -310,9 +314,29 @@ def _handle_priority_server(session: Any, *, timeout_seconds: float) -> None:
 
 def _handle_cache_server(session: Any, *, timeout_seconds: float) -> None:
     operation = asyncio.run(session.receive_submit(timeout=timeout_seconds))
+    capability = _await_server_runtime_frames(
+        session,
+        [MessageType.CAPABILITY_NEGOTIATION],
+        timeout_seconds=timeout_seconds,
+    )[0].metadata.value
+    if not isinstance(capability, CapabilityMetadata):
+        raise RuntimeError("CAPABILITY_NEGOTIATION event did not contain CapabilityMetadata")
+    session.negotiate_capabilities(
+        CapabilityMetadata(
+            profile_id=StandardProfile.TOKEN,
+            capability_count=1,
+            cost_model_id=capability.cost_model_id,
+            preference_rank=capability.preference_rank,
+            limit_bytes=capability.limit_bytes,
+            limit_units=capability.limit_units,
+            body_bytes=len(_CAPABILITY_COSTS_BODY),
+            flags=capability.flags,
+        ),
+        _CAPABILITY_COSTS_BODY,
+    )
     frames = _await_server_runtime_frames(
         session,
-        [MessageType.CAPABILITY_NEGOTIATION, MessageType.ROUTE_HINT, MessageType.CACHE_REFERENCE],
+        [MessageType.ROUTE_HINT, MessageType.CACHE_REFERENCE],
         timeout_seconds=timeout_seconds,
     )
     cache_reference = frames[-1].metadata.value

@@ -5805,6 +5805,20 @@ class NativeRuntimeServerSession:
     def send_credit_update(self, metadata: PressureMetadata) -> None:
         self._send_runtime_frame(MessageType.CREDIT_UPDATE, metadata)
 
+    def negotiate_capabilities(
+        self,
+        metadata: CapabilityMetadata,
+        body: bytes | bytearray | memoryview = b"",
+    ) -> None:
+        self._send_runtime_frame(MessageType.CAPABILITY_NEGOTIATION, metadata, body)
+
+    def degrade_profile(
+        self,
+        metadata: CapabilityMetadata,
+        body: bytes | bytearray | memoryview = b"",
+    ) -> None:
+        self._send_runtime_frame(MessageType.DEGRADE_PROFILE, metadata, body)
+
     def send_trace_context(
         self,
         metadata: TraceContextMetadata,

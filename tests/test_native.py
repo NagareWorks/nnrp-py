@@ -5373,6 +5373,8 @@ def test_native_runtime_sessions_expose_named_preview4_methods_without_raw_frame
     server_methods = {
         "send_backpressure",
         "send_credit_update",
+        "negotiate_capabilities",
+        "degrade_profile",
         "send_trace_context",
         "send_recoverable_error",
         "send_retry_after",
@@ -5666,6 +5668,8 @@ def test_native_runtime_server_named_methods_share_one_coarse_frame_abi(tmp_path
         )
     )
     pressure = PressureMetadata(10, 4, 2, 1, 5, 0)
+    capability_body = b"\x00\x18control.capability_costs"
+    capability = CapabilityMetadata(3, 1, 4, 2, 99, 88, len(capability_body), 0)
     trace = TraceContextMetadata(1, 2, 0, 3, 0, 2)
     recoverable = RecoverableErrorMetadata(20, 21, 22, RuntimeRole.RUNTIME, 0, 23, 24, 25, 26, 2)
     retry = RetryAfterMetadata(10, 1, 100, 10, 2, RuntimeRole.RUNTIME, 0, 2)
@@ -5691,6 +5695,8 @@ def test_native_runtime_server_named_methods_share_one_coarse_frame_abi(tmp_path
 
     session.send_backpressure(pressure)
     session.send_credit_update(pressure)
+    session.negotiate_capabilities(capability, capability_body)
+    session.degrade_profile(capability, capability_body)
     session.send_trace_context(trace, b"tr")
     session.send_recoverable_error(recoverable, b"er")
     session.send_retry_after(retry, b"ra")
@@ -5706,6 +5712,8 @@ def test_native_runtime_server_named_methods_share_one_coarse_frame_abi(tmp_path
     expected_types = [
         MessageType.BACKPRESSURE,
         MessageType.CREDIT_UPDATE,
+        MessageType.CAPABILITY_NEGOTIATION,
+        MessageType.DEGRADE_PROFILE,
         MessageType.TRACE_CONTEXT,
         MessageType.ERROR_RECOVERABLE,
         MessageType.RETRY_AFTER,
@@ -5724,19 +5732,25 @@ def test_native_runtime_server_named_methods_share_one_coarse_frame_abi(tmp_path
     assert [frame_id for _message_type, frame_id, _payload in library.runtime_frames] == [
         1,
         2,
-        0,
         3,
         4,
+        0,
         5,
-        0,
-        0,
         6,
         7,
+        0,
+        0,
         8,
         9,
         10,
+        11,
+        12,
     ]
-    assert decode_runtime_object_metadata(MessageType.OBJECT_DELTA, library.runtime_frames[9][2]).tail == b"mddata"
+    assert decode_runtime_control_metadata(
+        MessageType.CAPABILITY_NEGOTIATION,
+        library.runtime_frames[2][2],
+    ).tail == capability_body
+    assert decode_runtime_object_metadata(MessageType.OBJECT_DELTA, library.runtime_frames[11][2]).tail == b"mddata"
 
 
 def test_native_runtime_server_trace_context_resolves_session_and_operation_scope(tmp_path: Path) -> None:

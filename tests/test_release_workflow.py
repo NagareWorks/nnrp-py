@@ -88,8 +88,8 @@ def test_release_workflow_rejects_reused_identity_and_records_a_bom() -> None:
     assert "--expected-ref origin/main" in workflow
     assert 'arguments+=(--check-pypi)' in workflow
     assert "scripts/release_manifest.py build" in workflow
-    assert "NNRP_CONFORMANCE_SOURCE_COMMIT: d1c2bc6aee489e271a75567c45f56bd966fb90cb" in workflow
-    assert "NNRP_DOC_SOURCE_COMMIT: 4319692b4c0a697fe5d360e55bafa2b83f5bbb3d" in workflow
+    assert "NNRP_CONFORMANCE_SOURCE_COMMIT: 054bcbe6e58c42aec896a9618777a37727023797" in workflow
+    assert "NNRP_DOC_SOURCE_COMMIT: e568de05f0db1bfc914685dc5024722dc0f6f837" in workflow
     assert "artifacts/release/release-manifest.json" in workflow
     assert "prerelease: ${{ steps.version.outputs.is_prerelease }}" in workflow
 

@@ -21,6 +21,7 @@ from nnrp.native import (
 )
 from nnrp.runtime import (
     CacheReferenceMetadata,
+    CapabilityMetadata,
     InFlightPolicy,
     NativeRuntimeEvent,
     OperationLifecycleEvent,
@@ -74,6 +75,9 @@ class _FakeSession:
 
     def report_cache_miss(self, metadata) -> None:
         self.calls.append(("cache_miss", metadata))
+
+    def negotiate_capabilities(self, metadata, body=b"") -> None:
+        self.calls.append(("capabilities", (metadata, body)))
 
     def submit_operation(self, request: SubmitRequest):
         self.calls.append(("submit", request))
@@ -317,12 +321,20 @@ def test_server_handlers_exchange_typed_control_frames(monkeypatch: pytest.Monke
         metadata_bytes=0,
         flags=0,
     )
+    capability = CapabilityMetadata(2, 2, 7, 3, 100, 200, 0, 1)
 
     def await_frames(_session, expected_types, **_kwargs):
         awaited.append(list(expected_types))
+        if expected_types == [MessageType.CAPABILITY_NEGOTIATION]:
+            return [
+                _runtime_event(
+                    MessageType.CAPABILITY_NEGOTIATION,
+                    RuntimeEventMetadataKind.CAPABILITY,
+                    capability,
+                )
+            ]
         if MessageType.CACHE_REFERENCE in expected_types:
             return [
-                SimpleNamespace(metadata=None),
                 SimpleNamespace(metadata=None),
                 _runtime_event(
                     MessageType.CACHE_REFERENCE,
@@ -347,7 +359,8 @@ def test_server_handlers_exchange_typed_control_frames(monkeypatch: pytest.Monke
     assert awaited == [
         [MessageType.CANCEL],
         [MessageType.PRIORITY_UPDATE, MessageType.EXPIRE_AT],
-        [MessageType.CAPABILITY_NEGOTIATION, MessageType.ROUTE_HINT, MessageType.CACHE_REFERENCE],
+        [MessageType.CAPABILITY_NEGOTIATION],
+        [MessageType.ROUTE_HINT, MessageType.CACHE_REFERENCE],
     ]
     trace_calls = [payload for name, payload in session.calls if name == "trace"]
     assert len(trace_calls) == 1
@@ -356,6 +369,13 @@ def test_server_handlers_exchange_typed_control_frames(monkeypatch: pytest.Monke
     drop_reasons = [metadata.drop_reason_code for name, metadata in session.calls if name == "drop"]
     assert drop_reasons == [ResultDropReasonCode.PEER_CANCELLED, ResultDropReasonCode.SUPERSEDED]
     assert any(name == "cache_miss" for name, _ in session.calls)
+    capability_calls = [payload for name, payload in session.calls if name == "capabilities"]
+    assert capability_calls == [
+        (
+            CapabilityMetadata(2, 1, 7, 3, 100, 200, 26, 1),
+            b"\x18\x00control.capability_costs",
+        )
+    ]
     assert any(name == "result" for name, _ in session.calls)
     assert lifecycles == [
         (session, 401, OperationState.CANCELLED),

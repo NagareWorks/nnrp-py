@@ -5668,7 +5668,8 @@ def test_native_runtime_server_named_methods_share_one_coarse_frame_abi(tmp_path
         )
     )
     pressure = PressureMetadata(10, 4, 2, 1, 5, 0)
-    capability_body = b"\x00\x18control.capability_costs"
+    capability_token = b"control.capability_costs"
+    capability_body = len(capability_token).to_bytes(2, "little") + capability_token
     capability = CapabilityMetadata(3, 1, 4, 2, 99, 88, len(capability_body), 0)
     trace = TraceContextMetadata(1, 2, 0, 3, 0, 2)
     recoverable = RecoverableErrorMetadata(20, 21, 22, RuntimeRole.RUNTIME, 0, 23, 24, 25, 26, 2)

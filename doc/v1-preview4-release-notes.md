@@ -6,6 +6,15 @@ runtime-object, transport-provider, and wire-conformance surfaces needed by NNRP
 This document is the preview4 release note entry point. Historical preview3 performance notes remain in their own
 benchmark documents and are not used as preview4 release criteria.
 
+## 1.0.0rc4.post20
+
+- Pins the immutable Rust `1.0.0-preview.4.26` release at merge commit
+  `d45a17238ea9f8dba1bfdd8439416bb97c53180e` and release run `32896006962`, retaining ABI `4.4.0`.
+- Keeps the Python API and wire behavior unchanged while adopting the release whose capability-contract validation is
+  order-independent and whose Conformance target avoids duplicate capability-body reads.
+- Re-runs the complete Python unit, native artifact, adapter-conformance, host-route, and independent-process wire
+  validation against that exact Rust release identity.
+
 ## 1.0.0rc4.post19
 
 - Exposes public server-session `negotiate_capabilities(...)` and `degrade_profile(...)` methods so applications can

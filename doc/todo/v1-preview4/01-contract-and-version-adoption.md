@@ -2,7 +2,7 @@
 
 ## Rust Artifact Baseline
 
-- [x] Pin Rust artifact `1.0.0-preview.4.25` and ABI `4.4.0` used by Python.
+- [x] Pin Rust artifact `1.0.0-preview.4.26` and ABI `4.4.0` used by Python.
 - [x] Probe preview4 protocol version before accepting native artifacts.
 - [x] Probe ABI version before enabling preview4 native paths.
 - [x] Probe transport slots.

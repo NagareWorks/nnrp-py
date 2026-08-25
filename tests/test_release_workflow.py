@@ -14,8 +14,8 @@ def test_release_workflow_manual_ref_defaults_to_main() -> None:
 def test_release_workflow_pins_preview4_rust_native_artifacts() -> None:
     workflow = RELEASE_WORKFLOW.read_text(encoding="utf-8")
 
-    assert "default: 1.0.0-preview.4.25" in workflow
-    assert "vars.NNRP_RS_NATIVE_VERSION || '1.0.0-preview.4.25'" in workflow
+    assert "default: 1.0.0-preview.4.26" in workflow
+    assert "vars.NNRP_RS_NATIVE_VERSION || '1.0.0-preview.4.26'" in workflow
     assert "1.0.0-preview.3.8" not in workflow
 
 
@@ -23,8 +23,8 @@ def test_release_workflow_downloads_all_preview4_native_transport_artifacts() ->
     workflow = RELEASE_WORKFLOW.read_text(encoding="utf-8")
 
     assert "scripts/download_nnrp_rs_workflow_artifacts.py" in workflow
-    assert 'NNRP_RS_RELEASE_RUN_ID: "32365855992"' in workflow
-    assert "NNRP_RS_SOURCE_COMMIT: 35b4ed1e0764623d278035ca1449daeab4192c5c" in workflow
+    assert 'NNRP_RS_RELEASE_RUN_ID: "32896006962"' in workflow
+    assert "NNRP_RS_SOURCE_COMMIT: d45a17238ea9f8dba1bfdd8439416bb97c53180e" in workflow
     assert '--workflow-run-id "$NNRP_RS_RELEASE_RUN_ID"' in workflow
     assert '--workflow-commit "$NNRP_RS_SOURCE_COMMIT"' in workflow
     assert "gh release download" not in workflow

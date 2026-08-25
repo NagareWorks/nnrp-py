@@ -4,11 +4,13 @@ import argparse
 import datetime as dt
 import importlib.util
 import sys
+import tomllib
 from pathlib import Path
 
 import pytest
 
 SCRIPT_PATH = Path(__file__).resolve().parents[1] / "scripts" / "resolve_version.py"
+PROJECT_ROOT = SCRIPT_PATH.parents[1]
 SPEC = importlib.util.spec_from_file_location("resolve_version", SCRIPT_PATH)
 assert SPEC is not None
 assert SPEC.loader is not None
@@ -52,8 +54,17 @@ def test_build_tag_name_uses_short_preview_tag_for_release_candidates() -> None:
 def test_current_release_version_tracks_preview4() -> None:
     release_version = resolve_version.read_release_version()
 
-    assert release_version == "1.0.0rc4.post19"
-    assert resolve_version.build_tag_name(release_version) == "v1.0.0-preview.4.post19"
+    assert release_version == "1.0.0rc4.post20"
+    assert resolve_version.build_tag_name(release_version) == "v1.0.0-preview.4.post20"
+
+
+def test_uv_lock_tracks_project_release_version() -> None:
+    pyproject = tomllib.loads((PROJECT_ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+    lockfile = tomllib.loads((PROJECT_ROOT / "uv.lock").read_text(encoding="utf-8"))
+    project_packages = [package for package in lockfile["package"] if package["name"] == pyproject["project"]["name"]]
+
+    assert len(project_packages) == 1
+    assert project_packages[0]["version"] == pyproject["project"]["version"]
 
 
 def test_build_tag_name_keeps_full_version_for_non_preview_release() -> None:
@@ -68,7 +79,7 @@ def test_build_release_name_uses_complete_package_version() -> None:
 
 
 def test_is_prerelease_distinguishes_preview_and_stable_versions() -> None:
-    assert resolve_version.is_prerelease("1.0.0rc4.post19") is True
+    assert resolve_version.is_prerelease("1.0.0rc4.post20") is True
     assert resolve_version.is_prerelease("1.0.0.dev202608171") is True
     assert resolve_version.is_prerelease("1.0.0") is False
 

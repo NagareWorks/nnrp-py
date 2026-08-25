@@ -86,7 +86,7 @@ def test_ci_runs_independent_process_wire_conformance() -> None:
     assert "wire-conformance:" in workflow
     assert "NNRP_DOC_SOURCE_COMMIT: e568de05f0db1bfc914685dc5024722dc0f6f837" in workflow
     assert "NNRP_CONFORMANCE_SOURCE_COMMIT: 054bcbe6e58c42aec896a9618777a37727023797" in workflow
-    assert "NNRP_RS_SOURCE_COMMIT: 35b4ed1e0764623d278035ca1449daeab4192c5c" in workflow
+    assert "NNRP_RS_SOURCE_COMMIT: d45a17238ea9f8dba1bfdd8439416bb97c53180e" in workflow
     assert workflow.count("ref: ${{ env.NNRP_DOC_SOURCE_COMMIT }}") == 1
     assert workflow.count("ref: ${{ env.NNRP_CONFORMANCE_SOURCE_COMMIT }}") == 3
     assert "Checkout pinned nnrp-rs source" in workflow
